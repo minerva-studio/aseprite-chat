@@ -1,0 +1,101 @@
+import http from 'node:http';
+import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
+import WebSocket, { WebSocketServer } from 'ws';
+
+const maxBytes = 16 * 1024 * 1024;
+
+/** Start a loopback-only WebSocket-to-stdio bridge. Each connection owns its Codex process. */
+export async function createBridge({ port = 4500, command = process.env.CODEX_CLI || 'codex',
+  args = ['app-server', '--stdio'] } = {}) {
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('Invalid local port');
+  const server = http.createServer((request, response) => {
+    const allowed = validRequest(request);
+    response.writeHead(!allowed ? 403 : request.url === '/readyz' ? 200 : 404);
+    response.end(allowed && request.url === '/readyz' ? 'ready\n' : '');
+  });
+  const sockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: maxBytes });
+  let active = null;
+  function validRequest(request) {
+    const authority = `127.0.0.1:${request.socket.localPort}`;
+    const origin = request.headers.origin;
+    return request.socket.remoteAddress === '127.0.0.1' && request.headers.host === authority
+      && (origin === undefined || origin === `ws://${authority}`)
+      && !Object.keys(request.headers).some(key => key.startsWith('sec-fetch-'));
+  }
+  server.on('upgrade', (request, socket, head) => {
+    const status = !validRequest(request) ? 403 : request.url !== '/' ? 404 : active ? 409 : null;
+    if (status) { socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
+    sockets.handleUpgrade(request, socket, head, client => sockets.emit('connection', client));
+  });
+  sockets.on('connection', client => {
+    let child;
+    try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch {
+      client.close(1011, 'Cannot start Codex; check CODEX_CLI and your PATH.');
+      return;
+    }
+    const session = { client, child };
+    active = session;
+    let pendingOutput = Buffer.alloc(0);
+    const fail = reason => { if (client.readyState === WebSocket.OPEN) client.close(1011, reason); };
+    child.on('error', () => fail('Cannot start Codex; check CODEX_CLI and your PATH.'));
+    child.on('exit', () => fail('Codex app-server exited. Reconnect to start it again.'));
+    child.stdin.on('error', () => fail('Codex input closed.'));
+    child.stderr.on('data', bytes => process.stderr.write(bytes));
+    child.stdout.on('data', bytes => {
+      pendingOutput = Buffer.concat([pendingOutput, bytes]);
+      if (pendingOutput.length > maxBytes) { fail('Codex response exceeds message limit.'); return; }
+      let newline;
+      while ((newline = pendingOutput.indexOf(10)) !== -1) {
+        const line = pendingOutput.subarray(0, newline);
+        pendingOutput = pendingOutput.subarray(newline + 1);
+        if (!line.length) continue;
+        if (client.readyState !== WebSocket.OPEN) return;
+        if (client.bufferedAmount > maxBytes) { fail('Client cannot receive Codex output.'); return; }
+        client.send(line, { binary: false });
+      }
+    });
+    client.on('message', (bytes, binary) => {
+      if (binary) { client.close(1003, 'Text JSON frames required.'); return; }
+      try { JSON.parse(bytes.toString('utf8')); }
+      catch { client.close(1007, 'One JSON message per frame required.'); return; }
+      if (child.stdin.destroyed || child.stdin.writableLength > maxBytes) { fail('Codex cannot receive requests.'); return; }
+      // JSON has already been validated: literal CR/LF can only be formatting whitespace.
+      // Preserve the original number spelling and escaped string newlines when forming JSONL.
+      child.stdin.write(bytes.toString('utf8').replace(/[\r\n]/g, ''));
+      child.stdin.write('\n');
+    });
+    client.on('error', () => client.terminate());
+    client.on('close', () => {
+      if (active === session) active = null;
+      child.stdin.destroy();
+      child.kill();
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '127.0.0.1', resolve);
+  });
+  return {
+    port: server.address().port,
+    async close() {
+      for (const client of sockets.clients) client.terminate();
+      await Promise.all([
+        new Promise(resolve => sockets.close(resolve)),
+        new Promise(resolve => { server.close(resolve); server.closeAllConnections(); })
+      ]);
+    }
+  };
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    const bridge = await createBridge({ port: Number(process.env.ASEPRITE_CHAT_PORT || 4500) });
+    console.log(`Aseprite Chat ready at ws://127.0.0.1:${bridge.port}`);
+    console.log('Uses your existing Codex login. Browser origins are rejected. Press Ctrl+C to stop.');
+    let closing = false;
+    const stop = async () => { if (closing) return; closing = true; await bridge.close(); };
+    process.on('SIGINT', stop); process.on('SIGTERM', stop);
+  } catch (error) { console.error(error.message); process.exitCode = 1; }
+}

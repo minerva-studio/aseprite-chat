@@ -1,0 +1,27 @@
+local root = app.fs.filePath(app.fs.filePath(debug.getinfo(1, "S").source:sub(2)))
+local Chat = dofile(app.fs.joinPath(root, "chat.lua"))
+local view = Chat.new({}, {})
+view:show()
+view:add_message("user", "You", "让当前画布的高光暗一点。", false)
+view:add_message("agent", "Codex", string.rep("Streaming plain text · 你好世界\n", 40), false)
+view:set_state("working")
+local timer
+timer = Timer { interval = 0.5, ontick = function()
+  timer:stop()
+  local ok, err = xpcall(function()
+    local called = 0
+    view:request_approval({summary="Native approval test", code="return 'hello'"}, function(accepted)
+      assert(accepted); called = called + 1
+    end)
+    view.approval.finish(true)
+    assert(called == 1 and view.approval == nil)
+    view:close()
+    view:show()
+    view:close()
+  end, debug.traceback)
+  local output = assert(io.open(app.fs.joinPath(root, "work", "gui-chat-result.txt"), "w"))
+  output:write(ok and "PASS native canvas, approval, close/reopen\n" or ("FAIL " .. tostring(err)))
+  output:close()
+  app.exit()
+end }
+timer:start()

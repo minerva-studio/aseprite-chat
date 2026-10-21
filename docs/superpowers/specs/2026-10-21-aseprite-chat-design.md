@@ -1,10 +1,18 @@
 # Aseprite Chat: Native Codex Client Design
 
-Status: ready for user review; product implementation has not started.
+Status: approved for implementation on 2026-10-21. The user accepted the local communication bridge revision below after real direct-connection testing failed.
+
+## Approved transport revision after runtime testing
+
+Real Aseprite WebSocket traffic contains `Origin: ws://127.0.0.1:<port>`, while Codex 0.163.0 rejects any Origin header before initialization. The documented and inspected Aseprite Lua constructor provides no header override. On 2026-10-21 the user accepted adding a local communication bridge to preserve native chat and live unsaved document editing. This revision supersedes references below to direct app-server WebSocket connectivity and a relay-free runtime.
+
+The revised runtime is Aseprite Lua WebSocket -> loopback Node bridge -> Codex app-server stdio. `scripts/server.mjs` starts a separate Codex process per connected client, forwarding JSON frames as JSON lines and protocol output back as text frames. One active client is allowed. Disconnect terminates only that connection's Codex process; reconnect resumes the persisted thread with its tools in a new process. Start with `npm ci --ignore-scripts` once and `npm start`; Node 24 and pinned `ws` 8.22.0 are runtime requirements for the bridge. No shell, MCP server, or additional model API integration is introduced.
+
+The listener binds only 127.0.0.1, validates its exact Host, accepts only no Origin or the exact native ws:// loopback Origin matching its port, and rejects browser http(s)/null/foreign origins and Fetch Metadata headers. It does not disable Codex's browser-origin policy or transparently forward arbitrary browser clients. Each text frame must contain one JSON value; binary/multiple-JSON input and oversized traffic are rejected. Child process errors close the client visibly. Tests must establish those behaviors and actual authenticated inference through the bridge.
 
 ## Goal and accepted scope
 
-Let the user hold a continuous conversation with Codex inside Aseprite and let Codex inspect and edit the currently open sprite, including unsaved edits. Human drawing and agent edits share the running editor's document. The first release uses an independent Lua extension connected directly to a local Codex app-server over WebSocket. Existing MCP projects are references only.
+Let the user hold a continuous conversation with Codex inside Aseprite and let Codex inspect and edit the currently open sprite, including unsaved edits. Human drawing and agent edits share the running editor's document. The first release uses an independent Lua extension connected to local Codex app-server stdio through the approved WebSocket bridge. Existing MCP projects are references only.
 
 The extension provides native plain-text chat, streamed responses, task status, cancellation, document inspection, image previews, and approved Lua execution. It does not save the user's sprite automatically. Collaboration means alternating edits with stale-context detection; simultaneous pixel edits are not merged.
 
@@ -18,7 +26,7 @@ Verified on 2026-10-21:
 - Its `app-server --help` advertises `--listen ws://IP:PORT` and optional WebSocket authentication flags.
 - Its experimental JSON schemas were exported to the operating system temporary directory and inspected. Dynamic tools require `type: "function"`; replies use `contentItems` with `inputText` or `inputImage`, plus `success`.
 
-The CLI/schema inspection establishes the available protocol, not successful runtime interoperability. WebSocket delivery, dialog repainting, live editing, and authenticated model inference remain acceptance tests.
+The CLI/schema inspection establishes the available protocol. Subsequent runtime results, including authenticated inference and live editing, are recorded in `docs/validation.md`.
 
 Primary references:
 
@@ -34,9 +42,9 @@ Primary references:
 
 ## Architecture decision
 
-Use Lua native UI and a direct WebSocket connection to a manually launched local Codex app-server. This matches the agreed architecture and keeps the first executable path small. A separate Python/Node relay would add another process and protocol owner; a Webview would add another UI runtime. Neither is part of this release.
+Use Lua native UI and a WebSocket connection to the local Node bridge. The bridge only adapts transport framing and owns its Codex child process; protocol state stays in the Lua client. A Webview is outside this release.
 
-The initial endpoint is `ws://127.0.0.1:4500`. The plugin accepts only IPv4 loopback endpoints. The user starts the server in a terminal with `codex app-server --listen ws://127.0.0.1:4500`. The plugin neither launches shell commands nor changes the user's Codex configuration or login. An endpoint protected by bearer authentication is outside this release's transport contract because the documented Aseprite WebSocket constructor has no request-header parameter. The extension exposes no incoming Lua execution server.
+The initial endpoint is `ws://127.0.0.1:4500`. The plugin accepts only IPv4 loopback endpoints. The user starts the bridge in a terminal with `npm start` after installing its pinned dependency. The bridge spawns `codex app-server --stdio` without a shell, using the user's existing configuration and login. Bearer-header authentication is outside this release's transport contract because the documented Aseprite WebSocket constructor has no request-header parameter. The extension exposes no incoming Lua execution server.
 
 Use the server's configured default model, with an optional model ID in plugin settings. Explicit model selection must be passed unchanged; an unavailable model produces an error. Do not silently select a different model.
 
@@ -76,6 +84,8 @@ One JSON message is sent per WebSocket text frame, without a `jsonrpc` field. Cl
 
 Separate a socket-object lifetime from a connection generation. A Connect action creates one WebSocket object and a new lifetime token. Its callback captures that token and ignores every event once the token is invalid. Each OPEN on that object, including automatic reconnect, begins a new connection generation, invalidates old request callbacks, and performs initialization again. Each unexpected CLOSE immediately invalidates outstanding requests and pending approvals. Do not create a competing reconnect timer: Aseprite's WebSocket owns retry scheduling.
 
+After initialization, send a WebSocket ping every two seconds. Aseprite 1.3.18.6 may discover an abrupt peer FIN only on a subsequent write. A failed ping invalidates the current generation and pending execution while retaining the socket for native reconnection. Stop the heartbeat on loss, retirement, and before a new OPEN; it does not impose a model-thinking timeout.
+
 Disconnect and window close first invalidate the socket lifetime token, clear the client socket reference, and settle local pending requests, then call `WebSocket:close()`. A late OPEN from that retired object must be closed without sending initialization. A subsequent explicit Connect creates a new socket object. A timeout or malformed protocol message retires the socket through the same path. These rules prevent callbacks from a retired object from reviving an intentionally closed session.
 
 On connection loss, abort pending approvals and mark an in-flight turn interrupted locally; never replay an edit. After reconnect initialization, send `thread/resume` with `threadId` and `excludeTurns: true`. Keep the original tool definitions unchanged: the server persists and restores them from the thread metadata. In the inspected Codex 0.163.0 schema, `ThreadResumeParams` has no `dynamicTools` field; do not send an invented resume parameter. Verify a real tool invocation after resume in the integration test.
@@ -112,7 +122,7 @@ Lua execution is synchronous on Aseprite's UI thread. Stop cancels model generat
 
 Maintain one monotonically increasing revision for the bound sprite. Register `sprite.events` listeners for `change`, `filenamechange`, `layerblendmode`, `layername`, `layeropacity`, and `layervisibility`; every notification increments that revision, including Undo/Redo notifications. Also observe `app.events.sitechange` to invalidate a previously read context after a document/frame/layer switch, even if the user switches back. Conservatively increment the same revision on `app.events.aftercommand` while the bound sprite is active, because editor commands can change selection, locks, or other context beyond the sprite event list. This can require an extra inspection after an unrelated command; it must never authorize stale execution.
 
-At every inspection and immediately before approval/execution, compare the live sprite against a derived observation signature: dimensions, color mode, frame identities/durations, layer hierarchy and relevant properties, cel positions/opacities and image IDs/versions, palette colors, and selection bounds. A changed signature advances the same revision and replaces the cached signature. `Image.version` covers direct pixel mutations that may not emit an undoable content event. The signature is an observation cache, never another writable document model or a separate revision source. Changes to selection shape through supported editor commands are covered by `aftercommand`; non-command external scripts that mutate selection without any observable event are outside the first release's concurrent-editor contract.
+At every inspection and immediately before approval/execution, compare the live sprite against a derived observation signature: dimensions, color mode, frame identities/durations, layer hierarchy and relevant properties, cel positions/opacities and image IDs/versions, a derived pixel-byte digest, palette colors, and selection bounds. A changed signature advances the same revision and replaces the cached signature. Actual `drawPixel` tests show `Image.version` alone does not cover all direct pixel mutations, so the digest scans live bytes as well. This has linear cost and is not a cryptographic guarantee against adversarial collisions. The signature is an observation cache, never another writable document model or a separate revision source. Changes to selection shape through supported editor commands are covered by `aftercommand`; non-command external scripts that mutate selection without any observable event are outside the first release's concurrent-editor contract.
 
 Do not use `Sprite.isModified` as a revision: it is only a saved-state flag. Attach listeners before the first read, publish the current revision only after collecting the live observation, and remove all listener handles on target replacement or disposal. A failed observation or an invalid/closed sprite prevents execution and requests another inspection. Successful agent mutations advance this same revision source; they do not reset it or maintain a separate agent revision. Always inspect afresh before edits in a new turn.
 
@@ -125,7 +135,7 @@ The release is complete only when the following evidence is recorded:
 3. Create a disposable unsaved sprite, make an identifiable manual change, and verify `read_sprite` reports it and returns a matching preview.
 4. Approve an edit that changes a known pixel/layer; observe the live result and undo it with one Undo. Verify no source document was saved.
 5. Reject another edit and verify the document is unchanged.
-6. After inspection, separately test a manual stroke, Undo, Redo, layer creation/deletion, layer name/visibility/opacity/blend-mode/lock changes, selection changes, frame changes, and active-document changes; each must invalidate pending execution. Switch away and back and verify the old approval is still invalid. Test a direct pixel mutation by another script and verify image-version observation detects it. Close the target and verify no other document is modified.
+6. After inspection, separately test a manual stroke, Undo, Redo, layer creation/deletion, layer name/visibility/opacity/blend-mode/lock changes, selection changes, frame changes, and active-document changes; each must invalidate pending execution. Switch away and back and verify the old approval is still invalid. Test a direct pixel mutation by another script and verify the live pixel observation detects it. Close the target and verify no other document is modified.
 7. Make a transaction fail after an initial mutation and verify rollback.
 8. Stop while streaming and while awaiting approval; verify no later tool call is executed for that turn.
 9. Disconnect/reconnect while idle and during an active turn; invoke both document tools after resuming the same thread and verify tools remain available, callbacks and edits are not replayed, and the UI returns to a usable state. Exercise OPEN/CLOSE events on the same socket object, intentional Disconnect followed by a late OPEN, and a replacement socket receiving old-object events; retired objects must not initialize or execute tools.
@@ -137,4 +147,4 @@ Package the extension and document exact install/start steps. Do not push or mer
 
 ## Design review disposition
 
-Read-only Luna review round 1 returned three findings on 2026-10-21. The lifecycle and revision-coverage concerns are accepted and resolved by the explicit socket lifetime/generation rules, event list, live observation signature, and expanded acceptance cases above. The proposed `dynamicTools` resume parameter is rejected: it is absent from the locally generated 0.163.0 `ThreadResumeParams`, and the official app-server documentation describes restoring tools from persisted thread metadata. The design now states that mechanism and requires a post-resume tool test. These are design resolutions; runtime evidence remains outstanding.
+Read-only Luna review round 1 returned three findings on 2026-10-21. The lifecycle and revision-coverage concerns are accepted and resolved by the explicit socket lifetime/generation rules, event list, live observation signature, and expanded acceptance cases above. The proposed `dynamicTools` resume parameter is rejected: it is absent from the locally generated 0.163.0 `ThreadResumeParams`, and the official app-server documentation describes restoring tools from persisted thread metadata. The design now states that mechanism and requires a post-resume tool test. These are design resolutions; subsequent runtime evidence is recorded in docs/validation.md.
