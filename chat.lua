@@ -138,12 +138,15 @@ function Chat:set_state(state)
   end
   if self.settings_dialog then
     local manual = self.settings_dialog.data.manual == true
-    self.settings_dialog:modify { id = "status", text = state }
+    local status = ({ready="Connected",working="Generating",starting="Starting local service",
+      connecting="Connecting",initializing="Connecting to Codex",recovering="Restoring conversation",
+      disconnected="Disconnected",error="Connection failed"})[state] or state
+    self.settings_dialog:modify { id = "status", text = "Status: " .. status }
     self.settings_dialog:modify { id = "manual", enabled = offline }
     self.settings_dialog:modify { id = "auto_info", visible = not manual }
     self.settings_dialog:modify { id = "endpoint", visible = manual, enabled = offline and manual }
-    self.settings_dialog:modify { id = "connect", enabled = offline, text = manual and "Connect" or "Retry automatic connection" }
-    self.settings_dialog:modify { id = "disconnect", enabled = not offline, text = state == "starting" and "Cancel startup" or "Disconnect" }
+    self.settings_dialog:modify { id = "connect", visible = offline, enabled = offline, text = manual and "Connect" or "Retry" }
+    self.settings_dialog:modify { id = "disconnect", visible = not offline, enabled = not offline, text = state == "starting" and "Cancel startup" or "Disconnect" }
   end
 end
 
@@ -193,22 +196,23 @@ end
 function Chat:show_settings()
   if self.settings_dialog then self.settings_dialog:show {wait=false}; return end
   local dlg
-  dlg = Dialog {title="Aseprite Chat · Settings", onclose=function()
+  dlg = Dialog {title="Aseprite Chat · Settings", autofit=Align.LEFT | Align.TOP, onclose=function()
     if self.settings_dialog == dlg then self.settings_dialog = nil end
   end}
   self.settings_dialog = dlg
+  -- Native label= fields reserve a form column for every subsequent row.
+  dlg:label {id="status", text="Status: " .. self.state}
   dlg:check {id="manual", text="Manual server (advanced)", selected=self.preferences.manual_server == true,
     onclick=function() self:set_state(self.state) end}
-  dlg:label {id="auto_info", text="The local service is found or started automatically."}
-  dlg:entry {id="endpoint", label="Server", text=self.preferences.endpoint or "ws://127.0.0.1:4500"}
-  dlg:label {id="status", label="Status", text=self.state}
+  dlg:label {id="auto_info", text="Local service starts automatically."}
+  dlg:entry {id="endpoint", text=self.preferences.endpoint or "ws://127.0.0.1:4500"}
   dlg:button {id="connect", text="Connect", onclick=function()
     self.callbacks.on_connect(dlg.data.manual and dlg.data.endpoint or nil)
   end}
   dlg:button {id="disconnect", text="Disconnect", onclick=self.callbacks.on_disconnect}
   dlg:button {id="done", text="Done"}
   self:set_state(self.state)
-  dlg:show {wait=false, autoscrollbars=true}
+  dlg:show {wait=false}
 end
 
 --- Open or reveal the modeless chat dialog without blocking painting.

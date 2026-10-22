@@ -69,4 +69,6 @@ The authenticated integration variant is `--script-param mode=live --script test
 
 `tests/gui-auto.lua` accepts `--script-param extension_root=<unpacked package path>` and checks automatic native connection/catalog loading in a disposable editor. It leaves a labeled result window. First-use Aseprite file/process/network permission dialogs require the user's decision; tests do not change global trust.
 
+`tests/gui-settings.lua` checks compact settings geometry across automatic/manual modes, state refreshes and reopening. Run it in a separate editor with an isolated `ASEPRITE_USER_FOLDER`; it does not connect to a service or open a source sprite.
+
 See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), `executor.lua` (document tools), and `launcher.lua` plus `scripts/launch.ps1` (automatic startup).

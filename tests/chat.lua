@@ -131,6 +131,24 @@ test("connection settings live in a separate window and close with the chat",fun
   view:close(); assert(settings.closed and view.settings_dialog==nil)
 end)
 
+test("settings show only the current connection action with a short caption",function()
+  local view,dialogs=native_view()
+  view:set_state("ready"); view:show_settings()
+  local settings=dialogs[2]
+  assert(settings.widgets.connect.visible==false and settings.widgets.disconnect.visible==true,
+    "connected settings still show a disabled retry action")
+  assert(settings.widgets.status.text=="Status: Connected", "connection status is an internal state name")
+  assert(not settings.widgets.status.label and not settings.widgets.endpoint.label,
+    "form labels reserve an unwanted indentation column")
+  view:set_state("disconnected")
+  assert(settings.widgets.connect.visible==true and settings.widgets.disconnect.visible==false)
+  assert(settings.widgets.connect.text=="Retry", "automatic retry caption stretches the window")
+  view:set_state("starting")
+  assert(settings.widgets.connect.visible==false and settings.widgets.disconnect.visible==true)
+  assert(settings.widgets.disconnect.text=="Cancel startup")
+  view:close()
+end)
+
 test("transcript scrolls by wheel, draggable thumb, track and keyboard without losing reading position",function()
   local view,dialogs,gc=native_view()
   local canvas=dialogs[1].widgets.transcript
