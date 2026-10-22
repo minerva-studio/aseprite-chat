@@ -74,6 +74,8 @@ local function scenario(name, body, configuration)
       function view:add_message(...) self.messages[#self.messages + 1] = {...} end
       function view:request_approval(args, callback) self.decision = callback end
       function view:dismiss_approval() end
+      function view:request_question(request,reply) self.question_request,self.question_reply=request,reply end
+      function view:dismiss_question() self.question_request,self.question_reply=nil,nil end
       function view:close() end
       function view:clear() self.messages = {} end
       function view:set_models(models,model,effort) self.catalog,self.model,self.effort=models,model,effort end
@@ -481,5 +483,32 @@ scenario("the account view exposes only a key hint, never the key",function(c,p,
   end
   c.account.apiKey=""
   assert(c:account_view().keyHint==nil)
+end)
+scenario("questions queue without auto-answering and record the user's actual reply",function(c,p,e,v)
+  assert(c:set_approval_mode(true)); assert(c:send("inspect"))
+  local replies={}
+  local function request(key)
+    p.options.on_question({key=key,questions={{id="color",question="Which highlight?"}}},function(answers)
+      replies[#replies+1]=answers
+      p.options.on_question_resolved(key,"Answered"); return true
+    end)
+  end
+  request("q1"); request("q2")
+  assert(#replies==0 and v.question_request.key=="q1")
+  v.question_reply({color={"Purple"}})
+  assert(#replies==1 and v.question_request.key=="q2")
+  local found=false
+  for _,entry in ipairs(v.messages) do if entry[3]:find("Purple",1,true) then found=true end end
+  assert(found,"answer was missing from the conversation")
+  p.options.on_question_resolved("q2","Closed by server")
+  assert(not v.question_request)
+end,{skip_send=true})
+scenario("Stop closes queued questions and retired UI callbacks cannot answer",function(c,p,e,v)
+  local replies=0
+  p.options.on_question({key="q1",questions={{id="text",question="What?"}}},function(answers)
+    assert(answers==nil); replies=replies+1; return true end)
+  local old=v.question_reply
+  c:stop(); assert(not v.question_request and replies==1)
+  old({text={"late"}}); assert(replies==1)
 end)
 print("controller: " .. passed .. " passed")

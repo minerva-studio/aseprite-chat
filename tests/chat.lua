@@ -982,4 +982,54 @@ test("Lua approval has its own wheel and draggable scrollbar",function()
   assert(view.scroll.offset==0, "approval scroll changed transcript offset")
   view:close()
 end)
+test("question window pages options and free text without selecting a default answer",function()
+  local received
+  local view,dialogs,gc=native_view()
+  view:set_state("working",true)
+  view:request_question({questions={
+    {id="color",header="Color",question="Which highlight?",isOther=true,options={
+      {label="Blue",description="Cool highlights"},{label="Gold",description="Warm highlights"}}},
+    {id="detail",header="Detail",question="Anything else?"}}},function(answers) received=answers end)
+  local dialog=dialogs[#dialogs]
+  assert(view.question and dialog.closed~=true)
+  dialog.widgets.next.onclick(); assert(not received and dialog.closed~=true,"unselected answer was submitted")
+  dialog.data.choice="2. Gold"; dialog.widgets.choice.onchange()
+  dialog.widgets.next.onclick()
+  dialog.widgets.back.onclick(); assert(dialog.data.choice=="2. Gold","back navigation discarded the draft")
+  dialog.widgets.next.onclick(); dialog.data.answer="Keep the outline"
+  dialog.widgets.next.onclick()
+  assert(received.color[1]=="Gold" and received.detail[1]=="Keep the outline")
+  assert(dialog.closed and not view.question)
+  view:close()
+end)
+test("question custom answers descriptions and cancel remain separate from edit approval",function()
+  local answers,calls
+  local view,dialogs,gc=native_view(); calls=0
+  view:request_question({questions={{id="color",header="Color",question="Which highlight?",isOther=true,
+    options={{label="Blue",description="Cool highlights"}}}}},function(value) answers=value; calls=calls+1 end)
+  local dialog=dialogs[#dialogs]
+  local painted={}; function gc:fillText(text) painted[#painted+1]=text end
+  dialog.widgets.question_body.onpaint {context=gc}
+  assert(table.concat(painted," "):find("Cool highlights",1,true))
+  dialog.data.choice="Other..."; dialog.widgets.choice.onchange()
+  dialog.data.answer="Purple"; dialog.widgets.next.onclick()
+  assert(answers.color[1]=="Purple" and calls==1)
+  view:request_question({questions={{id="text",header="Text",question="What?"}}},function(value)
+    assert(value==nil); calls=calls+1 end)
+  dialog=dialogs[#dialogs]; dialog:close(); assert(calls==2 and not view.question)
+  view:close()
+end)
+test("dismissed questions cannot reply later and owned question windows guard Enter",function()
+  local sprite=Sprite(1,1)
+  local calls=0
+  local view,dialogs=native_view()
+  view:set_models({{model="sol",displayName="Sol",supportedReasoningEfforts={}}},"sol")
+  view:set_state("ready")
+  view:request_question({questions={{id="text",header="Text",question="What?"}}},function() calls=calls+1 end)
+  assert(not view:can_submit(true))
+  local dialog=dialogs[#dialogs]; local submit=dialog.widgets.next.onclick
+  view:dismiss_question(); dialog.data.answer="late"; submit()
+  assert(calls==0 and dialog.closed)
+  view:close(); sprite:close()
+end)
 print("chat: " .. passed .. " passed")

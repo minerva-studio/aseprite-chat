@@ -82,7 +82,7 @@ end
 function Chat:can_submit(shortcut)
   if not self.dialog then return false end
   if shortcut and (self.settings_dialog or self.access_dialog or self.history_dialog
-    or self.rename_dialog or self.approval) then return false end
+    or self.rename_dialog or self.approval or self.question) then return false end
   return (self.state=="working" and self.can_steer==true)
     or (self.state=="ready" and self.selection_valid==true and app.sprite~=nil)
 end
@@ -416,7 +416,7 @@ function Chat:set_state(state,can_steer)
   if offline and previous~=state and self.history_dialog then self.history_dialog:close() end
   if self.rename_dialog and state~="ready" and state~="renaming" then self.rename_dialog:close() end
   if self.dialog then
-    local status = self.approval and "Awaiting approval"
+    local status = self.question and "Awaiting your answer" or self.approval and "Awaiting approval"
       or state == "starting" and "正在启动本地连接…" or state
     self.dialog:modify { id = "status", text = status .. " · Auto-approve: " .. (self.auto_approve and "on" or "off") }
     self.dialog:modify {id="model",enabled=idle and self.has_models==true}
@@ -842,6 +842,7 @@ function Chat:show()
     if self.dialog == dlg then
       if self.repaint_timer then self.repaint_timer:stop(); self.repaint_timer=nil end
       self.dialog = nil
+      self:dismiss_question()
       self:dismiss_approval()
       local settings = self.settings_dialog
       self.settings_dialog = nil
@@ -960,6 +961,90 @@ function Chat:show()
   dlg.bounds=Rectangle(bounds.x,bounds.y,bounds.width,bounds.height+40)
 end
 
+--- Show one model request with per-question drafts. No option is preselected.
+--- callback receives {[questionId]={answer}} after all pages, or nil on Skip/close.
+--- Dismissing programmatically never answers a retired request.
+function Chat:request_question(request,callback)
+  self:dismiss_question()
+  local pending={request=request,index=1,drafts={}}
+  local dlg
+  local function finish(answers)
+    if self.question~=pending then return end
+    self.question=nil; dlg:close(); self:set_state(self.state)
+    callback(answers)
+  end
+  dlg=Dialog {title="Aseprite Chat · Question",resizeable=true,onclose=function() finish(nil) end}
+  pending.dialog=dlg; self.question=pending
+  local scroll={offset=0,maximum=0,follow=false}
+  local function save()
+    pending.drafts[pending.index]={choice=dlg.data.choice,text=dlg.data.answer}
+  end
+  local function show_page()
+    local question=request.questions[pending.index]
+    local draft=pending.drafts[pending.index] or {}
+    local options={"Select an answer"}
+    for index,option in ipairs(question.options or {}) do options[#options+1]=index..". "..option.label end
+    if question.isOther then options[#options+1]="Other..." end
+    pending.updating=true
+    dlg:modify {id="question_page",text="Question "..pending.index.." / "..#request.questions.." · "..question.header}
+    dlg:modify {id="choice",options=options,option=draft.choice or options[1],visible=#(question.options or {})>0}
+    dlg:modify {id="answer",text=draft.text or "",visible=#(question.options or {})==0 or draft.choice=="Other..."}
+    dlg:modify {id="question_error",text=""}
+    dlg:modify {id="back",enabled=pending.index>1}
+    dlg:modify {id="next",text=pending.index==#request.questions and "Submit answer" or "Next"}
+    pending.updating=false
+    scroll.offset,scroll.follow=0,false
+    dlg:repaint()
+  end
+  dlg:label {id="question_page",text=""}
+  add_scroll_canvas(dlg,{id="question_body",width=420,height=180,hexpand=true,vexpand=true},scroll,function(gc)
+    local question=request.questions[pending.index]
+    local lines={question.question}
+    for index,option in ipairs(question.options or {}) do
+      lines[#lines+1]=index..". "..option.label.."\n"..option.description
+    end
+    paint(gc,table.concat(lines,"\n\n"),scroll)
+  end)
+  dlg:combobox {id="choice",options={"Select an answer"},onchange=function()
+    if self.question~=pending or pending.updating then return end
+    dlg:modify {id="answer",visible=dlg.data.choice=="Other..."}
+    dlg:modify {id="question_error",text=""}
+  end}
+  dlg:entry {id="answer",text="",hexpand=true}
+  dlg:label {id="question_error",text=""}
+  dlg:newrow()
+  dlg:button {id="back",text="Back",onclick=function()
+    if self.question~=pending or pending.index<=1 then return end
+    save(); pending.index=pending.index-1; show_page()
+  end}
+  dlg:button {id="next",text="Next",onclick=function()
+    if self.question~=pending then return end
+    save()
+    local question=request.questions[pending.index]
+    local draft=pending.drafts[pending.index]
+    local option=(question.options or {})[tonumber((draft.choice or ""):match("^(%d+)%. ")) or 0]
+    local answer=option and option.label or (#(question.options or {})==0 or draft.choice=="Other...") and draft.text
+    if not answer or not answer:match("%S") then
+      dlg:modify {id="question_error",text="请选择一项或填写回答。"}; return
+    end
+    draft.answer=answer
+    if pending.index<#request.questions then pending.index=pending.index+1; show_page(); return end
+    local answers={}
+    for index,item in ipairs(request.questions) do answers[item.id]={pending.drafts[index].answer} end
+    finish(answers)
+  end}
+  dlg:button {id="skip",text="Skip",onclick=function() finish(nil) end}
+  show_page(); dlg:show {wait=false}; self:set_state(self.state)
+end
+
+--- Close only the currently displayed question, without manufacturing an answer.
+function Chat:dismiss_question()
+  local pending=self.question
+  self.question=nil
+  if pending then pending.dialog:close() end
+  if self.dialog then self:set_state(self.state) end
+end
+
 --- Show the complete pending action; the caller must revalidate after approval.
 --- args: {summary,code} for Lua, or {title,body,note} for other requests.
 function Chat:request_approval(args, callback)
@@ -997,6 +1082,7 @@ end
 --- Close owned native dialogs. on_close is reserved for user-initiated closing.
 function Chat:close()
   if self.repaint_timer then self.repaint_timer:stop(); self.repaint_timer=nil end
+  self:dismiss_question()
   self:dismiss_approval()
   self.scroll.grab = nil
   local settings = self.settings_dialog

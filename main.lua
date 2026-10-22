@@ -17,6 +17,8 @@ The plugin owns the app.transaction boundary. Inside execute_lua, do not save/op
 If the document or context became stale, inspect again. Never claim an edit succeeded until execute_lua returns success.
 The client controls edit approval: each execute_lua call is either approved individually or covered by the user's explicit auto-approval for this chat.
 Treat rejection as a decision, not an invitation to retry the same edit.
+Use request_user_input to ask the user when an unresolved choice materially affects the requested result.
+Use ordinary, non-secret questions with clear options or free text; never ask for passwords or API keys.
 Each prompt includes the current target sprite/frame/layer context. Conversation history may concern a different target.
 ]]
 
@@ -35,6 +37,13 @@ function Controller:_refresh_state()
 end
 
 function Controller:_cancel_pending(reason)
+  local questions=self.questions
+  self.questions={}
+  self.view:dismiss_question()
+  for _,entry in ipairs(questions) do
+    self.view:add_message(entry.id,"Question","Cancelled · "..reason.."\n"..entry.body,false)
+    entry.reply(nil)
+  end
   local pending = self.pending
   self.pending = nil
   local codex_approval = self.codex_approval
@@ -183,6 +192,8 @@ function Controller:_create_client()
     end,
     on_tool = function(params, reply) self:_tool(params, reply) end,
     on_approval = function(request, reply) self:_approval(request, reply) end,
+    on_question = function(request, reply) self:_question(request, reply) end,
+    on_question_resolved = function(key,status) self:_question_resolved(key,status) end,
     thread_settings = function() return self:_thread_settings() end,
     on_cancel = function(reason)
       self:_cancel_pending(reason or "Turn cancelled.")
@@ -239,9 +250,46 @@ function Controller:_approval(request, reply)
     end)
 end
 
+-- Queue simultaneous model prompts without replacing an unanswered window.
+-- Protocol callbacks remain the authority for whether a reply is still live.
+function Controller:_question(request,reply)
+  self.message_id=self.message_id+1
+  local lines={}
+  for _,question in ipairs(request.questions) do lines[#lines+1]=question.question end
+  local entry={request=request,reply=reply,id="question:"..self.message_id,body=table.concat(lines,"\n")}
+  entry.answer=function(answers)
+    if self.questions[1]~=entry then return end
+    entry.answers=answers
+    reply(answers)
+  end
+  self.questions[#self.questions+1]=entry
+  self.view:add_message(entry.id,"Question","Awaiting your answer\n"..entry.body,false)
+  if #self.questions==1 then self.view:request_question(request,entry.answer) end
+end
+
+function Controller:_question_resolved(key,status)
+  for index,entry in ipairs(self.questions) do
+    if entry.request.key==key then
+      local lines={status.."\n"..entry.body}
+      for _,question in ipairs(entry.request.questions) do
+        local answers=entry.answers and entry.answers[question.id]
+        if answers then lines[#lines+1]="You: "..table.concat(answers,", ") end
+      end
+      self.view:add_message(entry.id,"Question",table.concat(lines,"\n"),false)
+      table.remove(self.questions,index)
+      if index==1 then
+        self.view:dismiss_question()
+        local next_question=self.questions[1]
+        if next_question then self.view:request_question(next_question.request,next_question.answer) end
+      end
+      return
+    end
+  end
+end
+
 --- Assemble one editor session; path is the installed extension directory.
 function Main.create(options)
-  local self = setmetatable({ preferences = options.preferences, message_id = 0,auto_approve=false }, Controller)
+  local self = setmetatable({ preferences = options.preferences, message_id = 0,auto_approve=false,questions={} }, Controller)
   self.Codex = dofile(app.fs.joinPath(options.path, "codex.lua"))
   self.Executor = dofile(app.fs.joinPath(options.path, "executor.lua"))
   self.Timeline = dofile(app.fs.joinPath(options.path,"timeline.lua"))

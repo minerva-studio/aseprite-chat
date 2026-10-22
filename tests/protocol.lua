@@ -941,6 +941,65 @@ test("approval replies are single-use and die with stop and disconnect",function
   eq(approvals[2].reply("accept"),false)
 end)
 
+local function question_request(h,id,overrides)
+  local params={threadId="thread",turnId="turn",itemId="ask",isBlocking=true,questions={
+    {id="color",header="Color",question="Which highlight?",isOther=true,options={
+      {label="Blue",description="Cool highlights"},{label="Gold",description="Warm highlights"}}},
+    {id="detail",header="Detail",question="Anything else?"}}}
+  for k,v in pairs(overrides or {}) do params[k]=v end
+  h.ws:receive({id=id,method="item/tool/requestUserInput",params=params})
+end
+test("questions carry plain data and send chosen and free text answers exactly once",function()
+  local held
+  local h=harness({on_question=function(request,reply) held={request=request,reply=reply} end})
+  h:open(); h:start(); question_request(h,"q1")
+  assert(held and type(held.request.questions)=="table")
+  eq(held.request.questions[1].options[2].description,"Warm highlights")
+  assert(held.reply({color={"Gold"},detail={"Keep the outline"}}))
+  local result=sent_to(h,"q1").result
+  eq(result.answers.color.answers[1],"Gold"); eq(result.answers.detail.answers[1],"Keep the outline")
+  eq(held.reply({color={"Blue"},detail={"ignored"}}),false); eq(h.client.state,"working")
+end)
+test("questions skip explicitly and never display stale or secret requests",function()
+  local held,calls=nil,0
+  local h=harness({on_question=function(request,reply) calls=calls+1; held=reply end})
+  h:open(); h:start(); question_request(h,"stale",{turnId="old"})
+  eq(calls,0); assert(sent_to(h,"stale").result.answers)
+  question_request(h,"secret",{questions={{id="key",header="Key",question="API key?",isSecret=true}}})
+  eq(calls,0); assert(sent_to(h,"secret").result.answers)
+  question_request(h,"skip"); assert(held(nil)); assert(sent_to(h,"skip").result.answers)
+  eq(sent_to(h,"skip").result.answers[1],nil)
+end)
+test("questions retire on server resolution stop terminal and disconnect",function()
+  for _,mode in ipairs {"resolved","stop","complete","disconnect"} do
+    local held,resolved
+    local h=harness({on_question=function(request,reply) held=reply end,
+      on_question_resolved=function(key) resolved=key end})
+    h:open(); h:start(); question_request(h,"q1")
+    assert(held,"question was not delivered")
+    if mode=="resolved" then
+      h:notify("serverRequest/resolved",{threadId="thread",requestId="q1"}); assert(resolved)
+    elseif mode=="stop" then h.client:stop()
+    elseif mode=="complete" then h:complete()
+    else h.client:disconnect() end
+    eq(held({color={"Blue"},detail={"none"}}),false)
+    if mode=="stop" or mode=="complete" then assert(sent_to(h,"q1").result.answers) end
+  end
+end)
+test("question feature is enabled per thread without changing the user's configuration",function()
+  local h=harness(); h:open(); h:start()
+  eq(h:last("thread/start").params.config["features.default_mode_request_user_input"],true)
+  h:complete(); h.client:disconnect(); h:open()
+  eq(h:last("thread/resume").params.config["features.default_mode_request_user_input"],true)
+end)
+test("duplicate question IDs fail safely and a missing UI returns an empty answer object",function()
+  local h=harness(); h:open(); h:start(); question_request(h,"no-ui")
+  assert(sent_to(h,"no-ui").result.answers)
+  local h2=harness({on_question=function() end}); h2:open(); h2:start()
+  question_request(h2,"duplicate"); question_request(h2,"duplicate")
+  eq(h2.client.state,"error")
+end)
+
 for _,case in ipairs(tests) do
   local ok,err=xpcall(case[2],debug.traceback)
   if ok then passed=passed+1; print("PASS " .. case[1])

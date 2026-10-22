@@ -141,6 +141,9 @@ end
 -- on_message(id,text,isDelta), on_tool(params,reply), on_cancel(reason),
 -- on_item(item,completed), on_error(text). on_item receives plain Lua non-agent
 -- items; reasoning preserves supplied summary/content strings, never opaque data.
+-- on_question(request,reply) receives plain questions and an opaque key.
+-- reply({[questionId]={answer,...}}) or reply(nil) is single-use; nil skips.
+-- on_question_resolved(key,status) retires answered or server-cleared prompts.
 -- Public state/thread_id/turn_id belong to this client.
 -- reply({success=boolean,contentItems=array}) is single-use and generation-bound.
 -- Empty schema objects/arrays can use json.decode("{}") / json.decode("[]").
@@ -148,7 +151,7 @@ end
 function Codex.new(options)
   options = options or {}
   return setmetatable({state="disconnected", _options=options, _next_id=0,
-    _generation=0, _pending={}, _tools={}, _approvals={}, _terminal={}, _initialized=false}, Client)
+    _generation=0, _pending={}, _tools={}, _approvals={}, _questions={}, _terminal={}, _initialized=false}, Client)
 end
 
 function Client:_emit(name, ...)
@@ -197,6 +200,12 @@ function Client:_cancel(reason, respond)
     if respond then
       self:_write({id=request.id, result=approval_result(request.method, "cancel", request.params, reason)})
     end
+  end
+  local questions = self._questions
+  self._questions = {}
+  for _, request in pairs(questions) do
+    request.valid = false
+    if respond then self:_write({id=request.id,result={answers={}}}) end
   end
   self:_emit("on_cancel", reason)
 end
@@ -317,6 +326,7 @@ end
 function Client:_resume()
   local settings = self:_thread_settings()
   self:_request("thread/resume", {threadId=self.thread_id, excludeTurns=true,
+    config=settings.config,
     developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd, approvalPolicy=settings.approvalPolicy,
     approvalsReviewer=settings.approvalsReviewer}, function(result, err)
     if err then self:_request_error(err); return end
@@ -409,7 +419,64 @@ function Client:_thread_settings()
   local settings = provider and provider() or {}
   return { sandbox = settings.sandbox or "read-only", cwd = settings.cwd,
     approvalPolicy = settings.approvalPolicy or "on-request",
-    approvalsReviewer = settings.approvalsReviewer or "user" }
+    approvalsReviewer = settings.approvalsReviewer or "user",
+    -- A nested features table replaces CLI feature overrides; a dotted key
+    -- changes this flag alone and preserves the bridge's disabled tool surfaces.
+    config={["features.default_mode_request_user_input"]=true} }
+end
+
+-- The wire request belongs to a live turn. Secret input is deliberately skipped:
+-- native Lua entries provide no secure credential collection contract.
+function Client:_question(message)
+  local params=message.params
+  assert(object(params) and type(params.threadId)=="string" and type(params.turnId)=="string"
+    and type(params.itemId)=="string" and type(params.isBlocking)=="boolean"
+    and sequence(params.questions) and #params.questions>0,"Malformed user input request")
+  local questions,ids,secret=plain(params.questions),{},false
+  for _,question in ipairs(questions) do
+    assert(type(question.id)=="string" and question.id~="" and not ids[question.id]
+      and type(question.header)=="string" and type(question.question)=="string","Malformed user input question")
+    ids[question.id]=true
+    assert(question.isOther==nil or type(question.isOther)=="boolean","Malformed other option")
+    assert(question.isSecret==nil or type(question.isSecret)=="boolean","Malformed secret option")
+    secret=secret or question.isSecret==true
+    if question.options~=nil then
+      assert(type(question.options)=="table","Malformed question options")
+      for _,option in ipairs(question.options) do
+        assert(type(option.label)=="string" and type(option.description)=="string","Malformed question option")
+      end
+    end
+  end
+  local turn=self:_match(params.threadId,params.turnId)
+  if not turn or turn.stopped or secret or not self._options.on_question then
+    self:_write({id=message.id,result={answers={}}})
+    if secret then self:_report("提问需要输入敏感信息，当前窗口不支持安全输入；已跳过该请求。") end
+    return
+  end
+  local key=type(message.id)..":"..tostring(message.id)
+  assert(not self._questions[key],"Duplicate outstanding question request")
+  local request={id=message.id,valid=true}
+  self._questions[key]=request
+  local generation=self._generation
+  self:_emit("on_question",{key=key,itemId=params.itemId,isBlocking=params.isBlocking,questions=questions},function(answers)
+    if not request.valid or self._generation~=generation or self._turn~=turn or turn.stopped then return false end
+    return self:_guard(function()
+      local result={}
+      if answers~=nil then
+        assert(type(answers)=="table","Malformed question answers")
+        for id in pairs(answers) do assert(ids[id],"Unknown question ID") end
+        for id in pairs(ids) do
+          local values=answers[id]
+          assert(type(values)=="table" and #values>0,"Missing question answer")
+          for _,value in ipairs(values) do assert(type(value)=="string" and value:match("%S"),"Empty question answer") end
+          result[id]={answers=array(values)}
+        end
+      end
+      request.valid=false; self._questions[key]=nil
+      self:_write({id=message.id,result={answers=result}})
+      self:_emit("on_question_resolved",key,answers and "Answered" or "Skipped")
+    end)
+  end)
 end
 
 -- Approval requests follow the same liveness rules as dynamic tools: they must
@@ -443,6 +510,7 @@ end
 
 function Client:_server_request(message)
   local method = message.method
+  if method=="item/tool/requestUserInput" then self:_question(message); return end
   if method == "item/tool/call" then self:_tool(message); return end
   local kind = approval_methods[method]
   if kind and self._options.on_approval and self:_approval(message, kind) then return end
@@ -465,6 +533,18 @@ end
 
 function Client:_notification(message)
   local method, params = message.method, message.params
+  if method=="serverRequest/resolved" then
+    assert(object(params) and type(params.threadId)=="string"
+      and (type(params.requestId)=="string" or type(params.requestId)=="number"),"Malformed resolved request")
+    if params.threadId~=self.thread_id then return end
+    local key=type(params.requestId)..":"..tostring(params.requestId)
+    local request=self._questions[key]
+    if request then
+      request.valid=false; self._questions[key]=nil
+      self:_emit("on_question_resolved",key,"Closed by server")
+    end
+    return
+  end
   if method == "thread/name/updated" then
     assert(object(params) and type(params.threadId)=="string", "Malformed thread name update")
     if params.threadId==self.thread_id then
@@ -750,6 +830,7 @@ function Client:open_thread(id, callback)
       if not ok then finish(nil, tostring(thread)); return end
       local settings = self:_thread_settings()
       self:_request("thread/resume", {threadId=id, excludeTurns=true,
+        config=settings.config,
         developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd,
         approvalPolicy=settings.approvalPolicy, approvalsReviewer=settings.approvalsReviewer}, function(resumed, resume_error)
         if not live() then return end
@@ -855,6 +936,7 @@ function Client:send(prompt, context_text, settings)
     if self.thread_id then self:_start_turn(turn, prompt, context_text); return end
     local settings = self:_thread_settings()
     self:_request("thread/start", {dynamicTools=array(self._options.tools or {}), model=turn.model,
+      config=settings.config,
       developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd,
       approvalPolicy=settings.approvalPolicy, approvalsReviewer=settings.approvalsReviewer,
       allowProviderModelFallback=false}, function(result, err)
