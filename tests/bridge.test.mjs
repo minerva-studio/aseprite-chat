@@ -2,15 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import http from 'node:http';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { createBridge } from '../scripts/server.mjs';
 
 const fixture = fileURLToPath(new URL('./stdio-fixture.mjs', import.meta.url));
+const serverScript = fileURLToPath(new URL('../scripts/server.mjs', import.meta.url));
+const cliChildren = [];
+const cliTempDirs = [];
 async function setup(t, overrides = {}) {
   const bridge = await createBridge({ port: 0, command: process.execPath, args: [fixture], ...overrides });
   t.after(() => bridge.close());
   return { bridge, url: `ws://127.0.0.1:${bridge.port}` };
+}
+async function until(assertion, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError;
+  while (Date.now() < deadline) {
+    try { return await assertion(); } catch (error) { lastError = error; await wait(10); }
+  }
+  throw lastError;
 }
 async function connect(t, url, options) {
   const socket = new WebSocket(url, options);
@@ -49,6 +64,17 @@ test('a second client cannot share the first client Codex process', async t => {
   const { url } = await setup(t);
   await connect(t, url);
   assert.equal(await rejected(url), 409);
+});
+test('a rejected WebSocket handshake does not reserve the bridge', async t => {
+  const { bridge, url } = await setup(t);
+  const status = await new Promise((resolve, reject) => {
+    const request = http.get(`http://127.0.0.1:${bridge.port}/`, {
+      headers: { Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13' }
+    }, response => { response.resume(); resolve(response.statusCode); });
+    request.on('error', reject);
+  });
+  assert.equal(status, 400);
+  await connect(t, url);
 });
 test('reconnection gets a new stdio process and no prior message replay', async t => {
   const { url } = await setup(t);
@@ -100,4 +126,159 @@ test('synchronous spawn failure closes one client and leaves the bridge healthy'
     }).on('error', reject);
   });
   assert.equal(status, 200);
+});
+
+function getJson(url) {
+  const httpUrl = url.replace(/^ws:/, 'http:');
+  return new Promise((resolve, reject) => http.get(httpUrl, response => {
+    let body = '';
+    response.setEncoding('utf8');
+    response.on('data', chunk => body += chunk);
+    response.on('end', () => resolve({ status: response.statusCode, value: JSON.parse(body) }));
+  }).on('error', reject));
+}
+function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
+test('readyz reports bridge identity, bound port, process and live busy state', async t => {
+  const { bridge, url } = await setup(t);
+  const idle = await getJson(`${url}/readyz`);
+  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 1, pid: process.pid, port: bridge.port, busy: false });
+  const socket = await connect(t, url);
+  const busy = await getJson(`${url}/readyz`);
+  assert.equal(busy.value.busy, true, JSON.stringify(busy));
+  const closed = once(socket, 'close'); socket.close(); await closed;
+  await until(async () => assert.equal((await getJson(`${url}/readyz`)).value.busy, false));
+});
+
+test('idle timeout closes bridge, but never while a client is connected', { timeout: 3000 }, async t => {
+  let closeCount = 0;
+  const { bridge, url } = await setup(t, { idleTimeoutMs: 100, onClose: () => { closeCount++; } });
+  const socket = await connect(t, url);
+  await wait(160);
+  assert.equal((await getJson(`${url}/readyz`)).value.busy, true);
+  const closed = once(socket, 'close'); socket.close(); await closed;
+  await wait(160);
+  await assert.rejects(getJson(`${url}/readyz`));
+  await bridge.close(); // cleanup may close an already auto-closed bridge
+  assert.equal(closeCount, 1);
+});
+
+test('manual close is idempotent and idle timer can be disabled', async t => {
+  const bridge = await createBridge({ port: 0, command: process.execPath, args: [fixture] });
+  t.after(() => bridge.close());
+  await wait(30);
+  assert.equal((await getJson(`http://127.0.0.1:${bridge.port}/readyz`)).value.busy, false);
+  await bridge.close();
+  await bridge.close();
+});
+
+test('CLI writes readiness and atomically replaces an existing discovery hint', { timeout: 5000 }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-cli-'));
+  cliTempDirs.push(directory);
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const readyFile = path.join(directory, 'ready.json');
+  const discoveryFile = path.join(directory, 'bridge.json');
+  await writeFile(discoveryFile, JSON.stringify({ service: 'other-service', protocolVersion: 1, pid: 123, port: 9, endpoint: 'ws://127.0.0.1:9' }));
+  const child = spawn(process.execPath, [serverScript], { env: {
+    ...process.env, ASEPRITE_CHAT_PORT: '0', CODEX_CLI: process.execPath,
+    ASEPRITE_CHAT_READY_FILE: readyFile, ASEPRITE_CHAT_DISCOVERY_FILE: discoveryFile,
+    ASEPRITE_CHAT_IDLE_TIMEOUT_MS: '0'
+  }, stdio: 'ignore', windowsHide: true });
+  cliChildren.push(child);
+  const exited = once(child, 'exit');
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const waitForFile = async file => {
+    for (let i = 0; i < 100; i++) {
+      try { return JSON.parse(await readFile(file, 'utf8')); } catch { await wait(20); }
+    }
+    throw Error(`CLI did not write ${path.basename(file)}`);
+  };
+  const ready = await waitForFile(readyFile);
+  const metadata = await waitForFile(discoveryFile);
+  assert.equal(ready.endpoint, metadata.endpoint);
+  assert.match(ready.endpoint, /^ws:\/\/127\.0\.0\.1:\d+$/);
+  assert.deepEqual(metadata, {
+    service: 'aseprite-chat', protocolVersion: 1, pid: child.pid,
+    port: Number(new URL(ready.endpoint).port), endpoint: ready.endpoint
+  });
+  assert.notEqual(metadata.pid, 123, 'atomic metadata replacement must replace a prior discovery hint');
+  child.kill('SIGINT');
+  await exited;
+});
+
+test('automatic idle CLI exit removes only its own discovery metadata', { timeout: 5000 }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-idle-cli-'));
+  cliTempDirs.push(directory);
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const readyFile = path.join(directory, 'ready.json');
+  const discoveryFile = path.join(directory, 'bridge.json');
+  const child = spawn(process.execPath, [serverScript], { env: {
+    ...process.env, ASEPRITE_CHAT_PORT: '0', CODEX_CLI: process.execPath,
+    ASEPRITE_CHAT_READY_FILE: readyFile, ASEPRITE_CHAT_DISCOVERY_FILE: discoveryFile,
+    ASEPRITE_CHAT_IDLE_TIMEOUT_MS: '100'
+  }, stdio: 'ignore', windowsHide: true });
+  cliChildren.push(child);
+  const exited = once(child, 'exit');
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  const metadata = await (async () => {
+    for (let i = 0; i < 100; i++) {
+      try { return JSON.parse(await readFile(discoveryFile, 'utf8')); } catch { await wait(20); }
+    }
+    throw Error('CLI did not write discovery metadata');
+  })();
+  assert.equal(metadata.pid, child.pid);
+  await exited;
+  await assert.rejects(readFile(discoveryFile));
+
+  const foreignFile = path.join(directory, 'foreign-bridge.json');
+  const foreignReadyFile = path.join(directory, 'foreign-ready.json');
+  const foreign = spawn(process.execPath, [serverScript], { env: {
+    ...process.env, ASEPRITE_CHAT_PORT: '0', CODEX_CLI: process.execPath,
+    ASEPRITE_CHAT_READY_FILE: foreignReadyFile, ASEPRITE_CHAT_DISCOVERY_FILE: foreignFile,
+    ASEPRITE_CHAT_IDLE_TIMEOUT_MS: '1000'
+  }, stdio: 'ignore', windowsHide: true });
+  cliChildren.push(foreign);
+  const foreignExited = once(foreign, 'exit');
+  t.after(() => { if (foreign.exitCode === null) foreign.kill(); });
+  for (let i = 0; i < 100; i++) {
+    try { await readFile(foreignFile, 'utf8'); break; } catch { await wait(20); }
+  }
+  await writeFile(foreignFile, JSON.stringify({ service: 'replacement', protocolVersion: 1, pid: 98765 }));
+  await foreignExited;
+  assert.deepEqual(JSON.parse(await readFile(foreignFile, 'utf8')), {
+    service: 'replacement', protocolVersion: 1, pid: 98765
+  });
+});
+
+test('CLI startup failure writes a human-readable Chinese readiness error', { timeout: 3000 }, async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-fail-'));
+  cliTempDirs.push(directory);
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const readyFile = path.join(directory, 'ready.json');
+  // Occupy a loopback port so the CLI fails during listen without touching an existing service.
+  const blocker = http.createServer();
+  await new Promise(resolve => blocker.listen(0, '127.0.0.1', resolve));
+  const port = blocker.address().port;
+  const failed = spawn(process.execPath, [serverScript], { env: {
+    ...process.env, ASEPRITE_CHAT_PORT: String(port), CODEX_CLI: process.execPath,
+    ASEPRITE_CHAT_READY_FILE: readyFile, ASEPRITE_CHAT_DISCOVERY_FILE: path.join(directory, 'bridge.json')
+  }, stdio: 'ignore', windowsHide: true });
+  cliChildren.push(failed);
+  const exited = once(failed, 'exit');
+  t.after(() => { if (failed.exitCode === null) failed.kill(); });
+  const error = await (async () => {
+    for (let i = 0; i < 100; i++) {
+      try { return JSON.parse(await readFile(readyFile, 'utf8')); } catch { await wait(20); }
+    }
+    throw Error('CLI did not report startup failure');
+  })();
+  assert.match(error.error, /无法|失败|端口/);
+  await exited;
+  await new Promise(resolve => blocker.close(resolve));
+});
+
+test('reports the isolated CLI process IDs and temporary directories used by this suite', () => {
+  assert.ok(cliChildren.every(child => child.exitCode !== null || child.signalCode !== null), 'all test-owned CLI processes must have exited');
+  console.log(`Test-owned CLI PIDs: ${cliChildren.map(child => child.pid).join(', ')}`);
+  console.log(`Test temporary directories: ${cliTempDirs.join(', ')}`);
 });

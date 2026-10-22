@@ -1,14 +1,18 @@
 local root = app.fs.filePath(app.fs.filePath(debug.getinfo(1, "S").source:sub(2)))
 assert(app.fs.isFile(app.fs.joinPath(root, "main.lua")), "controller is not implemented")
 local passed = 0
-local function scenario(name, body)
-  local protocol, executor, view
+local function scenario(name, body, configuration)
+  configuration=configuration or {}
+  local protocol, executor, view, launcher
   local executed, replies = 0, {}
   local modules = {
     ["codex.lua"] = { new = function(opts)
-      protocol = { options = opts, state = "ready", allowed = true }
-      function protocol:connect() end
-      function protocol:disconnect() self.allowed = false; opts.on_cancel("disconnect") end
+      protocol = { options = opts, state = configuration.state or "ready", allowed = true }
+      function protocol:connect(endpoint)
+        self.connected_endpoint=endpoint; self.connect_count=(self.connect_count or 0)+1
+        self.state="connecting"; opts.on_state("connecting"); return true
+      end
+      function protocol:disconnect() self.state="disconnected"; self.allowed = false; opts.on_cancel("disconnect") end
       function protocol:can_execute() return self.allowed end
       function protocol:send(_,_,settings) self.sent_settings=settings; self.state = "working"; return true end
       function protocol:list_models(callback)
@@ -23,6 +27,17 @@ local function scenario(name, body)
       function protocol:new_chat() return true end
       return protocol
     end },
+    ["launcher.lua"] = {new=function()
+      launcher={attempts=0}
+      function launcher:ensure(callback)
+        assert(not self.pending); self.attempts=self.attempts+1; self.pending={callback=callback}; return true
+      end
+      function launcher:cancel() self.pending=nil end
+      function launcher:complete(endpoint,err)
+        local pending=self.pending; self.pending=nil; pending.callback(endpoint,err)
+      end
+      return launcher
+    end},
     ["executor.lua"] = { tools = {}, new = function()
       executor = { revision = 1 }
       function executor:bind() end
@@ -36,7 +51,7 @@ local function scenario(name, body)
     ["chat.lua"] = { new = function()
       view = { messages = {} }
       function view:show() end
-      function view:set_state() end
+      function view:set_state(state) self.state=state end
       function view:add_message(...) self.messages[#self.messages + 1] = {...} end
       function view:request_approval(args, callback) self.decision = callback end
       function view:dismiss_approval() end
@@ -54,15 +69,15 @@ local function scenario(name, body)
   local Main = assert(loadfile(app.fs.joinPath(root, "main.lua"), "t", env))()
   local controller = Main.create { path = root, preferences = {} }
   controller:open()
-  protocol.options.on_state("ready")
+  if protocol.state=="ready" then protocol.options.on_state("ready") end
   local sprite = Sprite(4, 4)
-  assert(controller:send("edit"))
+  if not configuration.skip_send then assert(controller:send("edit")) end
   local params = { threadId = "thread", turnId = "turn", tool = "execute_lua",
     arguments = { code = "return 1", summary = "test", expectedRevision = 1 } }
   local function request()
     protocol.options.on_tool(params, function(result) replies[#replies + 1] = result end)
   end
-  body(controller, protocol, executor, view, request, function() return executed, replies end)
+  body(controller, protocol, executor, view, request, function() return executed, replies end, launcher)
   controller:close()
   sprite:close()
   passed = passed + 1
@@ -108,6 +123,7 @@ scenario("approval-time observation failure is returned once and displayed", fun
   assert(visible)
 end)
 scenario("normal connect rejection is visible and not persisted", function(c, p, e, v)
+  c.preferences.manual_server=true
   function p:connect() return false, "invalid endpoint" end
   c:connect("ws://localhost:4500", "")
   assert(c.preferences.endpoint == nil)
@@ -146,5 +162,27 @@ scenario("reconnection reloads catalog and does not silently replace an unavaila
   assert(p.catalog_calls==2 and v.model=="removed-model")
   assert(not c:send("must choose again"))
   assert(c:select_settings("wire-a","low")); assert(c:send("chosen explicitly"))
+end)
+scenario("opening starts one automatic attempt and uses the resolved endpoint without manual preferences",function(c,p,e,v,request,result,l)
+  assert(l.attempts==1 and l.pending and v.state=="starting")
+  c:open(); assert(l.attempts==1, "opening twice launched duplicate services")
+  l:complete("ws://127.0.0.1:45991")
+  assert(p.connected_endpoint=="ws://127.0.0.1:45991" and p.connect_count==1)
+  assert(not c.preferences.manual_server and c.preferences.endpoint==nil)
+  p.state="ready"; p.options.on_state("ready"); assert(c:send("automatic chat"))
+end,{state="disconnected",skip_send=true})
+scenario("closing while starting cancels bootstrap and never starts a protocol connection",function(c,p,e,v,request,result,l)
+  assert(l.pending); c:close()
+  assert(not l.pending and not p.connected_endpoint and c.closed)
+end,{state="disconnected",skip_send=true})
+scenario("automatic startup failure explains next action and Retry starts a new attempt",function(c,p,e,v,request,result,l)
+  l:complete(nil,"没有找到 Codex，请先安装或登录 Codex，然后重试。")
+  assert(v.state=="error" and v.messages[#v.messages][3]:find("Codex",1,true))
+  c:connect(); assert(l.attempts==2 and l.pending and v.state=="starting")
+end,{state="disconnected",skip_send=true})
+scenario("a new automatic port preserves the current thread and transcript",function(c,p,e,v,request,result,l)
+  p.thread_id="remembered-thread"; local count=#v.messages
+  c:disconnect(); c:connect(); l:complete("ws://127.0.0.1:45992")
+  assert(c.client==p and p.thread_id=="remembered-thread" and #v.messages==count)
 end)
 print("controller: " .. passed .. " passed")

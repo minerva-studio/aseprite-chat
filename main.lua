@@ -23,6 +23,10 @@ function Controller:_message(role, text)
   self.view:add_message("local-" .. self.message_id, role, tostring(text), false)
 end
 
+function Controller:_refresh_state()
+  self.view:set_state(self.startup_error and "error" or self.launcher.pending and "starting" or self.client.state)
+end
+
 function Controller:_cancel_pending(reason)
   local pending = self.pending
   self.pending = nil
@@ -111,7 +115,7 @@ function Controller:_create_client()
         self:_cancel_pending("Turn ended before execution.")
         if self.models == nil then self:_load_models() end
       end
-      self.view:set_state(state)
+      self:_refresh_state()
     end,
     on_message = function(id, text, delta) self.view:add_message(id, "Codex", text, delta) end,
     on_tool = function(params, reply) self:_tool(params, reply) end,
@@ -128,6 +132,8 @@ function Main.create(options)
   local self = setmetatable({ preferences = options.preferences, message_id = 0 }, Controller)
   self.Codex = dofile(app.fs.joinPath(options.path, "codex.lua"))
   self.Executor = dofile(app.fs.joinPath(options.path, "executor.lua"))
+  local Launcher = dofile(app.fs.joinPath(options.path, "launcher.lua"))
+  self.launcher = Launcher.new {path=options.path}
   local Chat = dofile(app.fs.joinPath(options.path, "chat.lua"))
   self.executor = self.Executor.new()
   self.view = Chat.new({
@@ -152,23 +158,51 @@ function Controller:open()
   end
   self.view:show()
   if not self.site_listener then
-    self.site_listener = app.events:on("sitechange", function() self.view:set_state(self.client.state) end)
+    self.site_listener = app.events:on("sitechange", function() self:_refresh_state() end)
+  end
+  if (self.client.state == "disconnected" or self.client.state == "error") and not self.launcher.pending then
+    self:connect(self.preferences.manual_server and self.preferences.endpoint or nil)
   end
 end
 
---- Connect to a local bridge. Changing endpoint starts a new conversation.
-function Controller:connect(endpoint)
-  endpoint = endpoint:match("^%s*(.-)%s*$")
-  if self.preferences.endpoint and self.preferences.endpoint ~= endpoint then
-    self:disconnect()
-    self.client = self:_create_client()
-    self.view:clear()
-  end
+function Controller:_connect_endpoint(endpoint, manual)
   local ok, connected, err = pcall(self.client.connect, self.client, endpoint)
   if not ok then self:_message("Error", connected)
   elseif not connected then self:_message("Error", err or "Connection was not started.")
-  else self.preferences.endpoint = endpoint end
-  self.view:set_state(self.client.state)
+  elseif manual then self.preferences.endpoint = endpoint end
+  self:_refresh_state()
+end
+
+--- Resolve a local service automatically; an explicit endpoint opts into advanced manual mode.
+--- Automatic port changes retain the Codex thread; explicit server changes start a fresh one.
+function Controller:connect(endpoint)
+  if self.launcher.pending then return end
+  local manual = endpoint ~= nil
+  if manual then endpoint = endpoint:match("^%s*(.-)%s*$") end
+  local mode_changed = (self.preferences.manual_server == true) ~= manual
+  local server_changed = manual and self.preferences.endpoint and self.preferences.endpoint ~= endpoint
+  if mode_changed or server_changed then
+    self:disconnect()
+    self.client = self:_create_client()
+    self.view:clear()
+  else self.client:disconnect() end
+  self.preferences.manual_server = manual
+  self.startup_error = nil
+  if manual then self:_connect_endpoint(endpoint, true); return end
+  local ok, err = pcall(self.launcher.ensure, self.launcher, function(resolved, error_text)
+    if resolved then self:_connect_endpoint(resolved, false)
+    else
+      self.startup_error = error_text or "本地服务没有启动成功。请点击 Retry 重试。"
+      self:_message("Error", self.startup_error)
+      self:_refresh_state()
+    end
+  end)
+  if not ok then
+    print("Aseprite Chat startup diagnostic: " .. tostring(err))
+    self.startup_error = "无法启动本地服务。请允许 Aseprite 启动插件的连接程序，然后点击 Retry。"
+    self:_message("Error", self.startup_error)
+  end
+  self:_refresh_state()
 end
 
 --- Select catalog-supported settings for the next turn without replacing its thread.
@@ -206,9 +240,12 @@ end
 
 --- Disconnect transport and invalidate pending document operations.
 function Controller:disconnect()
+  self.launcher:cancel()
+  self.startup_error = nil
   self:_cancel_pending("Disconnected before execution.")
   self.client:disconnect()
   self.executor:dispose()
+  self:_refresh_state()
 end
 
 --- Start a fresh conversation while retaining connection settings.

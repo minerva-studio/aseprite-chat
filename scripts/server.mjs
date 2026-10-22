@@ -1,21 +1,55 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 
 const maxBytes = 16 * 1024 * 1024;
 
-/** Start a loopback-only WebSocket-to-stdio bridge. Each connection owns its Codex process. */
+/**
+ * Start a loopback-only WebSocket-to-stdio bridge. Each connection owns its Codex process.
+ * When idleTimeoutMs is positive, onClose runs once after either idle or explicit shutdown.
+ */
 export async function createBridge({ port = 4500, command = process.env.CODEX_CLI || 'codex',
-  args = ['app-server', '--stdio'] } = {}) {
+  args = ['app-server', '--stdio'], idleTimeoutMs = 0, onClose = async () => {} } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('Invalid local port');
+  if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 0) throw Error('Invalid idle timeout');
   const server = http.createServer((request, response) => {
     const allowed = validRequest(request);
-    response.writeHead(!allowed ? 403 : request.url === '/readyz' ? 200 : 404);
-    response.end(allowed && request.url === '/readyz' ? 'ready\n' : '');
+    const isReady = allowed && request.url === '/readyz';
+    response.writeHead(!allowed ? 403 : isReady ? 200 : 404, isReady ? { 'Content-Type': 'application/json; charset=utf-8' } : {});
+    response.end(isReady ? JSON.stringify({
+      service: 'aseprite-chat', protocolVersion: 1, pid: process.pid,
+      port: server.address()?.port, busy: !!active
+    }) : '');
   });
   const sockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: maxBytes });
   let active = null;
+  let idleTimer = null;
+  let closePromise = null;
+  const clearIdleTimer = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
+  async function closeBridge() {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      clearIdleTimer();
+      for (const client of sockets.clients) client.terminate();
+      await Promise.all([
+        new Promise(resolve => sockets.close(resolve)),
+        new Promise(resolve => {
+          if (!server.listening) { resolve(); return; }
+          server.close(resolve); server.closeAllConnections();
+        })
+      ]);
+      await onClose();
+    })();
+    return closePromise;
+  }
+  const scheduleIdleClose = () => {
+    clearIdleTimer();
+    if (idleTimeoutMs > 0 && !active) idleTimer = setTimeout(() => { void closeBridge(); }, idleTimeoutMs);
+  };
   function validRequest(request) {
     const authority = `127.0.0.1:${request.socket.localPort}`;
     const origin = request.headers.origin;
@@ -26,17 +60,29 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
   server.on('upgrade', (request, socket, head) => {
     const status = !validRequest(request) ? 403 : request.url !== '/' ? 404 : active ? 409 : null;
     if (status) { socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
-    sockets.handleUpgrade(request, socket, head, client => sockets.emit('connection', client));
+    // With no asynchronous verifyClient hook, handleUpgrade validates and
+    // invokes this callback synchronously. Failed handshakes own no session.
+    sockets.handleUpgrade(request, socket, head, client => {
+      sockets.emit('connection', client);
+    });
   });
   sockets.on('connection', client => {
+    clearIdleTimer();
+    const session = { client, child: null };
+    active = session;
+    client.on('close', () => {
+      if (active === session) active = null;
+      session.child?.stdin.destroy();
+      session.child?.kill();
+      scheduleIdleClose();
+    });
     let child;
     try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
     catch {
       client.close(1011, 'Cannot start Codex; check CODEX_CLI and your PATH.');
       return;
     }
-    const session = { client, child };
-    active = session;
+    session.child = child;
     let pendingOutput = Buffer.alloc(0);
     const fail = reason => { if (client.readyState === WebSocket.OPEN) client.close(1011, reason); };
     child.on('error', () => fail('Cannot start Codex; check CODEX_CLI and your PATH.'));
@@ -67,35 +113,70 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
       child.stdin.write('\n');
     });
     client.on('error', () => client.terminate());
-    client.on('close', () => {
-      if (active === session) active = null;
-      child.stdin.destroy();
-      child.kill();
-    });
   });
   await new Promise((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, '127.0.0.1', resolve);
   });
-  return {
-    port: server.address().port,
-    async close() {
-      for (const client of sockets.clients) client.terminate();
-      await Promise.all([
-        new Promise(resolve => sockets.close(resolve)),
-        new Promise(resolve => { server.close(resolve); server.closeAllConnections(); })
-      ]);
-    }
-  };
+  scheduleIdleClose();
+  return { port: server.address().port, close: closeBridge };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const readyFile = process.env.ASEPRITE_CHAT_READY_FILE;
+  const discoveryFile = process.env.ASEPRITE_CHAT_DISCOVERY_FILE || path.join(
+    process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'AsepriteChat', 'bridge.json');
+  const atomicWriteJson = async (file, value) => {
+    await mkdir(path.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      await writeFile(temporary, `${JSON.stringify(value)}\n`, 'utf8');
+      await rename(temporary, file);
+    } catch (error) {
+      await unlink(temporary).catch(() => {});
+      throw error;
+    }
+  };
+  let bridge;
+  let metadataWritten = false;
+  const removeOwnedMetadata = async () => {
+    if (!metadataWritten) return;
+    try {
+      const current = JSON.parse(await readFile(discoveryFile, 'utf8'));
+      if (current.pid === process.pid) await unlink(discoveryFile);
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    metadataWritten = false;
+  };
   try {
-    const bridge = await createBridge({ port: Number(process.env.ASEPRITE_CHAT_PORT || 4500) });
+    const portText = process.env.ASEPRITE_CHAT_PORT;
+    const idleText = process.env.ASEPRITE_CHAT_IDLE_TIMEOUT_MS;
+    const idleTimeoutMs = idleText === undefined ? 0 : Number(idleText);
+    if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 0) throw Error('空闲超时必须是非负有限数字。');
+    bridge = await createBridge({
+      port: portText === undefined || portText === '' ? 4500 : Number(portText),
+      command: process.env.CODEX_CLI || 'codex', idleTimeoutMs,
+      onClose: () => removeOwnedMetadata().catch(() => {})
+    });
+    const endpoint = `ws://127.0.0.1:${bridge.port}`;
+    const metadata = { service: 'aseprite-chat', protocolVersion: 1, pid: process.pid, port: bridge.port, endpoint };
+    await atomicWriteJson(discoveryFile, metadata);
+    metadataWritten = true;
+    if (readyFile) await atomicWriteJson(readyFile, { endpoint });
     console.log(`Aseprite Chat ready at ws://127.0.0.1:${bridge.port}`);
     console.log('Uses your existing Codex login. Browser origins are rejected. Press Ctrl+C to stop.');
     let closing = false;
-    const stop = async () => { if (closing) return; closing = true; await bridge.close(); };
+    const stop = async () => {
+      if (closing) return;
+      closing = true;
+      await bridge.close();
+    };
     process.on('SIGINT', stop); process.on('SIGTERM', stop);
-  } catch (error) { console.error(error.message); process.exitCode = 1; }
+  } catch (error) {
+    if (bridge) await bridge.close().catch(() => {});
+    await removeOwnedMetadata().catch(() => {});
+    const message = `Aseprite Chat 本地服务启动失败：${error.message}`;
+    if (readyFile) await atomicWriteJson(readyFile, { error: message }).catch(writeError => console.error(writeError.message));
+    console.error(message);
+    process.exitCode = 1;
+  }
 }

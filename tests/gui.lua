@@ -4,7 +4,8 @@ local mode = app.params.mode or "fixture"
 local log = assert(io.open(app.fs.joinPath(root, "work", "gui-" .. mode .. ".txt"), "w"))
 local function record(text) log:write(text .. "\n"); log:flush() end
 local Main = dofile(app.fs.joinPath(root, "main.lua"))
-local c = Main.create { path = root, preferences = {} }
+local c = Main.create { path = root, preferences = {manual_server=true,
+  endpoint=mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500"} }
 local sprite = Sprite(8, 8)
 local initial = sprite.cels[1].image:clone()
 initial:drawPixel(0, 0, app.pixelColor.rgba(255, 0, 0, 255))
@@ -38,7 +39,6 @@ local function finish(ok, reason)
 end
 c:open()
 c.view.dialog:modify { title = "AUTOMATED TEST · Aseprite Chat (" .. mode .. ")" }
-c:connect(mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500")
 timer = Timer { interval = 0.1, ontick = function()
   local ok, err = xpcall(function()
     assert(os.time() - began < (mode == "fixture" and 100 or 240), "GUI test timed out in " .. phase .. " / " .. tostring(c.client.state))

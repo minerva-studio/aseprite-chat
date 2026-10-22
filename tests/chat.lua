@@ -21,6 +21,7 @@ local function native_view(callbacks, preferences)
             for key,value in pairs(widget) do self.widgets[widget.id][key]=value end
           else self.widgets[widget.id]=widget; widget.kind=method end
           if widget.option or widget.text then self.data[widget.id]=widget.option or widget.text end
+          if widget.selected ~= nil then self.data[widget.id]=widget.selected end
         end
         if method=="button" then self.buttons[#self.buttons+1]=widget end
         return self
@@ -107,16 +108,20 @@ test("model and reasoning widgets are actual dropdowns populated from catalog va
   view:close()
 end)
 test("connection settings live in a separate window and close with the chat",function()
-  local connected
+  local connected="not-called"
   local view,dialogs=native_view({on_connect=function(endpoint) connected=endpoint end},{endpoint="ws://127.0.0.1:4500"})
   local main=dialogs[1]
   assert(not main.widgets.endpoint and not main.widgets.connect and not main.widgets.disconnect,
     "connection controls still occupy the chat")
   for _, button in ipairs(main.buttons) do assert(button.text~="Up" and button.text~="Down", "paging buttons remain") end
+  main.widgets.retry.onclick()
+  assert(connected==nil, "Retry did not request automatic discovery")
   main.widgets.settings.onclick()
   assert(#dialogs==2 and view.settings_dialog==dialogs[2])
   local settings=dialogs[2]
   assert(settings.data.endpoint=="ws://127.0.0.1:4500")
+  assert(settings.widgets.endpoint.visible==false and settings.data.manual==false, "manual configuration is the default")
+  settings.data.manual=true; settings.widgets.manual.onclick()
   view:set_state("working")
   assert(not settings.widgets.endpoint.enabled and not settings.widgets.connect.enabled and settings.widgets.disconnect.enabled)
   view:set_state("disconnected")

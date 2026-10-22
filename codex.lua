@@ -226,7 +226,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.1.2"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.2.0"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -385,7 +385,10 @@ function Client:connect(endpoint)
           if kind == WebSocketMessageType.OPEN then self:_opened()
           elseif kind == WebSocketMessageType.CLOSE then
             self:_lost("Connection lost; pending execution cancelled")
-          elseif kind == WebSocketMessageType.ERROR then self:_fail(socket_error or data or "WebSocket error")
+          elseif kind == WebSocketMessageType.ERROR then
+            print("Aseprite Chat transport diagnostic: " .. tostring(socket_error or data))
+            self:_fail((self._initialized and "与本地服务的连接已断开，尚未执行的修改已取消。" or "暂时无法连接到本地服务。")
+              .. "\n地址：" .. endpoint .. "\n请点击 Retry 重新连接；自动模式会查找并启动所需服务。")
           elseif kind == WebSocketMessageType.TEXT and self.state ~= "disconnected" then self:_receive(data) end
         end)
       end}

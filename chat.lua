@@ -126,18 +126,24 @@ function Chat:set_state(state)
   local idle = state == "ready"
   local offline = state == "disconnected" or state == "error"
   if self.dialog then
-    self.dialog:modify { id = "status", text = self.approval and "Awaiting approval" or state }
+    self.dialog:modify { id = "status", text = self.approval and "Awaiting approval"
+      or state == "starting" and "正在启动本地连接…" or state }
     self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
     self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
     self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
+    self.dialog:modify { id = "retry", visible = offline, enabled = offline }
+    self.dialog:modify { id = "latest", visible = not offline }
   end
   if self.settings_dialog then
+    local manual = self.settings_dialog.data.manual == true
     self.settings_dialog:modify { id = "status", text = state }
-    self.settings_dialog:modify { id = "endpoint", enabled = offline }
-    self.settings_dialog:modify { id = "connect", enabled = offline }
-    self.settings_dialog:modify { id = "disconnect", enabled = not offline }
+    self.settings_dialog:modify { id = "manual", enabled = offline }
+    self.settings_dialog:modify { id = "auto_info", visible = not manual }
+    self.settings_dialog:modify { id = "endpoint", visible = manual, enabled = offline and manual }
+    self.settings_dialog:modify { id = "connect", enabled = offline, text = manual and "Connect" or "Retry automatic connection" }
+    self.settings_dialog:modify { id = "disconnect", enabled = not offline, text = state == "starting" and "Cancel startup" or "Disconnect" }
   end
 end
 
@@ -157,7 +163,7 @@ function Chat:set_models(models, model, effort)
   local confirm_model = selected and #selected.supportedReasoningEfforts == 0 and effort ~= nil
   if confirm_model then chosen, selected = nil, nil end
   if not chosen then
-    chosen = confirm_model and "Confirm model selection" or not models and "Connect to load models"
+    chosen = confirm_model and "Confirm model selection" or not models and "Waiting for connection"
       or model and ("Unavailable: " .. model) or "Select a model"
     table.insert(labels, 1, chosen)
   end
@@ -191,9 +197,14 @@ function Chat:show_settings()
     if self.settings_dialog == dlg then self.settings_dialog = nil end
   end}
   self.settings_dialog = dlg
+  dlg:check {id="manual", text="Manual server (advanced)", selected=self.preferences.manual_server == true,
+    onclick=function() self:set_state(self.state) end}
+  dlg:label {id="auto_info", text="The local service is found or started automatically."}
   dlg:entry {id="endpoint", label="Server", text=self.preferences.endpoint or "ws://127.0.0.1:4500"}
   dlg:label {id="status", label="Status", text=self.state}
-  dlg:button {id="connect", text="Connect", onclick=function() self.callbacks.on_connect(dlg.data.endpoint) end}
+  dlg:button {id="connect", text="Connect", onclick=function()
+    self.callbacks.on_connect(dlg.data.manual and dlg.data.endpoint or nil)
+  end}
   dlg:button {id="disconnect", text="Disconnect", onclick=self.callbacks.on_disconnect}
   dlg:button {id="done", text="Done"}
   self:set_state(self.state)
@@ -215,7 +226,7 @@ function Chat:show()
     end
   end }
   self.dialog = dlg
-  dlg:combobox { id = "model", label = "Model", options = {"Connect to load models"}, onchange = function()
+  dlg:combobox { id = "model", label = "Model", options = {"Waiting for connection"}, onchange = function()
     if self.updating_selectors then return end
     local entry = self.models_by_label[dlg.data.model]
     if entry then
@@ -233,7 +244,7 @@ function Chat:show()
     function()
       local parts = {}
       for _, m in ipairs(self.messages) do parts[#parts + 1] = m.role .. ":\n" .. m.text end
-      return #parts > 0 and table.concat(parts, "\n\n") or "Open Settings to connect, then ask about the current sprite."
+      return #parts > 0 and table.concat(parts, "\n\n") or "Chat with Codex about the current sprite. The local connection starts automatically."
     end)
   dlg:newrow()
   dlg:entry { id = "input", label = "Message", text = "", focus = true }
@@ -244,6 +255,9 @@ function Chat:show()
   dlg:button { id = "stop", text = "Stop", onclick = self.callbacks.on_stop }
   dlg:button { id = "new", text = "New Chat", onclick = self.callbacks.on_new_chat }
   dlg:button { id = "latest", text = "Latest", onclick = function() self.scroll.follow = true; dlg:repaint() end }
+  dlg:button { id = "retry", text = "Retry", onclick = function()
+    self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
+  end }
   dlg:button { id = "settings", text = "Settings...", onclick = function() self:show_settings() end }
   self:set_models(self.models, self.selected_model, self.selected_effort)
   dlg:show { wait = false }

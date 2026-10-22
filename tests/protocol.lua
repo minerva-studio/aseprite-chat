@@ -302,7 +302,7 @@ test("socket error retires transport and invalid endpoints never connect",functi
   local h=harness(); eq(h.client:connect("ws://example.com:4500"),false); eq(#h.sockets,0)
   eq(h.client:connect("ws://127.0.0.1:99999"),false); eq(#h.sockets,0)
   h:open(); h.ws:event(WebSocketMessageType.ERROR,"","native socket failed")
-  eq(h.client.state,"error"); assert(h.errors[#h.errors]:find("native socket failed",1,true))
+  eq(h.client.state,"error"); assert(h.errors[#h.errors]:find("Retry",1,true))
 end)
 
 test("cancellation callback failure cannot prevent retirement",function()

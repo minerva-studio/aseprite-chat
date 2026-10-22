@@ -13,7 +13,6 @@ local prompts = {
 }
 controller:open()
 controller.view.dialog:modify {title="AUTOMATED TEST · Model and reasoning selectors"}
-controller:connect("ws://127.0.0.1:4500")
 local function finish(ok, reason)
   timer:stop()
   result_dialog = Dialog {title="AUTOMATED TEST RESULT"}
