@@ -102,7 +102,8 @@ test("model and reasoning widgets are actual dropdowns populated from catalog va
   local plain={{model="plain",displayName="Plain",supportedReasoningEfforts={}}}
   view:set_models(plain,"plain","high"); view:set_state("ready")
   assert(not view.selection_valid and #widgets.model.options==2, "stale effort cannot be explicitly repaired")
-  data.model="Plain (plain)"; widgets.model.onchange()
+  assert(widgets.model.options[2]=="Plain", "unique display name repeats its technical model ID")
+  data.model="Plain"; widgets.model.onchange()
   assert(chosen[1]=="plain" and chosen[2]==nil)
   view:set_models(plain,"plain",nil)
   assert(view.selection_valid and not widgets.effort.enabled)
@@ -150,6 +151,52 @@ test("settings show only the current connection action with a short caption",fun
   view:close()
 end)
 
+test("tool and summary cards collapse details, preserve expansion on updates and support keyboard",function()
+  local view,dialogs,gc=native_view()
+  gc.height=600
+  local canvas=dialogs[1].widgets.transcript
+  local visible={}; function gc:fillText(text) visible[#visible+1]=text end
+  view:add_message("tool","Tool",'read_sprite · Running\nResult:\n{"secretDetail":123}',false)
+  view:add_message("reason","Summary","Detailed reasoning summary",false)
+  canvas.onpaint {context=gc}
+  assert(not table.concat(visible):find("secretDetail",1,true) and not table.concat(visible):find("Detailed reasoning",1,true), "activity floods the default transcript")
+  local card=view.scroll.cards[1]
+  canvas.onmousedown {button=MouseButton.LEFT,x=20,y=card.top-view.scroll.offset+6}
+  visible={}; canvas.onpaint {context=gc}
+  assert(table.concat(visible):find("secretDetail",1,true), "tool details did not expand")
+  view:add_message("tool","Tool",'read_sprite · Succeeded\nResult:\n{"secretDetail":456}',false)
+  visible={}; canvas.onpaint {context=gc}
+  assert(table.concat(visible):find("456",1,true), "stream update reset expansion")
+  canvas.onkeydown {code="Enter",stopPropagation=function() end}
+  visible={}; canvas.onpaint {context=gc}
+  assert(not table.concat(visible):find("secretDetail",1,true), "keyboard did not collapse selected activity")
+  assert(view.by_id.tool.text:find("456",1,true), "folding discarded the result")
+  view:clear(); assert(not view.focused_message)
+  view:close()
+end)
+
+test("conversation navigation jumps between user prompts and Latest resumes following",function()
+  local view,dialogs,gc=native_view()
+  local canvas=dialogs[1].widgets.transcript
+  for i=1,4 do
+    view:add_message("u"..i,"You","Prompt "..i,false)
+    view:add_message("a"..i,"Codex",string.rep("Answer line\n",8),false)
+  end
+  canvas.onpaint {context=gc}
+  local bottom=view.scroll.offset
+  assert(dialogs[1].widgets.previous and dialogs[1].widgets.next_prompt, "no turn navigation")
+  dialogs[1].widgets.previous.onclick(); canvas.onpaint {context=gc}
+  assert(view.scroll.offset<bottom and not view.scroll.follow)
+  local earlier=view.scroll.offset
+  dialogs[1].widgets.previous.onclick(); canvas.onpaint {context=gc}
+  assert(view.scroll.offset<earlier)
+  dialogs[1].widgets.next_prompt.onclick(); canvas.onpaint {context=gc}
+  assert(view.scroll.offset>0)
+  dialogs[1].widgets.latest.onclick(); canvas.onpaint {context=gc}
+  assert(view.scroll.follow and view.scroll.offset==view.scroll.maximum)
+  view:close()
+end)
+
 test("history picker loads pages, deduplicates threads, and preserves empty-page cursors",function()
   local requests={}
   local view,dialogs=native_view({
@@ -161,24 +208,24 @@ test("history picker loads pages, deduplicates threads, and preserves empty-page
   })
   view:set_state("ready")
   local main=dialogs[1]
-  assert(main.widgets.history and main.widgets.history.text=="History", "missing History button")
+  assert(main.widgets.history and main.widgets.history.text=="Chats...", "missing History button")
   main.widgets.history.onclick()
   local picker=dialogs[2]
-  assert(picker and picker.widgets.search.kind=="entry" and picker.widgets.threads.kind=="combobox")
+  assert(picker and picker.widgets.search.kind=="entry" and picker.widgets.threads.kind=="canvas")
   assert(#requests==1 and requests[1].search=="" and requests[1].cursor==nil, "picker did not load first page")
   requests[1].callback({data={{id="thread-1",name="A long conversation title",preview="",updatedAt="today",status="idle"}},nextCursor="next"})
   assert(picker.widgets.more.enabled and picker.widgets.open.enabled)
   picker.widgets.more.onclick()
   assert(requests[2].cursor=="next")
   requests[2].callback({data={{id="thread-1",name="duplicate",preview="",updatedAt="today"}},nextCursor="later"})
-  assert(#picker.widgets.threads.options==1, "duplicate thread was appended")
+  assert(#view.history.entries==1, "duplicate thread was appended")
   picker.widgets.more.onclick()
   requests[3].callback({data={},nextCursor="last"})
   assert(picker.widgets.more.enabled, "empty page discarded its next cursor")
   picker.widgets.more.onclick()
   requests[4].callback({data={{id="thread-2",preview="preview",updatedAt="yesterday"}}})
-  assert(#picker.widgets.threads.options==2 and not picker.widgets.more.enabled)
-  assert(picker.widgets.threads.options[1]:find("thread%-1"), "picker title omits short id")
+  assert(#view.history.entries==2 and not picker.widgets.more.enabled)
+  assert(view.history.entries[1].id=="thread-1")
   view:close()
 end)
 
@@ -194,12 +241,12 @@ test("history search and picker identity retire stale callbacks",function()
   first.data.search="new"; first.widgets.search.onchange()
   requests[3].callback({data={{id="new-thread",name="New"}}})
   requests[2].callback({data={{id="old-thread",name="Old"}}})
-  assert(#first.widgets.threads.options==1 and first.widgets.threads.options[1]:find("new%-thr"))
+  assert(#view.history.entries==1 and view.history.entries[1].id=="new-thread")
   first.widgets.done.onclick()
   dialogs[1].widgets.history.onclick()
   local reopened=dialogs[3]
   requests[1].callback({data={{id="late-thread",name="Late"}}})
-  assert(#reopened.widgets.threads.options==0, "closed picker callback changed reopened picker")
+  assert(#view.history.entries==0, "closed picker callback changed reopened picker")
   view:close()
 end)
 
@@ -211,7 +258,7 @@ test("opening a history thread is locked unless ready and closes only after acce
   dialogs[1].widgets.history.onclick()
   local picker=dialogs[2]
   assert(not picker.widgets.open.enabled, "thread can open before ready")
-  picker.data.threads=picker.widgets.threads.options[1]
+  view.history.selected=1
   view:set_state("working")
   assert(not picker.widgets.open.enabled, "thread can open while working")
   view:set_state("ready")
@@ -230,7 +277,7 @@ test("rejected history open remains visible with error and non-ready states stay
   view:set_state("loading")
   assert(not picker.widgets.open.enabled)
   view:set_state("ready")
-  picker.data.threads=picker.widgets.threads.options[1]
+  view.history.selected=1
   picker.widgets.open.onclick()
   assert(picker.closed~=true and picker.widgets.status.text:find("cannot open",1,true))
   view:close()
@@ -259,30 +306,134 @@ test("history errors remain visible and a failed More request can be retried",fu
   view:close()
 end)
 
-test("history labels truncate on UTF-8 boundaries and distinguish matching titles",function()
-  local requests={}
-  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
-    requests[#requests+1]=callback; return true
-  end})
-  dialogs[1].widgets.history.onclick()
+test("history canvas displays bounded UTF-8 titles and distinct selectable rows",function()
+  local opened
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="same-prefix-1",name=string.rep("界",50)},{id="same-prefix-2",name=string.rep("界",50)}}}); return true
+  end,on_open_thread=function(id) opened=id; return true end})
+  view:set_state("ready"); view:show_history()
   local picker=dialogs[2]
-  requests[1]({data={
-    {id="abcdefgh-1",name=string.rep("界",50)},
-    {id="abcdefgh-2",name=string.rep("界",50)}
-  }})
-  local first,second=picker.widgets.threads.options[1],picker.widgets.threads.options[2]
-  assert(first~=second and first:find("abcdefgh%-1",1)==nil and first:find("abcdefgh",1,true))
-  assert(utf8.len(first)<50 and utf8.len(second)<50, "long title was not bounded")
-  dialogs[1]:close()
-  assert(picker.closed==true and view.history_dialog==nil, "closing chat left history open")
+  gc.height=300
+  local visible={}; function gc:fillText(text) visible[#visible+1]=text end
+  picker.widgets.threads.onpaint {context=gc}
+  assert(table.concat(visible):find("界",1,true) and utf8.len(table.concat(visible))<100, "history title was not bounded")
+  picker.widgets.threads.onmousedown {button=MouseButton.LEFT,x=20,y=8+view.history.row_height+12}
+  assert(view.history.selected==2)
+  picker.widgets.threads.onkeydown {code="Enter",stopPropagation=function() end}
+  assert(opened=="same-prefix-2" and not view.history_dialog, "keyboard did not open selected row")
+  view:close()
+end)
+
+test("history keyboard pages independently, single click selects, and busy double click cannot open",function()
+  local opened
+  local entries={}
+  for i=1,20 do entries[i]={id="thread-"..i,name="Conversation "..i,status=i==1 and "active" or "idle"} end
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback) callback({data=entries}); return true end,
+    on_open_thread=function(id) opened=id; return true end})
+  view:set_state("ready"); view:show_history(); gc.height=180
+  local picker=dialogs[2]; local canvas=picker.widgets.threads
+  local function key(code) canvas.onkeydown {code=code,stopPropagation=function() end} end
+  canvas.onpaint {context=gc}; key("End")
+  assert(view.history.selected==20 and view.history.scroll.offset>0 and view.scroll.offset==0)
+  key("PageUp"); assert(view.history.selected<20)
+  key("Home"); canvas.onpaint {context=gc}
+  canvas.ondblclick {button=MouseButton.LEFT,x=20,y=12}
+  assert(not opened and view.history_dialog, "busy conversation was opened")
+  local y=8+view.history.row_height+10-view.history.scroll.offset
+  canvas.onmousedown {button=MouseButton.LEFT,x=20,y=y}
+  assert(view.history.selected==2 and not opened, "single click opened a conversation")
+  view:set_state("working"); canvas.ondblclick {button=MouseButton.LEFT,x=20,y=y}
+  assert(not opened, "double click opened during generation")
+  view:set_state("ready"); canvas.ondblclick {button=MouseButton.LEFT,x=20,y=y}
+  assert(opened=="thread-2" and not view.history_dialog)
+  view:close()
+end)
+
+test("history refresh starts at top and loading more preserves manual reading position",function()
+  local requests={}
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback) requests[#requests+1]=callback; return true end})
+  view:set_state("ready"); view:show_history(); gc.height=200
+  local picker=dialogs[2]; local canvas=picker.widgets.threads
+  local rows={}; for i=1,20 do rows[i]={id="thread-"..i,name="Title "..i} end
+  requests[1]({data=rows,nextCursor="next"}); canvas.onpaint {context=gc}
+  canvas.onwheel {deltaY=10000}; canvas.onpaint {context=gc}
+  assert(not view.history.scroll.follow, "manual history scrolling enabled transcript follow mode")
+  local bottom=view.history.scroll.offset
+  picker.widgets.more.onclick()
+  local more={}; for i=21,40 do more[#more+1]={id="thread-"..i,name="Title "..i} end
+  requests[2]({data=more}); canvas.onpaint {context=gc}
+  assert(view.history.scroll.offset==bottom, "pagination skipped directly to the new bottom")
+  canvas.onwheel {deltaY=10000}; picker.widgets.refresh.onclick()
+  requests[3]({data=rows}); canvas.onpaint {context=gc}
+  assert(view.history.selected==1 and view.history.scroll.offset==0, "refresh hid the selected first result")
+  view:close()
+end)
+
+test("collapsed tools use one compact line and history uses two dense nonoverlapping lines",function()
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="a",name="魔法书",preview="Preview",updatedAt=1700000000}}}); return true
+  end})
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("魔",1,true) and 22 or 10} end
+  gc.height=300
+  view:add_message("tool","Tool","read_sprite · Succeeded\nResult:\nLong JSON",false)
+  dialogs[1].widgets.transcript.onpaint {context=gc}
+  assert(view.scroll.cards[1].height<=22, "collapsed tool has a large empty card")
+  view:set_state("ready"); view:show_history()
+  local positions={}; function gc:fillText(text,_,y) positions[#positions+1]={text=text,y=y,height=self:measureText(text).height} end
+  dialogs[2].widgets.threads.onpaint {context=gc}
+  assert(view.history.row_height<=2*25+8, "history still has three tall rows")
+  local title,preview
+  for _,line in ipairs(positions) do if line.text:find("魔",1,true) then title=line elseif line.text=="Preview" then preview=line end end
+  assert(title and preview and preview.y>=title.y+title.height, "compact title overlaps its preview")
+  view:close()
+end)
+
+test("history pagination with taller glyphs preserves the visible conversation anchor",function()
+  local callbacks={}
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback) callbacks[#callbacks+1]=callback; return true end})
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("魔",1,true) and 22 or 10} end
+  gc.height=200; view:set_state("ready"); view:show_history()
+  local rows={}; for i=1,20 do rows[i]={id="old-"..i,name="Title "..i} end
+  callbacks[1]({data=rows,nextCursor="next"})
+  local canvas=dialogs[2].widgets.threads
+  canvas.onpaint {context=gc}; canvas.onwheel {deltaY=10000}; canvas.onpaint {context=gc}
+  local h=view.history
+  local first=math.max(1,math.floor((h.scroll.offset-8)/h.row_height)+1)
+  local id=h.entries[first].id
+  local y=8+(first-1)*h.row_height-h.scroll.offset
+  dialogs[2].widgets.more.onclick(); callbacks[2]({data={{id="new",name="魔法书"}}})
+  canvas.onpaint {context=gc}
+  local visible=math.max(1,math.floor((h.scroll.offset-8)/h.row_height)+1)
+  assert(h.entries[visible].id==id and 8+(visible-1)*h.row_height-h.scroll.offset==y, "taller new rows moved the visible conversation")
+  view:close()
+end)
+
+test("expanding activity keeps its header anchored and pauses automatic following",function()
+  local view,dialogs,gc=native_view()
+  local canvas=dialogs[1].widgets.transcript
+  view:add_message("first","You",string.rep("before\n",20),false)
+  view:add_message("tool","Tool","execute_lua · Succeeded\nLua:\n"..string.rep("code\n",40),false)
+  view:add_message("last","Codex",string.rep("after\n",30),false)
+  canvas.onpaint {context=gc}
+  view.scroll.follow=false; view.scroll.offset=view.scroll.cards[2].top-20
+  canvas.onpaint {context=gc}
+  canvas.onmousedown {button=MouseButton.LEFT,x=20,y=25}
+  canvas.onpaint {context=gc}
+  assert(view.by_id.tool.expanded and not view.scroll.follow and view.scroll.cards[2].top-view.scroll.offset==20)
+  canvas.onkeydown {code="Enter",stopPropagation=function() end}; canvas.onpaint {context=gc}
+  assert(not view.by_id.tool.expanded and view.scroll.cards[2].top-view.scroll.offset==20)
+  view:close()
 end)
 
 test("short history previews hide appended canvas metadata",function()
-  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback)
     callback({data={{id="short-id",preview='hi\n\nCurrent Aseprite target:\n{"revision":123}',status="idle"}}}); return true
   end})
   view:set_state("ready"); view:show_history()
-  assert(dialogs[2].widgets.threads.options[1]=="hi · short-id", "history title exposed internal canvas context")
+  local visible={}; function gc:fillText(text) visible[#visible+1]=text end
+  dialogs[2].widgets.threads.onpaint {context=gc}
+  local text=table.concat(visible)
+  assert(text:find("hi",1,true) and not text:find("Current Aseprite",1,true), "history exposed internal canvas context")
   view:close()
 end)
 
@@ -295,7 +446,7 @@ test("active history cannot be opened by a state refresh or selection change",fu
   local picker=dialogs[2]
   assert(not picker.widgets.open.enabled)
   picker.widgets.open.onclick(); assert(not opened)
-  picker.data.threads=picker.widgets.threads.options[2]; picker.widgets.threads.onchange()
+  picker.widgets.threads.onkeydown {code="ArrowDown",stopPropagation=function() end}
   assert(picker.widgets.open.enabled)
   view:set_state("working"); assert(not picker.widgets.open.enabled)
   view:close()
@@ -307,7 +458,7 @@ test("connection loss retires an open picker instead of leaving a permanent load
   view:set_state("ready"); view:show_history()
   local old=dialogs[2]
   view:set_state("disconnected")
-  assert(old.closed and not view.history_dialog and not view.history_loading)
+  assert(old.closed and not view.history_dialog and not view.history)
   view:set_state("ready"); view:show_history()
   callbacks[1]({data={{id="stale",name="Old"}}})
   assert(dialogs[3].widgets.open.enabled==false)

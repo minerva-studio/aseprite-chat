@@ -27,39 +27,36 @@ function Chat.new(callbacks, preferences)
     scroll = { offset = 0, maximum = 0, follow = true } }, Chat)
 end
 
-local function history_label(thread, id_length)
-  local title = thread.name
-  if not title or title == "" then
-    title = thread.preview
-    local marker = title and title:find("\n\nCurrent Aseprite target:\n",1,true)
-    if marker then title = title:sub(1,marker-1) end
-  end
-  if not title or title == "" then title = "Conversation" end
-  local chars, truncated = {}, false
-  for _, code in utf8.codes(title) do
-    if #chars >= 36 then truncated = true; break end
-    chars[#chars + 1] = utf8.char(code)
-  end
-  title = table.concat(chars) .. (truncated and "…" or "")
-  local short_id = tostring(thread.id):sub(1, id_length or 8)
-  return title .. " · " .. short_id
+local function preview_text(text)
+  text=text or ""
+  local marker=text:find("\n\nCurrent Aseprite target:\n",1,true)
+  return (marker and text:sub(1,marker-1) or text):gsub("%s+"," ")
 end
 
-local function paint(gc, text, scroll)
-  gc.color = Color { r = 32, g = 34, b = 40 }
-  gc:fillRect(Rectangle(0, 0, gc.width, gc.height))
-  local line_height = gc:measureText("Mg").height + 3
-  local lines = Chat.wrap(text, math.max(1, gc.width - 24), function(s)
-    return gc:measureText(s).width
-  end)
-  scroll.maximum = math.max(0, #lines * line_height + 12 - gc.height)
-  scroll.height = gc.height
-  scroll.offset = scroll.follow and scroll.maximum or math.min(scroll.offset, scroll.maximum)
-  gc.color = Color { r = 231, g = 233, b = 240 }
-  for index, line in ipairs(lines) do
-    local y = 6 + (index - 1) * line_height - scroll.offset
-    if y > -line_height and y < gc.height then gc:fillText(line, 8, y) end
+local function elide(gc,text,width)
+  if gc:measureText(text).width<=width then return text end
+  local chars={}
+  for _,code in utf8.codes(text) do
+    if gc:measureText(table.concat(chars)..utf8.char(code).."…").width>width then break end
+    chars[#chars+1]=utf8.char(code)
   end
+  return table.concat(chars).."…"
+end
+
+-- Fallback glyphs can be taller than Latin text in Aseprite's native font.
+local function line_height(gc)
+  return math.max(gc:measureText("Mg").height,gc:measureText("汉字").height)+3
+end
+
+local function surface(gc,scroll,height)
+  gc.color=Color {r=29,g=31,b=37}
+  gc:fillRect(Rectangle(0,0,gc.width,gc.height))
+  scroll.maximum=math.max(0,height-gc.height)
+  scroll.height=gc.height
+  scroll.offset=scroll.follow and scroll.maximum or math.max(0,math.min(scroll.offset,scroll.maximum))
+end
+
+local function scrollbar(gc,scroll)
   if scroll.maximum > 0 then
     local height = math.max(1, gc.height - 4)
     local thumb_height = math.min(height, math.max(14, height * gc.height / (scroll.maximum + gc.height)))
@@ -72,9 +69,118 @@ local function paint(gc, text, scroll)
   else scroll.track, scroll.grab = nil, nil end
 end
 
+local function paint(gc, text, scroll)
+  local line_height = line_height(gc)
+  local lines = Chat.wrap(text, math.max(1, gc.width - 24), function(s)
+    return gc:measureText(s).width
+  end)
+  surface(gc,scroll,#lines*line_height+12)
+  gc.color = Color { r = 231, g = 233, b = 240 }
+  for index, line in ipairs(lines) do
+    local y = 6 + (index - 1) * line_height - scroll.offset
+    if y > -line_height and y < gc.height then gc:fillText(line, 8, y) end
+  end
+  scrollbar(gc,scroll)
+end
+
+-- Cards retain one text source; expansion is presentation state on that item.
+local function paint_messages(gc,view)
+  local scroll=view.scroll
+  local width=math.max(1,gc.width-42)
+  local cards,top={},8
+  for _,message in ipairs(view.messages) do
+    if message.text~="" then
+      local folded=message.role=="Tool" or message.role=="Summary"
+      local title=message.role
+      if message.role=="Tool" then
+        title=message.text:match("^[^\n]+") or "Tool"
+        title=title:gsub("^read_sprite","Read canvas"):gsub("^execute_lua","Edit canvas")
+      elseif message.role=="Summary" then title="Reasoning summary" end
+      if folded then title=(message.expanded and "[-] " or "[+] ")..title end
+      local lines={}
+      if not folded or message.expanded then
+        lines=Chat.wrap(message.text,width,function(text) return gc:measureText(text).width end)
+      end
+      local header_height=gc:measureText(title).height+10
+      local body_line_height=gc:measureText("Mg").height+3
+      for _,line in ipairs(lines) do body_line_height=math.max(body_line_height,gc:measureText(line).height+3) end
+      local height=header_height+#lines*body_line_height
+      cards[#cards+1]={message=message,top=top,height=height,title=title,lines=lines,folded=folded,
+        header_height=header_height,line_height=body_line_height}
+      top=top+height+(folded and not message.expanded and 4 or 8)
+    end
+  end
+  scroll.cards=cards
+  if scroll.anchor then
+    for _,card in ipairs(cards) do if card.message.id==scroll.anchor.id then scroll.offset=card.top-scroll.anchor.y; break end end
+    scroll.anchor=nil
+  end
+  surface(gc,scroll,top)
+  if #cards==0 then
+    gc.color=Color {r=169,g=176,b=191}
+    gc:fillText("Start a conversation about your current canvas.",12,16)
+  end
+  for _,card in ipairs(cards) do
+    local y=card.top-scroll.offset
+    if y+card.height>0 and y<gc.height then
+      local role=card.message.role
+      gc.color=role=="You" and Color {r=39,g=54,b=70} or Color {r=39,g=42,b=50}
+      gc:fillRect(Rectangle(8,y,gc.width-26,card.height))
+      gc.color=role=="You" and Color {r=140,g=185,b=229} or role=="Codex" and Color {r=142,g=204,b=174}
+        or role=="Error" and Color {r=246,g=145,b=145} or Color {r=180,g=184,b=203}
+      if card.message.text:find(" · Failed",1,true) or card.message.text:find(" · Rejected",1,true) then gc.color=Color {r=246,g=163,b=145} end
+      if y+5>=0 and y+5<gc.height-gc:measureText(card.title).height then gc:fillText(elide(gc,card.title,width),16,y+5) end
+      gc.color=Color {r=231,g=233,b=240}
+      for index,line in ipairs(card.lines) do
+        local line_y=y+card.header_height+(index-1)*card.line_height
+        if line_y>=0 and line_y<gc.height-gc:measureText(line).height then gc:fillText(line,16,line_y) end
+      end
+    end
+  end
+  scrollbar(gc,scroll)
+end
+
+local function transcript_input(view,action,event)
+  local message
+  if action=="down" and event.button==MouseButton.LEFT then
+    for _,card in ipairs(view.scroll.cards or {}) do
+      local y=event.y+view.scroll.offset
+      if event.x>=8 and event.x<(view.scroll.track and view.scroll.track.x or math.huge)
+          and y>=card.top and y<card.top+card.header_height then
+        view.focused_message=card.message.id
+        if card.folded then message=card.message end
+        break
+      end
+    end
+  elseif action=="key" and (event.code=="Enter" or event.code=="Space") then
+    message=view.by_id[view.focused_message]
+    if message and message.role~="Tool" and message.role~="Summary" then message=nil end
+    if message then event:stopPropagation() end
+  end
+  if not message then return false end
+  for _,card in ipairs(view.scroll.cards or {}) do
+    if card.message==message then view.scroll.anchor={id=message.id,y=card.top-view.scroll.offset}; break end
+  end
+  message.expanded=not message.expanded
+  view.scroll.follow=false
+  return true
+end
+
+--- Move the viewport to the preceding/following user prompt, keeping reading paused.
+function Chat:jump_prompt(direction)
+  local target
+  for _,card in ipairs(self.scroll.cards or {}) do
+    if card.message.role=="You" then
+      if direction<0 and card.top<self.scroll.offset-1 then target=card.top
+      elseif direction>0 and card.top>self.scroll.offset+1 then target=card.top; break end
+    end
+  end
+  if target then self.scroll.offset=math.min(target,self.scroll.maximum); self.scroll.follow=false; self.dialog:repaint() end
+end
+
 local function scroll_by(scroll, delta)
   scroll.offset = math.max(0, math.min(scroll.maximum, scroll.offset + delta))
-  scroll.follow = scroll.offset >= scroll.maximum
+  scroll.follow = scroll.auto_follow~=false and scroll.offset >= scroll.maximum
 end
 
 local function scroll_input(scroll, action, event)
@@ -97,24 +203,28 @@ local function scroll_input(scroll, action, event)
   elseif action == "up" then
     if event.button ~= MouseButton.LEFT or scroll.grab == nil then return false end
     scroll.grab = nil
-    scroll.follow = scroll.offset >= scroll.maximum
+    scroll.follow = scroll.auto_follow~=false and scroll.offset >= scroll.maximum
   elseif action == "key" then
     local delta = ({ArrowUp=-30, ArrowDown=30, PageUp=-scroll.height*0.9,
       PageDown=scroll.height*0.9, Home=-scroll.maximum, End=scroll.maximum})[event.code]
     if not delta then return false end
     scroll_by(scroll, delta)
     event:stopPropagation()
-  end
+  else return false end
   return true
 end
 
 -- Both text surfaces share input handling; Aseprite captures the mouse on canvas presses.
-local function add_scroll_canvas(dialog, spec, scroll, text)
-  spec.onpaint = function(ev) paint(ev.context, text(), scroll) end
-  for field, action in pairs {onwheel="wheel", onmousedown="down", onmousemove="move", onmouseup="up", onkeydown="key"} do
+local function add_scroll_canvas(dialog, spec, scroll, render, input)
+  spec.onpaint = function(ev) render(ev.context) end
+  for field, action in pairs {onwheel="wheel", onmousedown="down", onmousemove="move", onmouseup="up", onkeydown="key",ondblclick="double"} do
     local input_action = action
     spec[field] = function(ev)
-      if scroll_input(scroll, input_action, ev) then dialog:repaint() end
+      local handled
+      if input and (input_action=="key" or input_action=="double") then handled=input(input_action,ev) end
+      if not handled then handled=scroll_input(scroll,input_action,ev) end
+      if not handled and input and input_action~="key" and input_action~="double" then handled=input(input_action,ev) end
+      if handled then dialog:repaint() end
     end
   end
   dialog:canvas(spec)
@@ -129,14 +239,26 @@ function Chat:add_message(id, role, text, append)
     self.by_id[id] = message
   end
   message.text = append and (message.text .. text) or text
-  if self.dialog then self.dialog:repaint() end
+  if self.dialog then
+    if role=="You" then
+      for _,entry in ipairs(self.messages) do if entry.role=="You" then
+        local title=preview_text(entry.text)
+        local stop=utf8.offset(title,61)
+        self.dialog:modify {id="conversation",text=stop and title:sub(1,stop-1).."…" or title}
+        break
+      end end
+    end
+    self.dialog:repaint()
+  end
 end
 
 --- Clear the local transcript when the user starts a new conversation.
 function Chat:clear()
   self.messages, self.by_id = {}, {}
+  self.focused_message=nil
+  self.scroll.cards,self.scroll.anchor=nil,nil
   self.scroll.offset, self.scroll.follow, self.scroll.grab = 0, true, nil
-  if self.dialog then self.dialog:repaint() end
+  if self.dialog then self.dialog:modify {id="conversation",text="New chat"}; self.dialog:repaint() end
 end
 
 --- Update controls from protocol state and the current native editor context.
@@ -174,8 +296,8 @@ function Chat:set_state(state)
   end
   if self.history_dialog then
     local picker = self.history_dialog
-    local selected=self.history_choices and self.history_choices[picker.data.threads]
-    picker:modify { id = "open", enabled = self.state == "ready" and not self.history_loading
+    local selected=self.history and self.history.entries[self.history.selected]
+    picker:modify { id = "open", enabled = self.state == "ready" and not self.history.loading
       and selected ~= nil and selected.status ~= "active" }
   end
 end
@@ -190,107 +312,152 @@ function Chat:set_approval_mode(enabled)
   end
 end
 
---- Open one modeless history picker and page persisted conversations on demand.
+local function paint_history(gc,history)
+  local scroll=history.scroll
+  local line_height=line_height(gc)
+  for _,thread in ipairs(history.entries) do
+    line_height=math.max(line_height,gc:measureText(preview_text(thread.name)).height+3,
+      gc:measureText(preview_text(thread.preview)).height+3)
+  end
+  local row_height=line_height*2+6
+  -- Pages only append entries, so the visible row index and relative Y remain
+  -- stable even when newly loaded fallback glyphs increase the shared row height.
+  if history.row_height and history.row_height~=row_height then
+    local first=math.max(1,math.floor((scroll.offset-8)/history.row_height)+1)
+    local relative_y=8+(first-1)*history.row_height-scroll.offset
+    scroll.offset=8+(first-1)*row_height-relative_y
+  end
+  history.row_height=row_height
+  history.width=gc.width
+  surface(gc,scroll,16+#history.entries*history.row_height)
+  if #history.entries==0 then
+    gc.color=Color {r=178,g=184,b=198}
+    gc:fillText(history.loading and "Loading conversations..." or "No conversations found.",12,16)
+  end
+  for index,thread in ipairs(history.entries) do
+    local y=8+(index-1)*history.row_height-scroll.offset
+    if y+history.row_height>0 and y<gc.height then
+      gc.color=index==history.selected and Color {r=51,g=70,b=91} or Color {r=38,g=41,b=49}
+      gc:fillRect(Rectangle(6,y,gc.width-24,history.row_height-6))
+      local preview=preview_text(thread.preview)
+      local title=thread.name and thread.name~="" and thread.name or preview~="" and preview or "Untitled conversation"
+      local date=type(thread.updatedAt)=="number" and os.date("%m-%d %H:%M",thread.updatedAt) or ""
+      if thread.status=="active" then date="Active · "..date end
+      local date_width=gc:measureText(date).width
+      local title_y=y+4
+      if title_y>=0 and title_y<gc.height-gc:measureText(title).height then
+        gc.color=Color {r=234,g=238,b=246}
+        gc:fillText(elide(gc,title,math.max(1,gc.width-48-date_width)),14,title_y)
+        gc.color=Color {r=163,g=174,b=193}
+        gc:fillText(date,gc.width-30-date_width,title_y)
+      end
+      local preview_y=title_y+line_height
+      gc.color=Color {r=163,g=174,b=193}
+      if preview_y>=0 and preview_y<gc.height-gc:measureText(preview).height then gc:fillText(elide(gc,preview,math.max(1,gc.width-42)),14,preview_y) end
+    end
+  end
+  scrollbar(gc,scroll)
+end
+
+--- Browse persisted conversations with an independently scrollable, keyboard-driven list.
 function Chat:show_history()
-  if self.history_dialog then self.history_dialog:show { wait = false }; return end
-  local dlg, entries, cursor, query = nil, {}, nil, ""
-  local serial = 0
-  local function current(picker, request)
-    return self.history_dialog == picker and serial == request
+  if self.history_dialog then self.history_dialog:show {wait=false}; return end
+  local dlg
+  local history={entries={},selected=0,serial=0,query="",loading=false,
+    scroll={offset=0,maximum=0,follow=false,auto_follow=false}}
+  self.history=history
+  local function current(request)
+    return self.history==history and self.history_dialog==dlg and history.serial==request
   end
-  local function update_options()
-    local labels, used = {}, {}
-    self.history_choices = {}
-    for _, thread in ipairs(entries) do
-      local label = history_label(thread)
-      local id = tostring(thread.id)
-      local suffix_length = 8
-      while used[label] and suffix_length < #id do
-        suffix_length = math.min(#id, suffix_length + 1)
-        label = history_label(thread, suffix_length)
-      end
-      used[label] = true
-      labels[#labels + 1] = label
-      self.history_choices[label] = thread
-    end
-    dlg:modify { id = "threads", options = labels, option = labels[1] or "", enabled = #labels > 0 }
-    self:set_state(self.state)
+  local function open_selected()
+    local selected=history.entries[history.selected]
+    if self.history~=history or self.state~="ready" or history.loading or not selected or selected.status=="active" then return end
+    local started,error_text=self.callbacks.on_open_thread(selected.id)
+    if started then dlg:close() else dlg:modify {id="status",text=error_text or "Could not open conversation."} end
   end
-  local function load_page(search, page_cursor, append)
-    serial = serial + 1
-    local request = serial
-    query = search
-    self.history_loading = true
-    dlg:modify { id = "status", text = page_cursor and "Loading more…" or "Loading history…" }
-    dlg:modify { id = "more", enabled = false }
-    dlg:modify { id = "refresh", enabled = false }
-    dlg:modify { id = "open", enabled = false }
+  local function load_page(search,cursor,append)
+    history.serial=history.serial+1
+    local request=history.serial
+    history.query,history.loading=search,true
+    dlg:modify {id="status",text=cursor and "Loading more..." or "Loading conversations..."}
+    dlg:modify {id="more",enabled=false}
+    dlg:modify {id="refresh",enabled=false}
     if not append then
-      entries, cursor = {}, nil
-      update_options()
+      history.entries,history.selected,history.cursor={},0,nil
+      history.row_height=nil
+      history.scroll.offset,history.scroll.grab,history.scroll.follow=0,nil,false
     end
-    local function received(page, error_text)
-      if not current(dlg, request) then return end
-      self.history_loading = false
-      if error_text then
-        dlg:modify { id = "status", text = error_text }
-        dlg:modify { id = "refresh", enabled = true }
-        dlg:modify { id = "more", enabled = cursor ~= nil }
-        update_options()
-        return
-      end
-      page = page or {}
-      local seen = {}
-      for _, thread in ipairs(entries) do seen[thread.id] = true end
-      for _, thread in ipairs(page.data or {}) do
-        if thread.id and not seen[thread.id] then
-          entries[#entries + 1] = thread
-          seen[thread.id] = true
+    self:set_state(self.state); dlg:repaint()
+    local function received(page,error_text)
+      if not current(request) then return end
+      history.loading=false
+      if error_text then dlg:modify {id="status",text=error_text}
+      else
+        local seen={}
+        for _,thread in ipairs(history.entries) do seen[thread.id]=true end
+        for _,thread in ipairs(page.data or {}) do
+          if not seen[thread.id] then history.entries[#history.entries+1]=thread; seen[thread.id]=true end
         end
+        if history.selected==0 and #history.entries>0 then history.selected=1 end
+        history.cursor=page.nextCursor
+        dlg:modify {id="status",text=#history.entries==0 and "No conversations found." or #history.entries.." conversations · Double-click or Enter to open"}
       end
-      cursor = page.nextCursor
-      dlg:modify { id = "status", text = #entries == 0 and "No conversations found." or ("Loaded " .. #entries .. " conversations.") }
-      dlg:modify { id = "refresh", enabled = true }
-      dlg:modify { id = "more", enabled = cursor ~= nil }
-      update_options()
+      dlg:modify {id="refresh",enabled=true}
+      dlg:modify {id="more",visible=history.cursor~=nil,enabled=history.cursor~=nil}
+      self:set_state(self.state); dlg:repaint()
     end
-    local started, error_text = self.callbacks.on_list_threads(search, page_cursor, received)
-    if not started and current(dlg, request) then received(nil, error_text or "Could not load history.") end
+    local started,error_text=self.callbacks.on_list_threads(search,cursor,received)
+    if not started and current(request) then received(nil,error_text or "Could not load history.") end
   end
-  dlg = Dialog {title="Aseprite Chat · History", autofit=Align.LEFT | Align.TOP, onclose=function()
-    if self.history_dialog == dlg then
-      serial = serial + 1
-      self.history_dialog = nil
-      self.history_loading, self.history_choices = nil,nil
+  local function list_input(action,event)
+    local selected=history.selected
+    if action=="key" then
+      if event.code=="Enter" then open_selected(); event:stopPropagation(); return true end
+      if event.code=="Escape" then dlg:close(); event:stopPropagation(); return true end
+      local page=math.max(1,math.floor((history.scroll.height or 200)/(history.row_height or 40)))
+      local delta=({ArrowUp=-1,ArrowDown=1,PageUp=-page,PageDown=page,Home=-#history.entries,End=#history.entries})[event.code]
+      if not delta then return false end
+      selected=math.max(1,math.min(#history.entries,selected+delta))
+      event:stopPropagation()
+    elseif (action=="down" or action=="double") and event.button==MouseButton.LEFT then
+      if not history.row_height or event.x<6 or event.x>=(history.width or 0)-18 then return false end
+      selected=math.floor((event.y+history.scroll.offset-8)/history.row_height)+1
+      if selected<1 or selected>#history.entries then return false end
+    else return false end
+    if #history.entries==0 then return true end
+    history.selected=selected
+    local top=8+(selected-1)*(history.row_height or 40)
+    if top<history.scroll.offset then history.scroll.offset=top
+    elseif top+(history.row_height or 40)>history.scroll.offset+(history.scroll.height or 200) then
+      history.scroll.offset=top+(history.row_height or 40)-(history.scroll.height or 200)
     end
+    history.scroll.offset=math.max(0,math.min(history.scroll.maximum,history.scroll.offset))
+    history.scroll.follow=false
+    self:set_state(self.state)
+    if action=="double" then open_selected() end
+    return true
+  end
+  dlg=Dialog {title="Aseprite Chat · Conversations",resizeable=true,onclose=function()
+    if self.history_dialog==dlg then self.history_dialog,self.history=nil,nil end
   end}
-  self.history_dialog = dlg
-  self.history_loading, self.history_choices = false,{}
-  dlg:entry {id="search", text="", onchange=function()
-    load_page(dlg.data.search or "", nil, false)
+  self.history_dialog=dlg
+  dlg:label {text="Search conversations"}
+  dlg:newrow()
+  dlg:entry {id="search",text="",focus=true,onchange=function() load_page(dlg.data.search or "",nil,false) end}
+  dlg:newrow()
+  add_scroll_canvas(dlg,{id="threads",width=380,height=250,hexpand=true,vexpand=true},history.scroll,
+    function(gc) paint_history(gc,history) end,list_input)
+  dlg:newrow()
+  dlg:label {id="status",text="Loading conversations..."}
+  dlg:newrow()
+  dlg:button {id="open",text="Open conversation",enabled=false,onclick=open_selected}
+  dlg:button {id="refresh",text="Refresh",onclick=function() load_page(dlg.data.search or history.query,nil,false) end}
+  dlg:button {id="more",text="Load more",enabled=false,onclick=function()
+    if history.cursor and not history.loading then load_page(history.query,history.cursor,true) end
   end}
-  dlg:combobox {id="threads", options={}, enabled=false,onchange=function() self:set_state(self.state) end}
-  dlg:label {id="status", text="Ready to search history."}
-  dlg:button {id="open", text="Open", enabled=false, onclick=function()
-    if self.state ~= "ready" or self.history_loading then return end
-    local selected = self.history_choices[dlg.data.threads]
-    if not selected or selected.status=="active" then return end
-    local started, error_text = self.callbacks.on_open_thread(selected.id)
-    if started then
-      dlg:close()
-    else
-      dlg:modify {id="status", text=error_text or "Could not open conversation."}
-    end
-  end}
-  dlg:button {id="refresh", text="Refresh", onclick=function()
-    load_page(dlg.data.search or query, nil, false)
-  end}
-  dlg:button {id="more", text="More", enabled=false, onclick=function()
-    if cursor ~= nil and not self.history_loading then load_page(dlg.data.search or query, cursor, true) end
-  end}
-  dlg:button {id="done", text="Done", onclick=function() dlg:close() end}
+  dlg:button {id="done",text="Close",onclick=function() dlg:close() end}
   dlg:show {wait=false}
-  load_page("", nil, false)
+  load_page("",nil,false)
 end
 
 --- Project the server catalog and persisted selection into native dropdowns.
@@ -299,9 +466,11 @@ function Chat:set_models(models, model, effort)
   if not self.dialog then return end
   self.updating_selectors = true
   local labels, chosen, selected = {}, nil, nil
+  local names={}
+  for _,entry in ipairs(models or {}) do names[entry.displayName]=(names[entry.displayName] or 0)+1 end
   self.models_by_label = {}
   for _, entry in ipairs(models or {}) do
-    local label = entry.displayName .. " (" .. entry.model .. ")"
+    local label = names[entry.displayName]>1 and entry.displayName .. " (" .. entry.model .. ")" or entry.displayName
     labels[#labels+1], self.models_by_label[label] = label, entry
     if entry.model == model then chosen, selected = label, entry end
   end
@@ -387,46 +556,48 @@ function Chat:show()
       if settings then settings:close() end
       local history = self.history_dialog
       self.history_dialog = nil
-      self.history_loading, self.history_choices = nil,nil
+      self.history = nil
       if history then history:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
   self.dialog = dlg
-  dlg:combobox { id = "model", label = "Model", options = {"Waiting for connection"}, onchange = function()
-    if self.updating_selectors then return end
-    local entry = self.models_by_label[dlg.data.model]
-    if entry then
-      self.callbacks.on_settings(entry.model, #entry.supportedReasoningEfforts > 0 and entry.defaultReasoningEffort or nil)
-    end
-  end }
-  dlg:combobox { id = "effort", label = "Reasoning", options = {"Not supported"}, onchange = function()
-    if self.updating_selectors then return end
-    local entry = self.models_by_label[dlg.data.model]
-    if entry then self.callbacks.on_settings(entry.model, self.has_efforts and dlg.data.effort or nil) end
-  end }
-  dlg:label { id = "status", label = "Status", text = self.state }
+  dlg:button {id="history",text="Chats...",onclick=function() self:show_history() end}
+  dlg:button {id="new",text="New chat",onclick=self.callbacks.on_new_chat}
+  dlg:button {id="previous",text="Previous turn",onclick=function() self:jump_prompt(-1) end}
+  dlg:button {id="next_prompt",text="Next turn",onclick=function() self:jump_prompt(1) end}
+  dlg:button {id="settings",text="Settings...",onclick=function() self:show_settings() end}
   dlg:newrow()
-  add_scroll_canvas(dlg, {id="transcript", width=360, height=260, hexpand=true, vexpand=true}, self.scroll,
-    function()
-      local parts = {}
-      for _, m in ipairs(self.messages) do if m.text~="" then parts[#parts + 1] = m.role .. ":\n" .. m.text end end
-      return #parts > 0 and table.concat(parts, "\n\n") or "Chat with Codex about the current sprite. The local connection starts automatically."
-    end)
+  dlg:label {id="conversation",text="New chat"}
   dlg:newrow()
-  dlg:entry { id = "input", label = "Message", text = "", focus = true }
-  dlg:button { id = "send", text = "Send", focus = true, onclick = function()
-    local text = dlg.data.input
-    if self.callbacks.on_send(text) then dlg:modify { id = "input", text = "" } end
-  end }
-  dlg:button { id = "stop", text = "Stop", onclick = self.callbacks.on_stop }
-  dlg:button { id = "new", text = "New Chat", onclick = self.callbacks.on_new_chat }
-  dlg:button { id = "latest", text = "Latest", onclick = function() self.scroll.follow = true; dlg:repaint() end }
-  dlg:button { id = "retry", text = "Retry", onclick = function()
+  dlg:label {id="status",text=self.state}
+  dlg:newrow()
+  add_scroll_canvas(dlg,{id="transcript",width=440,height=280,hexpand=true,vexpand=true},self.scroll,
+    function(gc) paint_messages(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
+  dlg:newrow()
+  dlg:entry {id="input",text="",focus=true}
+  dlg:newrow()
+  dlg:label {text="Model / reasoning"}
+  dlg:newrow()
+  dlg:combobox {id="model",options={"Waiting for connection"},onchange=function()
+    if self.updating_selectors then return end
+    local entry=self.models_by_label[dlg.data.model]
+    if entry then self.callbacks.on_settings(entry.model,#entry.supportedReasoningEfforts>0 and entry.defaultReasoningEffort or nil) end
+  end}
+  dlg:combobox {id="effort",options={"Not supported"},onchange=function()
+    if self.updating_selectors then return end
+    local entry=self.models_by_label[dlg.data.model]
+    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and dlg.data.effort or nil) end
+  end}
+  dlg:newrow()
+  dlg:button {id="send",text="Send",focus=true,onclick=function()
+    if self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text=""} end
+  end}
+  dlg:button {id="stop",text="Stop",onclick=self.callbacks.on_stop}
+  dlg:button {id="latest",text="Jump to latest",onclick=function() self.scroll.follow=true; dlg:repaint() end}
+  dlg:button {id="retry",text="Retry",onclick=function()
     self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
-  end }
-  dlg:button { id = "settings", text = "Settings...", onclick = function() self:show_settings() end }
-  dlg:button { id = "history", text = "History", onclick = function() self:show_history() end }
+  end}
   self:set_models(self.models, self.selected_model, self.selected_effort)
   dlg:show { wait = false }
 end
@@ -447,7 +618,7 @@ function Chat:request_approval(args, callback)
   pending = { dialog = dlg, finish = finish }
   self.approval = pending
   add_scroll_canvas(dlg, {id="code", width=420, height=280, hexpand=true, vexpand=true}, scroll,
-    function() return args.summary .. "\n\n" .. args.code end)
+    function(gc) paint(gc,args.summary .. "\n\n" .. args.code,scroll) end)
   dlg:label { text = "Approved Lua runs immediately. Running Lua cannot be interrupted." }
   dlg:newrow()
   dlg:button { id = "approve", text = "Approve once", onclick = function() finish(true) end }
@@ -473,7 +644,7 @@ function Chat:close()
   if settings then settings:close() end
   local history = self.history_dialog
   self.history_dialog = nil
-  self.history_loading, self.history_choices = nil,nil
+  self.history = nil
   if history then history:close() end
   local dlg = self.dialog
   self.dialog = nil
