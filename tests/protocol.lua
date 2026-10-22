@@ -10,7 +10,7 @@ local function harness(overrides)
   local options = {
     tools={{type="function", name="read_sprite", description="Read live sprite",
       inputSchema={type="object", properties=json.decode("{}"), required=json.decode("[]")}}},
-    instructions="Use Aseprite tools only.", model="explicit-model",
+    instructions="Use Aseprite tools only.",
     on_state=function(s) h.states[#h.states+1]=s end,
     on_error=function(e) h.errors[#h.errors+1]=e end,
     on_cancel=function(e) h.cancels[#h.cancels+1]=e end,
@@ -62,7 +62,7 @@ local function harness(overrides)
     self:respond(self:last("initialize"),{})
   end
   function h:start(id)
-    assert(self.client:send("hello","live context"))
+    assert(self.client:send("hello","live context",{model="explicit-model",effort="high"}))
     if self:last().method=="thread/start" then
       self:respond(self:last(),{thread={id="thread",status={type="idle"}}})
     end
@@ -105,6 +105,7 @@ test("initialize and two turns retain thread and exact tool specs",function()
   assert(h.ws.raw[3]:match('"properties"%s*:%s*{%s*}'))
   local turn=h:last("turn/start")
   eq(turn.params.threadId,"thread")
+  eq(turn.params.model,"explicit-model"); eq(turn.params.effort,"high")
   assert(turn.params.input[1].text:find("hello",1,true))
   assert(turn.params.input[1].text:find("live context",1,true))
   eq(h.client.turn_id,"turn"); eq(h.client:send("overlap",""),false)
@@ -380,6 +381,41 @@ test("failed health ping revokes tools and leaves native automatic reconnect in 
   h.ws.fail_ping=false; h:reopen("idle"); eq(h.client.state,"ready")
   h.client:disconnect()
   for _,timer in ipairs(h.timers) do eq(timer.running,false) end
+end)
+
+test("model discovery collects every page and preserves native catalog capabilities",function()
+  local h=harness(); h:open()
+  local models, failure
+  assert(h.client:list_models(function(value,err) models,failure=value,err end))
+  local first=h:last("model/list"); eq(first.params.includeHidden,false)
+  h:respond(first,{data={{id="catalog-id",model="wire-model",displayName="Visible model",isDefault=true,
+    defaultReasoningEffort="high",supportedReasoningEfforts={{reasoningEffort="high",description="Deep"}}}},nextCursor="page-2"})
+  eq(models,nil); eq(h:last().params.cursor,"page-2")
+  h:respond(h:last(),{data={{id="other",model="other-model",displayName="Other",isDefault=false,
+    defaultReasoningEffort="low",supportedReasoningEfforts={{reasoningEffort="low",description="Quick"}}}}})
+  eq(failure,nil); eq(#models,2); eq(models[1].model,"wire-model")
+  eq(models[1].supportedReasoningEfforts[1].reasoningEffort,"high")
+  eq(h.client.state,"ready")
+end)
+
+test("catalog errors are visible to caller and a retired request cannot change selection",function()
+  local h=harness(); h:open(); local calls,err=0
+  assert(h.client:list_models(function(_,why) calls=calls+1; err=why end))
+  h:respond(h:last(),nil,{code=-1,message="catalog unavailable"})
+  eq(calls,1); assert(err:find("catalog unavailable",1,true)); eq(h.client.state,"ready")
+  assert(h.client:list_models(function() calls=calls+1 end)); local old=h:last()
+  h.client:disconnect(); h:respond(old,{data={}}); eq(calls,1)
+end)
+
+test("per-turn model and reasoning changes retain the same thread",function()
+  local h=harness(); h:open(); h:start(); h:complete()
+  local original=h:last("thread/start")
+  local selection={model="other-model",effort="low"}
+  assert(h.client:send("continue","context",selection))
+  selection.model="mutated-after-send"
+  local turn=h:last("turn/start")
+  eq(turn.params.threadId,"thread"); eq(turn.params.model,"other-model"); eq(turn.params.effort,"low")
+  eq(h:last("thread/start").id,original.id)
 end)
 
 for _,case in ipairs(tests) do

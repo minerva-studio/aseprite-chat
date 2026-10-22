@@ -22,7 +22,7 @@ The editor extension is Lua. It connects over WebSocket to a small local Node co
    npm start
    ```
 
-4. Open **View > Aseprite Chat**. Leave Server at `ws://127.0.0.1:4500`; leave Model blank to use the server's configured model, or enter an exact model ID your account can access. Click **Connect**.
+4. Open **View > Aseprite Chat**. Leave Server at `ws://127.0.0.1:4500` and click **Connect**. The **Model** dropdown loads the signed-in account's available models. **Reasoning** lists only the selected model's supported levels. An initial selection uses the catalog's recommended model and reasoning default.
 5. Open a sprite and send a message. Unsaved sprites work; saving the document first is unnecessary.
 
 The bridge launches `codex app-server --stdio` for each client connection, using the existing Codex configuration and login. If the Codex executable is not on Node's PATH, set `CODEX_CLI` to its absolute executable path before `npm start`. Stop any separate test server already occupying port 4500. Set `ASEPRITE_CHAT_PORT` before startup to choose another local port, and enter the matching URL in Aseprite.
@@ -38,7 +38,8 @@ Ask, for example: “Inspect the current sprite and make the highlights on the W
 - **Stop** cancels model generation and invalidates queued/pending edits. Lua already executing on Aseprite's UI thread cannot be interrupted by this button; approve only short, terminating scripts.
 - **Disconnect** preserves the current in-memory conversation for reconnection. Recovery interrupts any unfinished old turn before accepting another prompt and never replays an edit.
 - **New Chat** starts another conversation. Closing and reopening the chat window starts a fresh client session.
-- Changing the endpoint or model starts a new conversation. An unavailable explicit model produces an error rather than selecting another model.
+- Change **Model** or **Reasoning** while idle; the choice is remembered and takes effect on the next message in the same conversation. Both selectors are locked during generation. Changing the server endpoint starts a new conversation.
+- Reconnection refreshes the catalog. If a remembered model or reasoning level is no longer available, select a valid option before sending; another model is not silently substituted. A model without reasoning support displays **Not supported**. If an old reasoning choice needs clearing, **Confirm model selection** lets you explicitly select that model again.
 - Scroll the transcript or code with the mouse wheel; the main transcript also has Up, Down, and Latest controls. Replies are plain text.
 
 ## Editing contract
@@ -64,5 +65,7 @@ The test runner checks printed pass markers as well as exit codes because Asepri
 For native GUI integration, start `node tests/fixture.mjs`, then launch a **separate disposable** Aseprite process with `--script tests/gui.lua`. This driver creates its own unsaved sprite, exercises approvals/rejection/stale edits/stop/reconnect, and writes `work/gui-fixture.txt` before closing its own editor. Do not run the driver inside an editor containing your work.
 
 The authenticated integration variant is `--script-param mode=live --script tests/gui.lua`, with `npm start` listening on port 4500. It sends actual model requests and writes `work/gui-live.txt`. `tests/live-protocol.lua` separately exercises two real model turns without document tools. These are explicit smoke tests, not part of the default suite.
+
+`tests/gui-models.lua` exercises the actual model catalog, native selectors, low-effort Sol/Luna turns, and same-thread context. `tests/gui-chat.lua` checks native selector updates and clearing stale reasoning for a single model with no reasoning support. These drivers leave labeled results in their disposable editor so they can be inspected without granting file access; close that test editor afterwards.
 
 See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), and `executor.lua` (document tools).

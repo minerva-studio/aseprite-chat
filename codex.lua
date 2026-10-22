@@ -42,7 +42,7 @@ end
 
 -- Construct one direct app-server client. Tools are registered verbatim; callbacks
 -- receive derived state, item text, tool requests, cancellation, and visible errors.
--- Options: tools, instructions, optional model; on_state(state),
+-- Options: tools, instructions; on_state(state),
 -- on_message(id,text,isDelta), on_tool(params,reply), on_cancel(reason),
 -- on_error(text). Public state/thread_id/turn_id belong to this client.
 -- reply({success=boolean,contentItems=array}) is single-use and generation-bound.
@@ -226,7 +226,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.1.0"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.1.1"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -401,10 +401,43 @@ function Client:disconnect()
   self:_retire("disconnected", "Disconnected")
 end
 
+--- Discover picker-visible models and reasoning capabilities across all pages.
+--- callback(models, errorText) runs once unless the connection is retired.
+function Client:list_models(callback)
+  if not self._initialized then return false, "Client is not initialized" end
+  return self:_guard(function()
+    local models, cursors = {}, {}
+    local function page(cursor)
+      self:_request("model/list", {limit=100, includeHidden=false, cursor=cursor}, function(result, err)
+        if err then callback(nil, err.message or tostring(err)); return end
+        assert(result and result.data, "Malformed model/list response")
+        for _, entry in ipairs(result.data) do
+          assert(type(entry.model)=="string" and type(entry.displayName)=="string"
+            and entry.supportedReasoningEfforts, "Malformed model catalog entry")
+          local efforts = {}
+          for _, option in ipairs(entry.supportedReasoningEfforts) do
+            assert(type(option.reasoningEffort)=="string", "Malformed reasoning effort")
+            efforts[#efforts+1] = {reasoningEffort=option.reasoningEffort, description=option.description}
+          end
+          models[#models+1] = {model=entry.model, displayName=entry.displayName,
+            isDefault=entry.isDefault, defaultReasoningEffort=entry.defaultReasoningEffort,
+            supportedReasoningEfforts=efforts}
+        end
+        local next_cursor = result.nextCursor
+        if next_cursor ~= nil then
+          assert(type(next_cursor)=="string" and not cursors[next_cursor], "Invalid model catalog cursor")
+          cursors[next_cursor]=true; page(next_cursor)
+        else callback(models) end
+      end)
+    end
+    page()
+  end)
+end
+
 function Client:_start_turn(turn, prompt, context_text)
   if self._turn ~= turn then return end
   if turn.stopped then self:_finish(turn); return end
-  self:_request("turn/start", {threadId=self.thread_id,
+  self:_request("turn/start", {threadId=self.thread_id, model=turn.model, effort=turn.effort,
     input={{type="text", text=prompt .. "\n\nCurrent Aseprite target:\n" .. context_text}}}, function(result, err)
     if self._turn ~= turn then return end
     if err then self:_request_error(err); return end
@@ -418,16 +451,18 @@ end
 
 -- Send accepts exactly one active turn and returns whether the request was sent
 -- locally. Later protocol failures are reported through on_error, without replay.
-function Client:send(prompt, context_text)
+-- Optional settings={model=canonicalModel,effort=advertisedEffort} is copied for
+-- this turn; model/effort overrides preserve the thread and apply to later turns.
+function Client:send(prompt, context_text, settings)
   if self.state ~= "ready" or self._turn then return false, "Client is not ready" end
   if type(prompt) ~= "string" or prompt:match("^%s*$") then return false, "Prompt is empty" end
   if type(context_text) ~= "string" then return false, "Context must be text" end
   return self:_guard(function()
-    local turn = {items={}}
+    local turn = {items={}, model=settings and settings.model, effort=settings and settings.effort}
     self._turn = turn
     self:_state("working")
     if self.thread_id then self:_start_turn(turn, prompt, context_text); return end
-    self:_request("thread/start", {dynamicTools=array(self._options.tools or {}), model=self._options.model,
+    self:_request("thread/start", {dynamicTools=array(self._options.tools or {}), model=turn.model,
       developerInstructions=self._options.instructions, sandbox="read-only", approvalPolicy="on-request",
       approvalsReviewer="user", allowProviderModelFallback=false}, function(result, err)
       if self._turn ~= turn then return end

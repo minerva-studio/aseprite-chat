@@ -83,10 +83,53 @@ function Chat:set_state(state)
   self.dialog:modify { id = "connect", enabled = offline }
   self.dialog:modify { id = "disconnect", enabled = not offline }
   self.dialog:modify { id = "endpoint", enabled = offline }
-  self.dialog:modify { id = "model", enabled = offline }
-  self.dialog:modify { id = "send", enabled = idle and app.sprite ~= nil }
-  self.dialog:modify { id = "new", enabled = idle or state == "error" }
+  self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
+  self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
+  self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
+  self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
   self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
+end
+
+--- Project the server catalog and persisted selection into native dropdowns.
+function Chat:set_models(models, model, effort)
+  self.models, self.selected_model, self.selected_effort = models, model, effort
+  if not self.dialog then return end
+  self.updating_selectors = true
+  local labels, chosen, selected = {}, nil, nil
+  self.models_by_label = {}
+  for _, entry in ipairs(models or {}) do
+    local label = entry.displayName .. " (" .. entry.model .. ")"
+    labels[#labels+1], self.models_by_label[label] = label, entry
+    if entry.model == model then chosen, selected = label, entry end
+  end
+  self.has_models = #labels > 0
+  local confirm_model = selected and #selected.supportedReasoningEfforts == 0 and effort ~= nil
+  if confirm_model then chosen, selected = nil, nil end
+  if not chosen then
+    chosen = confirm_model and "Confirm model selection" or not models and "Connect to load models"
+      or model and ("Unavailable: " .. model) or "Select a model"
+    table.insert(labels, 1, chosen)
+  end
+  local efforts, valid = {}, false
+  if selected then
+    for _, option in ipairs(selected.supportedReasoningEfforts) do
+      efforts[#efforts+1] = option.reasoningEffort
+      if option.reasoningEffort == effort then valid = true end
+    end
+  end
+  self.has_efforts = #efforts > 0
+  local chosen_effort = effort
+  if #efforts == 0 then
+    chosen_effort = "Not supported"; efforts[1] = chosen_effort
+    valid = selected ~= nil and effort == nil
+  elseif not valid then
+    chosen_effort = "Select reasoning level"; table.insert(efforts, 1, chosen_effort)
+  end
+  self.selection_valid = selected ~= nil and valid
+  self.dialog:modify {id="model", options=labels, option=chosen}
+  self.dialog:modify {id="effort", options=efforts, option=chosen_effort}
+  self.updating_selectors = false
+  self:set_state(self.state)
 end
 
 --- Open or reveal the modeless chat dialog without blocking painting.
@@ -102,9 +145,20 @@ function Chat:show()
   end }
   self.dialog = dlg
   dlg:entry { id = "endpoint", label = "Server", text = self.preferences.endpoint or "ws://127.0.0.1:4500" }
-  dlg:entry { id = "model", label = "Model", text = self.preferences.model or "" }
+  dlg:combobox { id = "model", label = "Model", options = {"Connect to load models"}, onchange = function()
+    if self.updating_selectors then return end
+    local entry = self.models_by_label[dlg.data.model]
+    if entry then
+      self.callbacks.on_settings(entry.model, #entry.supportedReasoningEfforts > 0 and entry.defaultReasoningEffort or nil)
+    end
+  end }
+  dlg:combobox { id = "effort", label = "Reasoning", options = {"Not supported"}, onchange = function()
+    if self.updating_selectors then return end
+    local entry = self.models_by_label[dlg.data.model]
+    if entry then self.callbacks.on_settings(entry.model, self.has_efforts and dlg.data.effort or nil) end
+  end }
   dlg:button { id = "connect", text = "Connect", onclick = function()
-    self.callbacks.on_connect(dlg.data.endpoint, dlg.data.model)
+    self.callbacks.on_connect(dlg.data.endpoint)
   end }
   dlg:button { id = "disconnect", text = "Disconnect", onclick = self.callbacks.on_disconnect }
   dlg:label { id = "status", label = "Status", text = self.state }
@@ -127,7 +181,7 @@ function Chat:show()
   end }
   dlg:button { id = "stop", text = "Stop", onclick = self.callbacks.on_stop }
   dlg:button { id = "new", text = "New Chat", onclick = self.callbacks.on_new_chat }
-  self:set_state(self.state)
+  self:set_models(self.models, self.selected_model, self.selected_effort)
   dlg:show { wait = false }
 end
 

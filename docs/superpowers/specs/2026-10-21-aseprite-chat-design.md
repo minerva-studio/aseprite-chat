@@ -46,7 +46,7 @@ Use Lua native UI and a WebSocket connection to the local Node bridge. The bridg
 
 The initial endpoint is `ws://127.0.0.1:4500`. The plugin accepts only IPv4 loopback endpoints. The user starts the bridge in a terminal with `npm start` after installing its pinned dependency. The bridge spawns `codex app-server --stdio` without a shell, using the user's existing configuration and login. Bearer-header authentication is outside this release's transport contract because the documented Aseprite WebSocket constructor has no request-header parameter. The extension exposes no incoming Lua execution server.
 
-Use the server's configured default model, with an optional model ID in plugin settings. Explicit model selection must be passed unchanged; an unavailable model produces an error. Do not silently select a different model.
+On connection, query all pages of `model/list` with `includeHidden=false`. Use the canonical model field and its returned reasoning capabilities to populate native Model and Reasoning dropdowns. An unset selection uses the catalog's recommended model and reasoning default. Persist explicit model/effort selections; when they become unavailable, block Send until the user selects a supported pair. Do not silently replace an explicit choice. For a model that no longer supports reasoning, require model reconfirmation to clear an old effort. Selection is locked during generation. Each turn snapshots the choice and sends model/effort overrides on `turn/start`, preserving the same conversation when settings change. Changing the endpoint starts a new conversation.
 
 ## Modules and state ownership
 
@@ -59,11 +59,11 @@ Use the server's configured default model, with an optional model ID in plugin s
 - `tests/`: focused Lua tests runnable in Aseprite batch mode and a dependency-free Node WebSocket protocol fixture for integration checks.
 - `README.md`: installation, local server startup, normal use, permissions, and the verified support matrix.
 
-Use local modules loaded relative to the extension directory. Do not mutate global package paths. Do not keep a second persisted copy of Codex conversation history. Plugin preferences contain endpoint and optional model; thread and target bindings remain in memory for the current extension session.
+Use local modules loaded relative to the extension directory. Do not mutate global package paths. Do not keep a second persisted copy of Codex conversation history. Plugin preferences contain endpoint, canonical model and reasoning effort; thread and target bindings remain in memory for the current extension session.
 
 ## Conversation and UI flow
 
-Opening the menu command creates or reveals one modeless chat window. Controls include endpoint, optional model, Connect/Disconnect, New Chat, message input, Send, Stop, and a scrollable transcript. Status distinguishes disconnected, connecting, initializing, ready, working, awaiting approval, stopping, and error. Send is enabled only when ready with a bound open sprite. No sprite is required merely to connect.
+Opening the menu command creates or reveals one modeless chat window. Controls include endpoint, catalog model and reasoning dropdowns, Connect/Disconnect, New Chat, message input, Send, Stop, and a scrollable transcript. Status distinguishes disconnected, connecting, initializing, ready, working, awaiting approval, stopping, and error. Send is enabled only when ready with a bound open sprite. No sprite is required merely to connect.
 
 User messages and agent output appear as plain text. Transcript entries are keyed by protocol item ID; deltas append to that item, while completed-item text replaces its accumulated text to prevent duplicates. Rendering wraps text using GraphicsContext measurements and preserves UTF-8 character boundaries. Repainting does not recreate the dialog or steal drawing focus.
 

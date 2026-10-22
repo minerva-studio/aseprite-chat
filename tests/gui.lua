@@ -39,7 +39,7 @@ end
 c:open()
 c.view.dialog:modify { title = "AUTOMATED TEST · Aseprite Chat (" .. mode .. ")" }
 c.view.dialog:modify { id = "endpoint", text = mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500" }
-c:connect(mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500", "")
+c:connect(mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500")
 timer = Timer { interval = 0.1, ontick = function()
   local ok, err = xpcall(function()
     assert(os.time() - began < (mode == "fixture" and 100 or 240), "GUI test timed out in " .. phase .. " / " .. tostring(c.client.state))
@@ -66,13 +66,22 @@ timer = Timer { interval = 0.1, ontick = function()
         or "authenticated native chat, streaming, live unsaved sprite, edits, Undo and explicit reconnect")
       return
     end
-    if phase == "ready" and c.client.state == "ready" then
+    if phase == "ready" and c.client.state == "ready" and c.view.selection_valid then
+      local desired = mode == "fixture" and (index == 1 and "fixture-model-a" or "fixture-model-b")
+        or (index == 2 and "gpt-6-luna" or "gpt-6.1-sol")
+      local selected
+      for _, entry in ipairs(c.models) do if entry.model == desired then selected = entry end end
+      assert(selected, "expected model missing from test account catalog: " .. desired)
+      local effort = selected.defaultReasoningEffort
+      assert(c:select_settings(selected.model, effort))
+      assert(c.view.dialog.data.effort == effort, "native reasoning dropdown disagrees with selection")
+      record("selection=" .. selected.model .. " effort=" .. tostring(effort))
       if mode ~= "fixture" and step == "live-reconnect" then
-        c:disconnect(); c:connect("ws://127.0.0.1:4500", ""); phase = "reconnecting"; return
+        c:disconnect(); c:connect("ws://127.0.0.1:4500"); phase = "reconnecting"; return
       end
       assert(c:send(prompts[step] or ("fixture-" .. step)))
       record("sent " .. step); phase = "working"
-    elseif phase == "reconnecting" and c.client.state == "ready" then
+    elseif phase == "reconnecting" and c.client.state == "ready" and c.view.selection_valid then
       assert(c.client.thread_id == thread, "reconnect lost thread")
       assert(c:send(prompts[step])); record("sent " .. step); phase = "working"
     elseif phase == "working" then

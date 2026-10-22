@@ -16,7 +16,7 @@
 - Plain-text, modeless native chat and approval dialogs.
 - Every mutation requires approval and a current revision; no automatic document save.
 - One active turn; stop invalidates pending execution before interrupting the server.
-- Local preferences store endpoint and optional model, not conversation history.
+- Local preferences store endpoint, canonical model and reasoning effort, not conversation history.
 - Preserve other work; do not push or merge.
 
 ## Review Focus
@@ -31,7 +31,7 @@
 
 **Files:** `codex.lua`, `tests/protocol.lua`.
 
-**Interfaces:** `local Codex = dofile(path)`; `Codex.new(options)` returns client. Options: `tools`, `instructions`, optional `model`, callbacks `on_state(state)`, `on_message(id,text,isDelta)`, `on_tool(params,reply)`, `on_cancel(reason)`, `on_error(text)`. Optional `socket_factory(spec)` and `timer_factory(spec)` replace native WebSocket/Timer only in protocol tests. Methods: `connect(endpoint)`, `disconnect()`, `send(prompt,contextText)` returning boolean/error, `stop()`, `new_chat()` returning boolean/error, `can_execute(params)` returning boolean. Public fields: `state`, `thread_id`, `turn_id`. Tool reply callback accepts `{success=boolean,contentItems=array}` and is single-use/generation-bound. All snake_case is deliberate Lua naming.
+**Interfaces:** `local Codex = dofile(path)`; `Codex.new(options)` returns client. Options: `tools`, `instructions`, callbacks `on_state(state)`, `on_message(id,text,isDelta)`, `on_tool(params,reply)`, `on_cancel(reason)`, `on_error(text)`. Optional `socket_factory(spec)` and `timer_factory(spec)` replace native WebSocket/Timer only in protocol tests. Methods: `connect(endpoint)`, `disconnect()`, `send(prompt,contextText,settings)` returning boolean/error, `list_models(callback)` returning a paginated model catalog, `stop()`, `new_chat()` returning boolean/error, `can_execute(params)` returning boolean. Public fields: `state`, `thread_id`, `turn_id`. Tool reply callback accepts `{success=boolean,contentItems=array}` and is single-use/generation-bound. All snake_case is deliberate Lua naming.
 
 - [x] Write tests for initialize, two turns on the same thread, pre-response stop, completed-item deduplication boundary, tool dispatch/late rejection, unexpected close and resume, intentional close and stale OPEN, errors/unknown requests, and timeouts.
 - [x] Run tests in Aseprite batch mode and observe missing-client failure.
@@ -55,7 +55,7 @@
 
 **Files:** `main.lua`, `chat.lua`, `package.json`, `tests/chat.lua`, `tests/controller.lua`.
 
-**Interfaces:** `Chat.new(callbacks,preferences)` returns a native view. Callbacks: `on_connect(endpoint,model)`, `on_disconnect()`, `on_send(text)`, `on_stop()`, `on_new_chat()`, `on_close()`. Methods: `show()`, `set_state(state)`, `add_message(id,role,text,append)`, `request_approval(args,callback)`, `dismiss_approval()`, `close()`. UI owns its own derived transcript. Controller validates every approval again through both client and executor.
+**Interfaces:** `Chat.new(callbacks,preferences)` returns a native view. Callbacks: `on_connect(endpoint)`, `on_settings(model,effort)`, `on_disconnect()`, `on_send(text)`, `on_stop()`, `on_new_chat()`, `on_close()`. Methods: `show()`, `set_state(state)`, `set_models(models,model,effort)`, `add_message(id,role,text,append)`, `request_approval(args,callback)`, `dismiss_approval()`, `close()`. UI owns its own derived transcript. Controller validates every approval again through both client and executor.
 
 `main.lua` defines extension `init(plugin)`/`exit(plugin)` and returns a module exposing `create({path,preferences})` for the extension and integration driver. Controller public user actions: `open`, `connect`, `send`, `stop`, `disconnect`, `new_chat`, `close`. `client`, `executor`, and `view` are owned native components, not independently writable state copies.
 

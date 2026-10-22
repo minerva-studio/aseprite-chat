@@ -10,7 +10,15 @@ local function scenario(name, body)
       function protocol:connect() end
       function protocol:disconnect() self.allowed = false; opts.on_cancel("disconnect") end
       function protocol:can_execute() return self.allowed end
-      function protocol:send() self.state = "working"; return true end
+      function protocol:send(_,_,settings) self.sent_settings=settings; self.state = "working"; return true end
+      function protocol:list_models(callback)
+        self.catalog_calls=(self.catalog_calls or 0)+1
+        callback({
+          {model="wire-a",displayName="A",isDefault=true,defaultReasoningEffort="high",supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}},
+          {model="wire-b",displayName="B",defaultReasoningEffort="medium",supportedReasoningEfforts={{reasoningEffort="medium"}}}
+        })
+        return true
+      end
       function protocol:stop() self.allowed = false; opts.on_cancel("stopped") end
       function protocol:new_chat() return true end
       return protocol
@@ -34,6 +42,7 @@ local function scenario(name, body)
       function view:dismiss_approval() end
       function view:close() end
       function view:clear() self.messages = {} end
+      function view:set_models(models,model,effort) self.catalog,self.model,self.effort=models,model,effort end
       return view
     end }
   }
@@ -45,6 +54,7 @@ local function scenario(name, body)
   local Main = assert(loadfile(app.fs.joinPath(root, "main.lua"), "t", env))()
   local controller = Main.create { path = root, preferences = {} }
   controller:open()
+  protocol.options.on_state("ready")
   local sprite = Sprite(4, 4)
   assert(controller:send("edit"))
   local params = { threadId = "thread", turnId = "turn", tool = "execute_lua",
@@ -118,4 +128,23 @@ do
   passed = passed + 1
   print("PASS extension command targets an existing native menu group")
 end
+scenario("dropdown selections validate capabilities and change the next turn without clearing history",function(c,p,e,v)
+  assert(p.sent_settings.model=="wire-a" and p.sent_settings.effort=="high")
+  assert(not c:select_settings("wire-b","medium"), "selection changed during generation")
+  p.state="ready"; p.options.on_state("ready")
+  local count=#v.messages
+  assert(not c:select_settings("wire-b","high"), "unsupported reasoning accepted")
+  assert(not c:select_settings("invented","low"), "unknown model accepted")
+  assert(c:select_settings("wire-b","medium"))
+  assert(c.preferences.model=="wire-b" and c.preferences.effort=="medium")
+  assert(c:send("next")); assert(p.sent_settings.model=="wire-b" and p.sent_settings.effort=="medium")
+  assert(#v.messages>count and p.catalog_calls==1, "history or catalog lifecycle changed")
+end)
+scenario("reconnection reloads catalog and does not silently replace an unavailable saved model",function(c,p,e,v)
+  c.preferences.model="removed-model"; p.options.on_state("initializing")
+  p.state="ready"; p.options.on_state("ready")
+  assert(p.catalog_calls==2 and v.model=="removed-model")
+  assert(not c:send("must choose again"))
+  assert(c:select_settings("wire-a","low")); assert(c:send("chosen explicitly"))
+end)
 print("controller: " .. passed .. " passed")

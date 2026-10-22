@@ -55,6 +55,12 @@ server.on('upgrade', (req, socket, head) => {
     if (!msg.method) { const cb = pending.get(msg.id); pending.delete(msg.id); if (cb) cb(msg.result); return; }
     if (msg.method === 'initialize') result(msg.id, { userAgent: 'aseprite-chat-fixture' });
     else if (msg.method === 'initialized') {}
+    else if (msg.method === 'model/list') result(msg.id, {data:[
+      {id:'fixture-a',model:'fixture-model-a',displayName:'Fixture A',isDefault:true,defaultReasoningEffort:'high',
+        supportedReasoningEfforts:[{reasoningEffort:'low',description:'Quick'},{reasoningEffort:'high',description:'Deep'}]},
+      {id:'fixture-b',model:'fixture-model-b',displayName:'Fixture B',isDefault:false,defaultReasoningEffort:'medium',
+        supportedReasoningEfforts:[{reasoningEffort:'medium',description:'Balanced'}]}
+    ],nextCursor:null});
     else if (msg.method === 'thread/start') result(msg.id, { thread: { id: 'fixture-thread', status: { type: 'idle' }, turns: [] } });
     else if (msg.method === 'thread/resume') result(msg.id, { thread: { id: 'fixture-thread', status: { type: active ? 'active' : 'idle', activeFlags: [] }, turns: [] } });
     else if (msg.method === 'thread/turns/list') result(msg.id, { data: active ? [{ id: active.id, status: 'inProgress', items: [] }] : [], nextCursor: null });

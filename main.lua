@@ -65,11 +65,52 @@ function Controller:_tool(params, reply)
   end)
 end
 
-function Controller:_create_client(model)
+local function valid_settings(models, model, effort)
+  for _, entry in ipairs(models or {}) do
+    if entry.model == model then
+      if #entry.supportedReasoningEfforts == 0 and effort == nil then return true end
+      for _, option in ipairs(entry.supportedReasoningEfforts) do
+        if option.reasoningEffort == effort then return true end
+      end
+      return false, "Choose a reasoning level supported by this model."
+    end
+  end
+  return false, "Choose an available model after connecting."
+end
+
+function Controller:_load_models()
+  self.client:list_models(function(models, err)
+    self.models = models or {}
+    if not models then self:_message("Error", err or "Cannot load model list. Reconnect to retry.") end
+    if not self.preferences.model or self.preferences.model == "" then
+      local selected = self.models[1]
+      for _, entry in ipairs(self.models) do if entry.isDefault then selected = entry; break end end
+      if selected then
+        self.preferences.model = selected.model
+        self.preferences.effort = #selected.supportedReasoningEfforts > 0 and selected.defaultReasoningEffort or nil
+      end
+    end
+    for _, entry in ipairs(self.models) do
+      if entry.model == self.preferences.model and self.preferences.effort == nil
+          and #entry.supportedReasoningEfforts > 0 then
+        self.preferences.effort = entry.defaultReasoningEffort
+      end
+    end
+    self.view:set_models(self.models, self.preferences.model, self.preferences.effort)
+    local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort)
+    if not valid and models then self:_message("Aseprite", why) end
+  end)
+end
+
+function Controller:_create_client()
   return self.Codex.new {
-    tools = self.Executor.tools, instructions = instructions, model = model ~= "" and model or nil,
+    tools = self.Executor.tools, instructions = instructions,
     on_state = function(state)
-      if state == "ready" then self:_cancel_pending("Turn ended before execution.") end
+      if state == "initializing" then self.models = nil; self.view:set_models(nil) end
+      if state == "ready" then
+        self:_cancel_pending("Turn ended before execution.")
+        if self.models == nil then self:_load_models() end
+      end
       self.view:set_state(state)
     end,
     on_message = function(id, text, delta) self.view:add_message(id, "Codex", text, delta) end,
@@ -90,21 +131,22 @@ function Main.create(options)
   local Chat = dofile(app.fs.joinPath(options.path, "chat.lua"))
   self.executor = self.Executor.new()
   self.view = Chat.new({
-    on_connect = function(endpoint, model) self:connect(endpoint, model) end,
+    on_connect = function(endpoint) self:connect(endpoint) end,
+    on_settings = function(model, effort) return self:select_settings(model, effort) end,
     on_disconnect = function() self:disconnect() end,
     on_send = function(text) return self:send(text) end,
     on_stop = function() self:stop() end,
     on_new_chat = function() self:new_chat() end,
     on_close = function() self:close() end
   }, self.preferences)
-  self.client = self:_create_client(self.preferences.model or "")
+  self.client = self:_create_client()
   return self
 end
 
 --- Show the chat window and track site changes for native control availability.
 function Controller:open()
   if self.closed then
-    self.client = self:_create_client(self.preferences.model or "")
+    self.client = self:_create_client()
     self.view:clear()
     self.closed = false
   end
@@ -114,33 +156,44 @@ function Controller:open()
   end
 end
 
---- Connect to a local app-server. Changing endpoint/model starts a new conversation.
-function Controller:connect(endpoint, model)
-  model = (model or ""):match("^%s*(.-)%s*$")
+--- Connect to a local bridge. Changing endpoint starts a new conversation.
+function Controller:connect(endpoint)
   endpoint = endpoint:match("^%s*(.-)%s*$")
-  if (self.preferences.model or "") ~= model or (self.preferences.endpoint and self.preferences.endpoint ~= endpoint) then
+  if self.preferences.endpoint and self.preferences.endpoint ~= endpoint then
     self:disconnect()
-    self.client = self:_create_client(model)
+    self.client = self:_create_client()
     self.view:clear()
   end
   local ok, connected, err = pcall(self.client.connect, self.client, endpoint)
   if not ok then self:_message("Error", connected)
   elseif not connected then self:_message("Error", err or "Connection was not started.")
-  else self.preferences.endpoint, self.preferences.model = endpoint, model end
+  else self.preferences.endpoint = endpoint end
   self.view:set_state(self.client.state)
+end
+
+--- Select catalog-supported settings for the next turn without replacing its thread.
+function Controller:select_settings(model, effort)
+  if self.client.state ~= "ready" then return false, "Wait for the current turn to finish." end
+  local valid, why = valid_settings(self.models, model, effort)
+  if not valid then return false, why end
+  self.preferences.model, self.preferences.effort = model, effort
+  self.view:set_models(self.models, model, effort)
+  return true
 end
 
 --- Submit a prompt against the currently open sprite without saving it.
 function Controller:send(text)
   if not text or text:match("^%s*$") then return false end
   if self.client.state ~= "ready" then self:_message("Aseprite", "Connect and wait for the current turn to finish."); return false end
+  local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort)
+  if not valid then self:_message("Aseprite", why); return false end
   if not app.sprite then self:_message("Aseprite", "Open a sprite before sending a message."); return false end
   local ok, context = pcall(function()
     self.executor:bind(app.sprite, app.frame, app.layer)
     return json.encode(self.executor:metadata())
   end)
   if not ok then self:_message("Error", context); return false end
-  local sent, err = self.client:send(text, context)
+  local sent, err = self.client:send(text, context, {model=self.preferences.model, effort=self.preferences.effort})
   if sent then self:_message("You", text) else self:_message("Error", err or "Message was not sent.") end
   return sent
 end
