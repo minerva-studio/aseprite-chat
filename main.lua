@@ -135,6 +135,14 @@ function Controller:_load_models()
       end
     end
     for _, entry in ipairs(self.models) do
+      if entry.model==self.preferences.model then
+        local fast=false
+        for _,tier in ipairs(entry.serviceTiers or {}) do
+          if tier.id=="priority" or tier.id=="fast" then fast=true end
+        end
+        -- Unsupported models have no speed control, so retire an old Fast choice.
+        if not fast then self.preferences.service_tier="default" end
+      end
       if entry.model == self.preferences.model and self.preferences.effort == nil
           and #entry.supportedReasoningEfforts > 0 then
         self.preferences.effort = entry.defaultReasoningEffort

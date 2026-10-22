@@ -1,5 +1,9 @@
 local Chat = {}
 Chat.__index = Chat
+local access_levels={
+  {id="canvas",label="Canvas only"}, {id="read",label="Read files"},
+  {id="workspace",label="Workspace write"}, {id="full",label="Full access (danger)",caption="Full access"}
+}
 
 -- Custom-account settings rows share one visibility toggle keyed on the mode combobox.
 local account_rows = { "account_home_label", "account_home", "account_url_label", "account_url",
@@ -301,14 +305,20 @@ function Chat:set_state(state,can_steer)
     self.dialog:modify { id = "status", text = status .. " · Auto-approve: " .. (self.auto_approve and "on" or "off") }
     self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
     self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
-    self.dialog:modify { id = "speed", enabled = idle and self.has_models == true }
-    self.dialog:modify { id = "auto_approve", option=self.auto_approve and "Auto-approve edits" or "Ask before edits",
+    self.dialog:modify { id = "speed", visible=self.fast_tier~=nil,enabled=idle and self.fast_tier~=nil,
+      selected=self.fast_tier~=nil and self.selected_tier==self.fast_tier }
+    self.dialog:modify { id = "auto_approve", text=self.auto_approve and "Auto-approve edits" or "Ask before edits",selected=self.auto_approve,
       enabled=idle and self.approval==nil }
+    local access=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
+    local access_caption="Canvas only"
+    for _,level in ipairs(access_levels) do if level.id==access.access then access_caption=level.caption or level.label end end
+    self.dialog:modify {id="access",text=access_caption.."...",enabled=idle or offline}
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
     self.dialog:modify { id = "send", enabled = (state=="working" and self.can_steer==true)
       or (idle and self.selection_valid == true and app.sprite ~= nil),text=state=="working" and "Steer" or state=="steering" and "Steering..." or "Send" }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
-    self.dialog:modify { id = "stop", enabled = state == "working" or state=="steering" or self.approval ~= nil }
+    local can_stop=state=="working" or state=="steering" or self.approval~=nil
+    self.dialog:modify { id = "stop", visible=can_stop or state=="stopping",enabled=can_stop }
     self.dialog:modify { id = "retry", visible = offline, enabled = offline }
   end
   if self.rename_dialog then
@@ -331,17 +341,21 @@ function Chat:set_state(state,can_steer)
       self.settings_dialog:modify { id = id, visible = custom }
     end
     self.settings_dialog:modify { id = "account_apply", enabled = idle or offline }
-    local level = self.settings_dialog.data.access_level
+  end
+  if self.access_dialog then
+    local panel=self.access_dialog
+    local level = panel.data.access_level
     local beyond = level ~= nil and level ~= "Canvas only"
-    self.settings_dialog:modify { id = "access_workspace_label", visible = beyond }
-    self.settings_dialog:modify { id = "access_workspace", visible = beyond }
-    self.settings_dialog:modify { id = "access_reviewer_label", visible = beyond }
-    self.settings_dialog:modify { id = "access_reviewer", visible = beyond, enabled = beyond }
-    self.settings_dialog:modify { id = "access_note", text =
+    panel:modify {id="access_level",enabled=idle or offline}
+    panel:modify { id = "access_workspace_label", visible = beyond }
+    panel:modify { id = "access_workspace", visible = beyond,enabled=idle or offline }
+    panel:modify { id = "access_reviewer_label", visible = beyond }
+    panel:modify { id = "access_reviewer", visible = beyond, enabled = beyond and (idle or offline) }
+    panel:modify { id = "access_note", text =
       level == "Full access (danger)" and "No sandbox: Codex can read and write anywhere."
       or beyond and "Codex may read any file on this PC; writes follow the level."
       or "Codex uses the canvas tools only." }
-    self.settings_dialog:modify { id = "access_apply", enabled = idle or offline }
+    panel:modify { id = "access_apply", enabled = idle or offline }
   end
   if self.history_dialog then
     local picker = self.history_dialog
@@ -545,23 +559,18 @@ function Chat:set_models(models, model, effort, tier)
   elseif not valid then
     chosen_effort = "Select level"; table.insert(efforts, 1, chosen_effort)
   end
-  local speeds={"Standard"}
-  self.tiers_by_label={["Standard"]="default"}
-  local chosen_speed=self.selected_tier=="default" and "Standard" or nil
+  self.fast_tier=nil
   if selected then
     for _,option in ipairs(selected.serviceTiers or {}) do
       if option.id=="priority" or option.id=="fast" then
-        local label=option.name
-        speeds[#speeds+1]=label; self.tiers_by_label[label]=option.id
-        if option.id==self.selected_tier then chosen_speed=label end
+        if not self.fast_tier or option.id==self.selected_tier then self.fast_tier=option.id end
       end
     end
   end
-  self.selection_valid = selected ~= nil and valid and chosen_speed~=nil
-  if not chosen_speed then chosen_speed="Select level"; table.insert(speeds,1,chosen_speed) end
+  if selected and not self.fast_tier then self.selected_tier="default" end
+  self.selection_valid = selected ~= nil and valid and (self.selected_tier=="default" or self.selected_tier==self.fast_tier)
   self.dialog:modify {id="model", options=labels, option=chosen}
   self.dialog:modify {id="effort", options=efforts, option=chosen_effort}
-  self.dialog:modify {id="speed", options=speeds, option=chosen_speed}
   self.updating_selectors = false
   self:set_state(self.state)
 end
@@ -621,12 +630,28 @@ function Chat:show_settings()
     dlg:modify {id="account_key", text=""}
     dlg:modify {id="account_key_clear", selected=false}
   end}
-  local access = self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
-  local access_options = {"Canvas only","Read files","Workspace write","Full access (danger)"}
-  local access_labels = {canvas="Canvas only",read="Read files",workspace="Workspace write",full="Full access (danger)"}
-  dlg:separator {text="Access"}
+  dlg:button {id="done", text="Done"}
+  self:set_state(self.state)
+  dlg:show {wait=false}
+end
+
+--- Edit an access draft separately from account settings; only Apply commits it.
+function Chat:show_access()
+  if self.state~="ready" and self.state~="disconnected" and self.state~="error" then return end
+  if self.access_dialog then self.access_dialog:show {wait=false}; return end
+  local access=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
+  local access_options,chosen={},"Canvas only"
+  for _,level in ipairs(access_levels) do
+    access_options[#access_options+1]=level.label
+    if level.id==access.access then chosen=level.label end
+  end
+  local dlg
+  dlg=Dialog {title="Aseprite Chat · Access",autofit=Align.LEFT | Align.TOP,onclose=function()
+    if self.access_dialog==dlg then self.access_dialog=nil end
+  end}
+  self.access_dialog=dlg
   dlg:combobox {id="access_level", options=access_options,
-    option=access_labels[access.access] or "Canvas only",
+    option=chosen,
     onchange=function() self:set_state(self.state) end}
   dlg:label {id="access_workspace_label", text="Workspace folder"}
   dlg:entry {id="access_workspace", text=access.workspace or ""}
@@ -634,15 +659,19 @@ function Chat:show_settings()
   dlg:combobox {id="access_reviewer", options={"Ask me","Auto-review"},
     option=access.reviewer=="auto_review" and "Auto-review" or "Ask me"}
   dlg:label {id="access_note", text=""}
+  dlg:label {id="access_error",text="",visible=false}
   dlg:button {id="access_apply", text="Apply access", onclick=function()
+    if self.state~="ready" and self.state~="disconnected" and self.state~="error" then return end
     if not self.callbacks.on_access_apply then return end
-    local levels={["Canvas only"]="canvas",["Read files"]="read",["Workspace write"]="workspace",["Full access (danger)"]="full"}
+    local chosen_level
+    for _,level in ipairs(access_levels) do if level.label==dlg.data.access_level then chosen_level=level.id end end
     local applied, apply_error = self.callbacks.on_access_apply({
-      access=levels[dlg.data.access_level] or "canvas",
+      access=chosen_level,
       workspace=dlg.data.access_workspace,
       reviewer=dlg.data.access_reviewer=="Auto-review" and "auto_review" or "user"
     })
-    if not applied and apply_error then self:add_message("access-error","Error",apply_error,false) end
+    if applied then dlg:close(); self:set_state(self.state)
+    elseif self.access_dialog==dlg then dlg:modify {id="access_error",text=apply_error or "无法更改访问设置。",visible=true} end
   end}
   dlg:button {id="done", text="Done"}
   self:set_state(self.state)
@@ -689,6 +718,7 @@ function Chat:show()
       self.history = nil
       if history then history:close() end
       if self.rename_dialog then self.rename_dialog:close() end
+      if self.access_dialog then self.access_dialog:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
@@ -718,21 +748,7 @@ function Chat:show()
     if self.updating_selectors then return end
     local entry=self.models_by_label[dlg.data.model]
     if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[dlg.data.effort] or nil,
-      self.tiers_by_label[dlg.data.speed]) end
-  end}
-  dlg:combobox {id="speed",options={"Standard"},onchange=function()
-    if self.updating_selectors then return end
-    local entry=self.models_by_label[dlg.data.model]
-    local tier=self.tiers_by_label[dlg.data.speed]
-    if entry and tier then self.callbacks.on_settings(entry.model,self.selected_effort,tier) end
-  end}
-  dlg:combobox {id="auto_approve",options={"Ask before edits","Auto-approve edits"},option="Ask before edits",hexpand=false,onchange=function()
-    if self.updating_selectors then return end
-    if self.state~="ready" or self.approval then self:set_state(self.state); return end
-    local enabled=dlg.data.auto_approve=="Auto-approve edits"
-    local accepted,error_text=self.callbacks.on_approval_mode(enabled)
-    if accepted then self:set_approval_mode(enabled)
-    else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
+      self.selected_tier) end
   end}
   dlg:newrow()
   dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
@@ -740,7 +756,22 @@ function Chat:show()
   dlg:button {id="send",text="Send",focus=true,onclick=function()
     if self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text=""} end
   end}
-  dlg:button {id="stop",text="Stop",onclick=self.callbacks.on_stop}
+  dlg:button {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
+  dlg:button {id="auto_approve",text="Ask before edits",selected=self.auto_approve,onclick=function()
+    if self.state~="ready" or self.approval then self:set_state(self.state); return end
+    local enabled=not self.auto_approve
+    local accepted,error_text=self.callbacks.on_approval_mode(enabled)
+    if accepted then self:set_approval_mode(enabled)
+    else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
+  end}
+  dlg:button {id="access",text="Canvas only...",onclick=function() self:show_access() end}
+  dlg:button {id="speed",text="Fast",visible=false,onclick=function()
+    if self.state~="ready" or not self.fast_tier then self:set_state(self.state); return end
+    local tier=self.selected_tier=="default" and self.fast_tier or "default"
+    local accepted,error_text=self.callbacks.on_settings(self.selected_model,self.selected_effort,tier)
+    self:set_state(self.state)
+    if accepted==false and error_text then self:add_message("speed-error","Error",error_text,false) end
+  end}
   dlg:button {id="retry",text="Retry",onclick=function()
     self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
   end}
@@ -798,6 +829,7 @@ function Chat:close()
   self.history_dialog = nil
   self.history = nil
   if history then history:close() end
+  if self.access_dialog then self.access_dialog:close() end
   if self.rename_dialog then self.rename_dialog:close() end
   local dlg = self.dialog
   self.dialog = nil

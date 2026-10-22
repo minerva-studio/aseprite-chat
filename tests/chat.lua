@@ -133,25 +133,64 @@ test("connection settings live in a separate window and close with the chat",fun
   view:close(); assert(settings.closed and view.settings_dialog==nil)
 end)
 
-test("speed selection uses advertised IDs, locks while working and repairs a missing tier",function()
+test("Fast toggles the advertised tier, locks during work and disappears for unsupported models",function()
   local chosen
   local view,dialogs=native_view({on_settings=function(model,effort,tier) chosen={model,effort,tier} end})
   local main=dialogs[1]
   local models={{model="sol",displayName="Sol",supportedReasoningEfforts={{reasoningEffort="low"}},
     serviceTiers={{id="priority",name="Fast",description="More usage"}}}}
   view:set_models(models,"sol","low","default"); view:set_state("ready")
-  assert(main.data.speed=="Standard" and #main.widgets.speed.options==2)
-  main.data.speed="Fast"; main.widgets.speed.onchange()
+  assert(main.widgets.speed.kind=="button" and main.widgets.speed.visible and not main.data.speed)
+  main.widgets.speed.onclick()
   assert(chosen[1]=="sol" and chosen[2]=="low" and chosen[3]=="priority")
   view:set_models(models,"sol","low","priority"); view:set_state("working")
   assert(not main.widgets.speed.enabled)
+  view:set_state("ready"); assert(main.data.speed)
+  main.widgets.speed.onclick(); assert(chosen[3]=="default")
   models[1].serviceTiers={}
   view:set_models(models,"sol","low","priority"); view:set_state("ready")
-  assert(not view.selection_valid and main.data.speed=="Select level")
-  main.data.speed="Standard"; main.widgets.speed.onchange()
-  assert(chosen[3]=="default")
-  view:set_models(models,"sol","low","default"); assert(view.selection_valid)
+  assert(not main.widgets.speed.visible and view.selection_valid and view.selected_tier=="default")
   view:close()
+end)
+
+test("Stop only occupies the action bar while a turn or approval can be stopped",function()
+  local view,dialogs=native_view()
+  local stop=dialogs[1].widgets.stop
+  view:set_state("ready"); assert(not stop.visible)
+  view:set_state("working",true); assert(stop.visible and stop.enabled)
+  view:set_state("steering"); assert(stop.visible and stop.enabled)
+  view:set_state("stopping"); assert(stop.visible and not stop.enabled)
+  view:set_state("ready"); assert(not stop.visible)
+  view:set_state("error"); assert(not stop.visible)
+  view:close()
+end)
+
+test("access moves to the action bar and only applies a validated draft from its own window",function()
+  local saved={access="read",workspace="D:\\sprites",reviewer="user"}
+  local applied,accept
+  local view,dialogs=native_view({on_access_get=function() return saved end,on_access_apply=function(draft)
+    applied=draft
+    if not accept then return false,"Invalid folder" end
+    saved=draft; return true
+  end})
+  view:set_state("ready")
+  local main=dialogs[1]
+  assert(main.widgets.access.kind=="button" and main.widgets.access.text:find("Read files",1,true))
+  main.widgets.access.onclick(); local panel=dialogs[2]
+  assert(panel.data.access_level=="Read files" and panel.data.access_workspace=="D:\\sprites")
+  panel.data.access_level="Workspace write"; panel.widgets.access_level.onchange()
+  panel.data.access_reviewer="Auto-review"; panel.widgets.access_apply.onclick()
+  assert(applied.access=="workspace" and applied.reviewer=="auto_review")
+  assert(view.access_dialog==panel and panel.widgets.access_error.text=="Invalid folder")
+  view:set_state("working")
+  assert(not panel.widgets.access_apply.enabled and not panel.widgets.access_level.enabled and not main.widgets.access.enabled)
+  applied=nil; panel.widgets.access_apply.onclick(); assert(not applied)
+  view:set_state("ready"); accept=true; panel.widgets.access_apply.onclick()
+  assert(not view.access_dialog and main.widgets.access.text:find("Workspace write",1,true))
+  view:show_settings(); assert(not dialogs[3].widgets.access_level)
+  main.widgets.access.onclick(); local reopened=view.access_dialog
+  assert(reopened.data.access_level=="Workspace write")
+  view:close(); assert(reopened.closed and not view.access_dialog)
 end)
 
 test("steering availability controls the composer while Stop remains usable",function()
@@ -667,23 +706,23 @@ test("approval setting projects controller state, reverts rejection, and marks m
   view:set_state("ready")
   view:show_settings()
   local settings=dialogs[1]
-  assert(settings.widgets.auto_approve and settings.data.auto_approve=="Ask before edits",
+  assert(settings.widgets.auto_approve and settings.widgets.auto_approve.text=="Ask before edits" and not settings.data.auto_approve,
     "automatic approval does not default off")
   assert(not settings.widgets.auto_approve.label, "approval row adds form label indentation")
-  view:set_approval_mode(true)
-  assert(settings.data.auto_approve=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
-  settings.data.auto_approve="Auto-approve edits"; settings.widgets.auto_approve.onchange()
-  assert(decisions[1]==true and settings.data.auto_approve=="Auto-approve edits",
+  settings.widgets.auto_approve.onclick()
+  assert(decisions[1]==true and not settings.data.auto_approve,
     "rejected controller projection was not restored")
+  view:set_approval_mode(true)
+  assert(settings.data.auto_approve and settings.widgets.auto_approve.text=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
   view:set_state("working")
   assert(not settings.widgets.auto_approve.enabled)
-  settings.data.auto_approve="Ask before edits"; settings.widgets.auto_approve.onchange()
+  settings.widgets.auto_approve.onclick()
   assert(#decisions==1, "disabled approval control still changed controller state")
   view:set_state("ready")
-  settings.data.auto_approve="Ask before edits"; settings.widgets.auto_approve.onchange()
+  settings.widgets.auto_approve.onclick()
   assert(decisions[2]==false)
   view:set_approval_mode(false)
-  assert(settings.data.auto_approve=="Ask before edits")
+  assert(not settings.data.auto_approve and settings.widgets.auto_approve.text=="Ask before edits")
   view:close()
 end)
 

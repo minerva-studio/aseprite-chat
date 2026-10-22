@@ -279,6 +279,12 @@ scenario("Fast follows advertised tiers and standard overrides a resumed thread'
   assert(c:select_settings("wire-b","medium","default"))
   assert(c:send("standard")); assert(p.sent_settings.serviceTier=="default")
 end)
+scenario("a model without Fast clears a remembered speed before the hidden control can block sending",function(c,p)
+  c.preferences.model,c.preferences.effort,c.preferences.service_tier="wire-b","medium","priority"
+  p.options.on_state("initializing"); p.state="ready"; p.options.on_state("ready")
+  assert(c.preferences.service_tier=="default")
+  assert(c:send("continue at standard speed")); assert(p.sent_settings.serviceTier=="default")
+end)
 scenario("reconnection reloads catalog and does not silently replace an unavailable saved model",function(c,p,e,v)
   c.preferences.model="removed-model"; p.options.on_state("initializing")
   p.state="ready"; p.options.on_state("ready")
