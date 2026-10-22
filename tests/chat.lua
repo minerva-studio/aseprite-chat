@@ -11,7 +11,7 @@ end
 local function measure(text) return utf8.len(text) end
 local function native_view(callbacks, preferences)
   local dialogs = {}
-  local env = setmetatable({Dialog=function(spec)
+  local env = setmetatable({Timer=function(spec) return {start=function() end,stop=function() end,ontick=spec.ontick} end,Dialog=function(spec)
     local dialog = {data={},widgets={},buttons={},spec=spec,bounds=Rectangle(0,0,500,420)}
     setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
       __index=function(_,method)
@@ -40,6 +40,61 @@ local function native_view(callbacks, preferences)
   function gc:fillText() end
   return view,dialogs,gc
 end
+test("composer keeps input above compact controls and a native Send below",function()
+  local view,dialogs,gc=native_view()
+  local main=dialogs[1]
+  assert(main.widgets.composer and not main.widgets.model, "controls still use separate native rows")
+  view:set_models({{model="ds",displayName="DeepSeek-Flash",supportedReasoningEfforts={{reasoningEffort="high"}}}},"ds","high")
+  view:set_state("ready")
+  gc.width,gc.height=440,26
+  main.widgets.composer.onpaint {context=gc}
+  view.layout_timer.ontick()
+  local rects=view.control_rects
+  assert(rects[1].id=="model" and rects[#rects].id=="access")
+  assert(main.widgets.send.kind=="button" and main.widgets.send.focus==true and not view.controls.send)
+  assert(main.widgets.send.label:match("^ +$"))
+  assert(rects[2].width<70,"compact controls were stretched")
+  assert(rects[1].width>rects[2].width)
+  for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width) end
+  view:close()
+end)
+
+test("composer fits running controls and keeps native Send and guarded Stop",function()
+  local sent,stopped=0,0
+  local view,dialogs,gc=native_view({on_send=function(text) sent=sent+1; assert(text=="hello"); return true end,
+    on_stop=function() stopped=stopped+1 end})
+  local main=dialogs[1]
+  view:set_models({{model="sol",displayName="An extremely long model name that needs truncation",supportedReasoningEfforts={{reasoningEffort="high"}},serviceTiers={{id="priority"}}}},"sol","high","priority")
+  view:set_state("working",true)
+  gc.width,gc.height=440,26
+  main.widgets.composer.onpaint {context=gc}
+  local rects=view.control_rects
+  for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width,"running controls overlap") end
+  local stop=rects[#rects]
+  assert(stop.id=="stop" and main.widgets.send.focus==true)
+  main.data.input="hello"
+  main.widgets.send.onclick()
+  assert(sent==1 and main.data.input=="")
+  main.widgets.composer.onmousedown {button=MouseButton.LEFT,x=stop.x+2,y=5}; assert(stopped==1)
+  view:set_state("stopping")
+  main.widgets.send.onclick(); assert(sent==1)
+  view:close()
+end)
+
+test("native Send padding follows resizing without changing other content rows",function()
+  local view,dialogs,gc=native_view()
+  local main=dialogs[1]
+  assert(main.widgets.chat_content.visible==false and main.widgets.send.kind=="button")
+  gc.width,gc.height=440,26
+  main.widgets.composer.onpaint {context=gc}; view.layout_timer.ontick(); local narrow=main.widgets.send.label
+  gc.width=640; main.widgets.composer.onpaint {context=gc}; view.layout_timer.ontick(); assert(#main.widgets.send.label>#narrow)
+  gc.width=440; main.widgets.composer.onpaint {context=gc}; view.layout_timer.ontick(); assert(main.widgets.send.label==narrow)
+  assert(not main.widgets.input.label and not main.widgets.transcript.label)
+  local timer=view.layout_timer
+  view:close(); assert(not view.layout_timer)
+  timer.ontick()
+end)
+
 test("UTF-8 characters remain intact when wrapping", function()
   local lines = Chat.wrap("你好世界", 2, measure)
   assert(#lines == 2 and lines[1] == "你好" and lines[2] == "世界")
@@ -62,53 +117,40 @@ test("stream completion replaces deltas without duplication", function()
   view:add_message("b", "You", "next", false)
   assert(#view.messages == 2 and view.messages[2].text == "next")
 end)
-test("model and reasoning widgets are actual dropdowns populated from catalog values", function()
-  local widgets, data = {}, {}
-  local dialog = setmetatable({data=data,bounds=Rectangle(0,0,500,420)}, {__index=function(_,method)
-    return function(self,spec)
-      if spec and spec.id then
-        if method == "modify" then
-          for key,value in pairs(spec) do widgets[spec.id][key]=value end
-          if spec.option then data[spec.id]=spec.option end
-        else
-          widgets[spec.id]=spec; widgets[spec.id].kind=method
-          data[spec.id]=spec.option or spec.text
-        end
-      end
-      return self
-    end
-  end})
-  local env=setmetatable({Dialog=function() return dialog end}, {__index=_G})
-  local UI=assert(loadfile(path,"t",env))()
+test("model and reasoning choices use catalog labels and recover stale efforts",function()
   local chosen
-  local view=UI.new({on_settings=function(model,effort) chosen={model,effort} end},{})
-  view:show()
-  assert(widgets.model.kind=="combobox", "model is still a text entry")
-  assert(widgets.effort.kind=="combobox", "missing reasoning dropdown")
+  local view,dialogs,gc=native_view({on_settings=function(model,effort) chosen={model,effort} end})
+  local controls=view.controls
   local models={
-    {model="wire-a",displayName="Same label",isDefault=true,defaultReasoningEffort="high",
-      supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}},
-    {model="wire-b",displayName="Same label",defaultReasoningEffort="medium",
-      supportedReasoningEfforts={{reasoningEffort="medium"}}}
+    {model="wire-a",displayName="Same label",defaultReasoningEffort="high",supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}},
+    {model="wire-b",displayName="Same label",defaultReasoningEffort="medium",supportedReasoningEfforts={{reasoningEffort="medium"}}}
   }
   view:set_models(models,"wire-a","high"); view:set_state("ready")
-  assert(#widgets.model.options==2 and #widgets.effort.options==2)
-  assert(widgets.model.options[1]~=widgets.model.options[2], "duplicate model labels")
-  data.model=widgets.model.options[2]; widgets.model.onchange()
+  assert(#controls.model.options==2 and #controls.effort.options==2)
+  assert(controls.model.options[1]~=controls.model.options[2])
+  controls.model.onchoose(controls.model.options[2])
   assert(chosen[1]=="wire-b" and chosen[2]=="medium")
   view:set_models(models,"wire-b","medium")
-  assert(#widgets.effort.options==1 and data.effort=="medium")
-  view:set_state("working"); assert(not widgets.model.enabled and not widgets.effort.enabled)
+  assert(#controls.effort.options==1 and controls.effort.option=="medium")
+  view:set_state("working"); assert(not controls.model.enabled and not controls.effort.enabled)
   local plain={{model="plain",displayName="Plain",supportedReasoningEfforts={}}}
   view:set_models(plain,"plain","high"); view:set_state("ready")
-  assert(not view.selection_valid and #widgets.model.options==2, "stale effort cannot be explicitly repaired")
-  assert(widgets.model.options[2]=="Plain", "unique display name repeats its technical model ID")
-  data.model="Plain"; widgets.model.onchange()
-  assert(chosen[1]=="plain" and chosen[2]==nil)
-  view:set_models(plain,"plain",nil)
-  assert(view.selection_valid and not widgets.effort.enabled)
+  assert(not view.selection_valid and #controls.model.options==2)
+  assert(controls.model.options[2]=="Plain")
+  controls.model.onchoose("Plain"); assert(chosen[1]=="plain" and chosen[2]==nil)
+  view:set_models(plain,"plain",nil); assert(view.selection_valid and not controls.effort.enabled)
+  gc.width,gc.height=440,26
+  dialogs[1].widgets.composer.onpaint {context=gc}
+  local rect=view.control_rects[1]
+  dialogs[1].widgets.composer.onmousedown {button=MouseButton.LEFT,x=rect.x+2,y=5}
+  assert(view.options_dialog and #dialogs[2].buttons==1)
+  view:set_state("working"); assert(not view.options_dialog)
+  view:set_state("ready")
+  dialogs[1].widgets.composer.onmousedown {button=MouseButton.LEFT,x=rect.x+2,y=5}
+  dialogs[3].buttons[1].onclick(); assert(not view.options_dialog and chosen[1]=="plain")
   view:close()
 end)
+
 test("connection settings live in a separate window and close with the chat",function()
   local connected="not-called"
   local view,dialogs=native_view({on_connect=function(endpoint) connected=endpoint end},{endpoint="ws://127.0.0.1:4500"})
@@ -116,7 +158,7 @@ test("connection settings live in a separate window and close with the chat",fun
   assert(not main.widgets.endpoint and not main.widgets.connect and not main.widgets.disconnect,
     "connection controls still occupy the chat")
   for _, button in ipairs(main.buttons) do assert(button.text~="Up" and button.text~="Down", "paging buttons remain") end
-  main.widgets.retry.onclick()
+  view.controls.retry.onclick()
   assert(connected==nil, "Retry did not request automatic discovery")
   main.widgets.settings.onclick()
   assert(#dialogs==2 and view.settings_dialog==dialogs[2])
@@ -140,22 +182,22 @@ test("Fast toggles the advertised tier, locks during work and disappears for uns
   local models={{model="sol",displayName="Sol",supportedReasoningEfforts={{reasoningEffort="low"}},
     serviceTiers={{id="priority",name="Fast",description="More usage"}}}}
   view:set_models(models,"sol","low","default"); view:set_state("ready")
-  assert(main.widgets.speed.kind=="button" and main.widgets.speed.visible and not main.data.speed)
-  main.widgets.speed.onclick()
+  assert(view.controls.speed.visible and not view.controls.speed.selected)
+  view.controls.speed.onclick()
   assert(chosen[1]=="sol" and chosen[2]=="low" and chosen[3]=="priority")
   view:set_models(models,"sol","low","priority"); view:set_state("working")
-  assert(not main.widgets.speed.enabled)
-  view:set_state("ready"); assert(main.data.speed)
-  main.widgets.speed.onclick(); assert(chosen[3]=="default")
+  assert(not view.controls.speed.enabled)
+  view:set_state("ready"); assert(view.controls.speed.selected)
+  view.controls.speed.onclick(); assert(chosen[3]=="default")
   models[1].serviceTiers={}
   view:set_models(models,"sol","low","priority"); view:set_state("ready")
-  assert(not main.widgets.speed.visible and view.selection_valid and view.selected_tier=="default")
+  assert(not view.controls.speed.visible and view.selection_valid and view.selected_tier=="default")
   view:close()
 end)
 
 test("Stop only occupies the action bar while a turn or approval can be stopped",function()
   local view,dialogs=native_view()
-  local stop=dialogs[1].widgets.stop
+  local stop=view.controls.stop
   view:set_state("ready"); assert(not stop.visible)
   view:set_state("working",true); assert(stop.visible and stop.enabled)
   view:set_state("steering"); assert(stop.visible and stop.enabled)
@@ -175,20 +217,20 @@ test("access moves to the action bar and only applies a validated draft from its
   end})
   view:set_state("ready")
   local main=dialogs[1]
-  assert(main.widgets.access.kind=="button" and main.widgets.access.text:find("Read files",1,true))
-  main.widgets.access.onclick(); local panel=dialogs[2]
+  assert(view.controls.access.text:find("Read files",1,true))
+  view.controls.access.onclick(); local panel=dialogs[2]
   assert(panel.data.access_level=="Read files" and panel.data.access_workspace=="D:\\sprites")
   panel.data.access_level="Workspace write"; panel.widgets.access_level.onchange()
   panel.data.access_reviewer="Auto-review"; panel.widgets.access_apply.onclick()
   assert(applied.access=="workspace" and applied.reviewer=="auto_review")
   assert(view.access_dialog==panel and panel.widgets.access_error.text=="Invalid folder")
   view:set_state("working")
-  assert(not panel.widgets.access_apply.enabled and not panel.widgets.access_level.enabled and not main.widgets.access.enabled)
+  assert(not panel.widgets.access_apply.enabled and not panel.widgets.access_level.enabled and not view.controls.access.enabled)
   applied=nil; panel.widgets.access_apply.onclick(); assert(not applied)
   view:set_state("ready"); accept=true; panel.widgets.access_apply.onclick()
-  assert(not view.access_dialog and main.widgets.access.text:find("Workspace write",1,true))
+  assert(not view.access_dialog and view.controls.access.text:find("Workspace write",1,true))
   view:show_settings(); assert(not dialogs[3].widgets.access_level)
-  main.widgets.access.onclick(); local reopened=view.access_dialog
+  view.controls.access.onclick(); local reopened=view.access_dialog
   assert(reopened.data.access_level=="Workspace write")
   view:close(); assert(reopened.closed and not view.access_dialog)
 end)
@@ -199,9 +241,9 @@ test("steering availability controls the composer while Stop remains usable",fun
   view:set_state("working",false); assert(not dialogs[1].widgets.send.enabled)
   view:set_state("working",true)
   assert(dialogs[1].widgets.send.enabled and dialogs[1].widgets.send.text=="Steer")
-  assert(not dialogs[1].widgets.model.enabled and dialogs[1].widgets.stop.enabled)
+  assert(not view.controls.model.enabled and view.controls.stop.enabled)
   view:set_state("steering",false)
-  assert(not dialogs[1].widgets.send.enabled and dialogs[1].widgets.stop.enabled)
+  assert(not dialogs[1].widgets.send.enabled and view.controls.stop.enabled)
   view:add_message("thought","Summary","Inspect the layers",false)
   local labels={}; local gc={width=500,height=200,measureText=function(_,s) return {width=#s*6,height=10} end,fillRect=function() end,
     fillText=function(_,s) labels[#labels+1]=s end}
@@ -706,23 +748,23 @@ test("approval setting projects controller state, reverts rejection, and marks m
   view:set_state("ready")
   view:show_settings()
   local settings=dialogs[1]
-  assert(settings.widgets.auto_approve and settings.widgets.auto_approve.text=="Ask before edits" and not settings.data.auto_approve,
+  assert(view.controls.auto_approve and view.controls.auto_approve.text=="Ask before edits" and not view.controls.auto_approve.selected,
     "automatic approval does not default off")
-  assert(not settings.widgets.auto_approve.label, "approval row adds form label indentation")
-  settings.widgets.auto_approve.onclick()
-  assert(decisions[1]==true and not settings.data.auto_approve,
+  assert(not view.controls.auto_approve.label, "approval row adds form label indentation")
+  view.controls.auto_approve.onclick()
+  assert(decisions[1]==true and not view.controls.auto_approve.selected,
     "rejected controller projection was not restored")
   view:set_approval_mode(true)
-  assert(settings.data.auto_approve and settings.widgets.auto_approve.text=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
+  assert(view.controls.auto_approve.selected and view.controls.auto_approve.text=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
   view:set_state("working")
-  assert(not settings.widgets.auto_approve.enabled)
-  settings.widgets.auto_approve.onclick()
+  assert(not view.controls.auto_approve.enabled)
+  view.controls.auto_approve.onclick()
   assert(#decisions==1, "disabled approval control still changed controller state")
   view:set_state("ready")
-  settings.widgets.auto_approve.onclick()
+  view.controls.auto_approve.onclick()
   assert(decisions[2]==false)
   view:set_approval_mode(false)
-  assert(not settings.data.auto_approve and settings.widgets.auto_approve.text=="Ask before edits")
+  assert(not view.controls.auto_approve.selected and view.controls.auto_approve.text=="Ask before edits")
   view:close()
 end)
 

@@ -52,6 +52,108 @@ local function elide(gc,text,width)
   return table.concat(chars).."…"
 end
 
+-- Composer controls are projections of controller state. A single canvas avoids
+-- native Dialog's type-based row breaks and homogeneous button widths.
+local function update_control(view,spec)
+  local control=assert(view.controls[spec.id])
+  for key,value in pairs(spec) do control[key]=value end
+end
+
+local function send_caption(state)
+  return state=="working" and "Steer" or state=="steering" and "Steering..." or "Send"
+end
+
+local function show_options(view,id)
+  local control=view.controls[id]
+  if not control.enabled then return end
+  if view.options_dialog then view.options_dialog:close() end
+  local picker
+  picker=Dialog {title=id=="model" and "Model" or "Reasoning",onclose=function()
+    if view.options_dialog==picker then view.options_dialog=nil end
+  end}
+  view.options_dialog=picker
+  for _,value in ipairs(control.options) do
+    picker:button {text=value,focus=value==control.option,selected=value==control.option,onclick=function()
+      if view.options_dialog~=picker or not view.dialog then return end
+      picker:close()
+      if view.controls[id].enabled then control.onchoose(value) end
+    end}
+    picker:newrow()
+  end
+  picker:show {wait=false,autoscrollbars=true}
+  local parent,bounds=view.dialog.bounds,picker.bounds
+  for _,rect in ipairs(view.control_rects or {}) do
+    if rect.id==id then
+      picker.bounds=Rectangle(parent.x+6+rect.x,math.max(0,parent.y+parent.height-32-bounds.height),bounds.width,bounds.height)
+      break
+    end
+  end
+end
+
+local function paint_composer(gc,view)
+  local controls,widths={},{}
+  local total=0
+  for _,id in ipairs {"model","effort","auto_approve","access","speed","retry","stop"} do
+    local control=view.controls[id]
+    if control.visible~=false then
+      local text=control.option or control.text
+      local width=gc:measureText(text).width+(control.options and 24 or 16)
+      width=math.min(id=="model" and 160 or 132,math.max(28,width))
+      controls[#controls+1],widths[id]=control,width
+      total=total+width+(#controls>1 and 4 or 0)
+    end
+  end
+  -- Elide long labels rather than stretching every control.
+  for _,id in ipairs {"model","access","auto_approve","effort"} do
+    local reduction=math.min(math.max(0,total-gc.width),math.max(0,(widths[id] or 0)-40))
+    widths[id]=widths[id]-reduction; total=total-reduction
+  end
+  view.control_rects={}
+  local x=0
+  for index,control in ipairs(controls) do
+    local width=widths[control.id]
+    local rect={id=control.id,x=x,y=0,width=width,height=gc.height}
+    view.control_rects[#view.control_rects+1]=rect
+    gc.color=Color {r=75,g=80,b=91}; gc:fillRect(Rectangle(x,0,width,gc.height))
+    gc.color=control.selected and Color {r=48,g=77,b=96} or Color {r=38,g=41,b=49}
+    gc:fillRect(Rectangle(x+1,1,width-2,gc.height-2))
+    gc.color=control.enabled and Color {r=231,g=233,b=240} or Color {r=125,g=130,b=141}
+    local text=elide(gc,control.option or control.text,width-(control.options and 22 or 12))
+    local size=gc:measureText(text)
+    gc:fillText(text,x+6,math.floor((gc.height-size.height)/2))
+    if control.options then gc:fillText("v",x+width-12,math.floor((gc.height-gc:measureText("v").height)/2)) end
+    if view.control_focus==control.id then
+      gc.color=Color {r=137,g=180,b=210}; gc:fillRect(Rectangle(x+2,gc.height-3,width-4,1))
+    end
+    x=x+width+4
+  end
+  -- The headerless content tab spans the root grid's two columns. Only Send
+  -- uses the root label column, so measured padding cannot indent the chat.
+  -- Update before relayout to prevent paint/modify recursion on size changes.
+  local padding=string.rep(" ",math.max(0,math.floor((gc.width-gc:measureText(send_caption(view.state)).width-24)
+    /math.max(1,gc:measureText(" ").width))))
+  if view.send_padding~=padding then
+    view.send_padding=padding
+    -- Native Dialog skips relayout during window resize. Flush on the next UI
+    -- tick rather than recursively changing the grid from a paint callback.
+    if not view.layout_timer then
+      local timer
+      timer=Timer {interval=0.05,ontick=function()
+        timer:stop()
+        if view.layout_timer==timer and view.dialog then view.dialog:modify {id="send",label=view.send_padding} end
+      end}
+      view.layout_timer=timer
+    end
+    view.layout_timer:start()
+  end
+end
+
+local function activate_control(view,id)
+  local control=view.controls[id]
+  if not control or not control.enabled or control.visible==false then return end
+  if control.options then show_options(view,id) else control.onclick() end
+end
+
 -- Measure actual text in the current context: fallback fonts and their sizes
 -- vary by installed font and glyph. Leading/padding are separate from metrics.
 local function line_height(gc,text)
@@ -303,23 +405,25 @@ function Chat:set_state(state,can_steer)
     local status = self.approval and "Awaiting approval"
       or state == "starting" and "正在启动本地连接…" or state
     self.dialog:modify { id = "status", text = status .. " · Auto-approve: " .. (self.auto_approve and "on" or "off") }
-    self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
-    self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
-    self.dialog:modify { id = "speed", visible=self.fast_tier~=nil,enabled=idle and self.fast_tier~=nil,
-      selected=self.fast_tier~=nil and self.selected_tier==self.fast_tier }
-    self.dialog:modify { id = "auto_approve", text=self.auto_approve and "Auto-approve edits" or "Ask before edits",selected=self.auto_approve,
-      enabled=idle and self.approval==nil }
+    update_control(self,{ id = "model", enabled = idle and self.has_models == true })
+    update_control(self,{ id = "effort", enabled = idle and self.has_efforts == true })
+    update_control(self,{ id = "speed", visible=self.fast_tier~=nil,enabled=idle and self.fast_tier~=nil,
+      selected=self.fast_tier~=nil and self.selected_tier==self.fast_tier })
+    update_control(self,{ id = "auto_approve", text=self.auto_approve and "Auto-approve edits" or "Ask before edits",selected=self.auto_approve,
+      enabled=idle and self.approval==nil })
     local access=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
     local access_caption="Canvas only"
     for _,level in ipairs(access_levels) do if level.id==access.access then access_caption=level.caption or level.label end end
-    self.dialog:modify {id="access",text=access_caption.."...",enabled=idle or offline}
+    update_control(self,{id="access",text=access_caption.."...",enabled=idle or offline})
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
     self.dialog:modify { id = "send", enabled = (state=="working" and self.can_steer==true)
-      or (idle and self.selection_valid == true and app.sprite ~= nil),text=state=="working" and "Steer" or state=="steering" and "Steering..." or "Send" }
+      or (idle and self.selection_valid == true and app.sprite ~= nil),text=send_caption(state) }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     local can_stop=state=="working" or state=="steering" or self.approval~=nil
-    self.dialog:modify { id = "stop", visible=can_stop or state=="stopping",enabled=can_stop }
-    self.dialog:modify { id = "retry", visible = offline, enabled = offline }
+    update_control(self,{ id = "stop", visible=can_stop or state=="stopping",enabled=can_stop })
+    update_control(self,{ id = "retry", visible = offline, enabled = offline })
+    if self.options_dialog and not idle then self.options_dialog:close() end
+    self.dialog:repaint()
   end
   if self.rename_dialog then
     self.rename_dialog:modify {id="save",enabled=idle}
@@ -519,8 +623,9 @@ function Chat:show_history()
   load_page("",nil,false)
 end
 
---- Project the server catalog and persisted selection into native dropdowns.
+--- Project the server catalog and persisted selection into composer choice lists.
 function Chat:set_models(models, model, effort, tier)
+  if self.options_dialog then self.options_dialog:close() end
   self.models, self.selected_model, self.selected_effort,self.selected_tier = models, model, effort,tier or "default"
   if not self.dialog then return end
   self.updating_selectors = true
@@ -569,8 +674,8 @@ function Chat:set_models(models, model, effort, tier)
   end
   if selected and not self.fast_tier then self.selected_tier="default" end
   self.selection_valid = selected ~= nil and valid and (self.selected_tier=="default" or self.selected_tier==self.fast_tier)
-  self.dialog:modify {id="model", options=labels, option=chosen}
-  self.dialog:modify {id="effort", options=efforts, option=chosen_effort}
+  update_control(self,{id="model", options=labels, option=chosen})
+  update_control(self,{id="effort", options=efforts, option=chosen_effort})
   self.updating_selectors = false
   self:set_state(self.state)
 end
@@ -708,6 +813,7 @@ function Chat:show()
   local dlg
   dlg = Dialog { title = "Aseprite Chat · Codex", resizeable = true, autofit=0, onclose = function()
     if self.dialog == dlg then
+      if self.layout_timer then self.layout_timer:stop(); self.layout_timer=nil end
       self.dialog = nil
       self:dismiss_approval()
       local settings = self.settings_dialog
@@ -718,11 +824,15 @@ function Chat:show()
       self.history = nil
       if history then history:close() end
       if self.rename_dialog then self.rename_dialog:close() end
+      if self.options_dialog then self.options_dialog:close() end
       if self.access_dialog then self.access_dialog:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
   self.dialog = dlg
+  -- A hidden selector gives the content its own grid; Send remains native in
+  -- the outer grid for its focus-magnet Enter handling and right alignment.
+  dlg:tab {id="chat_content",text="",visible=false}
   dlg:button {id="history",text="Chats...",onclick=function() self:show_history() end}
   dlg:button {id="new",text="New chat",onclick=self.callbacks.on_new_chat}
   dlg:button {id="rename",text="Rename...",enabled=self.thread_id~=nil,onclick=function() self:show_rename() end}
@@ -735,45 +845,74 @@ function Chat:show()
   add_scroll_canvas(dlg,{id="transcript",width=440,height=280,hexpand=true,vexpand=true},self.scroll,
     function(gc) paint_messages(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
   dlg:newrow()
-  dlg:combobox {id="model",options={"Waiting for connection"},onchange=function()
+  dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
+  dlg:newrow()
+  self.controls={}
+  local function add(spec) self.controls[spec.id]=spec end
+  add {id="model",options={"Waiting for connection"},onchoose=function(value)
     if self.updating_selectors then return end
-    local entry=self.models_by_label[dlg.data.model]
+    local entry=self.models_by_label[value]
     if entry then
       local tier="default"
       for _,option in ipairs(entry.serviceTiers or {}) do if option.id==self.selected_tier then tier=option.id end end
       self.callbacks.on_settings(entry.model,#entry.supportedReasoningEfforts>0 and entry.defaultReasoningEffort or nil,tier)
     end
   end}
-  dlg:combobox {id="effort",options={"Not supported"},onchange=function()
+  add {id="effort",options={"Not supported"},onchoose=function(value)
     if self.updating_selectors then return end
-    local entry=self.models_by_label[dlg.data.model]
-    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[dlg.data.effort] or nil,
+    local entry=self.models_by_label[self.controls.model.option]
+    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[value] or nil,
       self.selected_tier) end
   end}
-  dlg:newrow()
-  dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
-  dlg:newrow()
-  dlg:button {id="send",text="Send",focus=true,onclick=function()
-    if self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text=""} end
-  end}
-  dlg:button {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
-  dlg:button {id="auto_approve",text="Ask before edits",selected=self.auto_approve,onclick=function()
+  add {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
+  add {id="auto_approve",text="Ask before edits",selected=self.auto_approve,onclick=function()
     if self.state~="ready" or self.approval then self:set_state(self.state); return end
     local enabled=not self.auto_approve
     local accepted,error_text=self.callbacks.on_approval_mode(enabled)
     if accepted then self:set_approval_mode(enabled)
     else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
   end}
-  dlg:button {id="access",text="Canvas only...",onclick=function() self:show_access() end}
-  dlg:button {id="speed",text="Fast",visible=false,onclick=function()
+  add {id="access",text="Canvas only...",onclick=function() self:show_access() end}
+  add {id="speed",text="Fast",visible=false,onclick=function()
     if self.state~="ready" or not self.fast_tier then self:set_state(self.state); return end
     local tier=self.selected_tier=="default" and self.fast_tier or "default"
     local accepted,error_text=self.callbacks.on_settings(self.selected_model,self.selected_effort,tier)
     self:set_state(self.state)
     if accepted==false and error_text then self:add_message("speed-error","Error",error_text,false) end
   end}
-  dlg:button {id="retry",text="Retry",onclick=function()
+  add {id="retry",text="Retry",onclick=function()
     self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
+  end}
+  dlg:canvas {id="composer",width=440,height=26,hexpand=true,vexpand=false,
+    onpaint=function(ev) paint_composer(ev.context,self) end,
+    onmousedown=function(ev)
+      if ev.button~=MouseButton.LEFT then return end
+      for index,rect in ipairs(self.control_rects or {}) do
+        if ev.x>=rect.x and ev.x<rect.x+rect.width and ev.y>=0 and ev.y<rect.height then
+          self.control_focus=rect.id
+          activate_control(self,rect.id); dlg:repaint(); return
+        end
+      end
+    end,
+    onkeydown=function(ev)
+      local rects=self.control_rects or {}
+      if #rects==0 then return end
+      local focused=1
+      for index,rect in ipairs(rects) do if rect.id==self.control_focus then focused=index end end
+      if ev.code=="ArrowLeft" or ev.code=="ArrowRight" then
+        self.control_focus=rects[(focused-1+(ev.code=="ArrowLeft" and -1 or 1))%#rects+1].id
+      elseif ev.code=="Space" then
+        activate_control(self,rects[focused].id)
+      else return end
+      ev:stopPropagation(); dlg:repaint()
+    end}
+  dlg:endtabs {selected="chat_content",vexpand=true}
+  dlg:newrow()
+  self.send_padding=nil
+  dlg:button {id="send",label="",text="Send",focus=true,hexpand=false,onclick=function()
+    local can_send=(self.state=="working" and self.can_steer==true)
+      or (self.state=="ready" and self.selection_valid==true and app.sprite~=nil)
+    if can_send and self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text="",focus=true} end
   end}
   self:set_models(self.models, self.selected_model, self.selected_effort,self.selected_tier)
   self:set_thread(self.thread_id,self.thread_name)
@@ -820,6 +959,8 @@ end
 
 --- Close owned native dialogs. on_close is reserved for user-initiated closing.
 function Chat:close()
+  if self.layout_timer then self.layout_timer:stop(); self.layout_timer=nil end
+  if self.options_dialog then self.options_dialog:close() end
   self:dismiss_approval()
   self.scroll.grab = nil
   local settings = self.settings_dialog

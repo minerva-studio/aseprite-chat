@@ -51,7 +51,7 @@ function Timeline.tool(tool,args,status,result)
 end
 
 --- Project supported protocol items into plain transcript roles/text.
---- Reasoning uses only the provider-supplied summary, never raw content.
+--- Thoughts prefer supplied reasoning content, with a summary when content is absent.
 function Timeline.item(item)
   if item.type=="agentMessage" then return "Codex",item.text end
   if item.type=="userMessage" then
@@ -65,9 +65,11 @@ function Timeline.item(item)
     return "You",table.concat(text,"\n")
   end
   if item.type=="reasoning" then
-    local summary={}
-    for _,part in ipairs(item.summary or {}) do if type(part)=="string" and part~="" then summary[#summary+1]=part end end
-    if #summary>0 then return "Summary",table.concat(summary,"\n\n") end
+    for _,channel in ipairs {"content","summary"} do
+      local parts={}
+      for _,part in ipairs(item[channel] or {}) do if type(part)=="string" and part~="" then parts[#parts+1]=part end end
+      if #parts>0 then return "Summary",table.concat(parts,"\n\n") end
+    end
   elseif item.type=="plan" and type(item.text)=="string" and item.text~="" then return "Plan",item.text
   elseif item.type=="dynamicToolCall" then
     local status=({inProgress="Running",completed="Succeeded",failed="Failed"})[item.status] or tostring(item.status)

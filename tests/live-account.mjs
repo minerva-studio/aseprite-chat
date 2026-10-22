@@ -1,5 +1,6 @@
 // Opt-in live account tests (NOT part of npm test).
 //   node tests/live-account.mjs                custom account -> local mock Responses provider
+//   node tests/live-account.mjs --reasoning    also verify readable reasoning events/history (mock only)
 //   node tests/live-account.mjs --default-live one real turn against the user's default Codex home
 import http from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -10,6 +11,8 @@ import WebSocket from 'ws';
 import { createBridge } from '../scripts/server.mjs';
 
 const defaultLive = process.argv.includes('--default-live');
+const reasoningProbe = process.argv.includes('--reasoning');
+if (defaultLive && reasoningProbe) throw Error('--reasoning uses only the local mock provider');
 const codex = process.env.CODEX_CLI || path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe');
 const fakeKey = 'sk-live-account-' + Math.random().toString(36).slice(2);
 const report = { mode: defaultLive ? 'default' : 'custom', requests: [], rpc: [], failures: [] };
@@ -48,7 +51,14 @@ const mock = http.createServer((req, res) => {
     }
     const msg = { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed',
       content: [{ type: 'output_text', text: 'account-ok', annotations: [] }] };
-    sse(res, [created, { type: 'response.output_item.added', output_index: 0, item: { ...msg, content: [] } },
+    const thoughts = { type: 'reasoning', id: 'thoughts_1', summary: [],
+      content: [{ type: 'reasoning_text', text: 'Mock provider thoughts.' }] };
+    const prefix = reasoningProbe ? [
+      { type: 'response.output_item.added', output_index: 1, item: { ...thoughts, content: [] } },
+      { type: 'response.reasoning_text.delta', item_id: thoughts.id, output_index: 1, content_index: 0, delta: 'Mock provider thoughts.' },
+      { type: 'response.output_item.done', output_index: 1, item: thoughts }
+    ] : [];
+    sse(res, [created, ...prefix, { type: 'response.output_item.added', output_index: 0, item: { ...msg, content: [] } },
       { type: 'response.output_text.delta', item_id: 'msg_1', output_index: 0, content_index: 0, delta: 'account-ok' },
       { type: 'response.output_item.done', output_index: 0, item: msg }, completed]);
   });
@@ -71,6 +81,7 @@ const socket = new WebSocket(`ws://127.0.0.1:${bridge.port}`, { origin: `ws://12
 let nextId = 0, agentText = '', turnDone = null, threadId = null;
 const pending = new Map();
 const notifications = [];
+const reasoningDeltas = [], reasoningItems = [];
 socket.on('message', raw => {
   const m = JSON.parse(raw.toString());
   if (m.id !== undefined && m.method) {
@@ -88,11 +99,15 @@ socket.on('message', raw => {
     return;
   }
   notifications.push(m.method);
+  if (m.method === 'item/reasoning/textDelta') reasoningDeltas.push(m.params);
+  if (m.method === 'item/completed' && m.params?.item?.type === 'reasoning') reasoningItems.push(m.params.item);
   if (m.method === 'item/agentMessage/delta') agentText += m.params?.delta ?? '';
   if (m.method === 'turn/completed') turnDone?.(m.params?.turn);
 });
-const request = (method, params) => new Promise(resolve => {
-  const id = ++nextId; pending.set(id, { method, resolve });
+const request = (method, params) => new Promise((resolve,reject) => {
+  const id = ++nextId;
+  const timeout = setTimeout(() => { pending.delete(id); reject(Error(method + ' timed out')); }, 15000);
+  pending.set(id, { method, resolve: value => { clearTimeout(timeout); resolve(value); } });
   socket.send(JSON.stringify({ id, method, params }));
 });
 
@@ -132,10 +147,19 @@ try {
     input: [{ type: 'text', text: defaultLive ? 'Reply with exactly: ok'
       : 'Call read_sprite, then reply with exactly account-ok.' }] });
   check('turn/start accepted', !turn.error, turn.error);
-  const finished = await Promise.race([done, new Promise(r => setTimeout(() => r('timeout'), defaultLive ? 120000 : 60000))]);
+  let turnTimeout;
+  const finished = await Promise.race([done, new Promise(r => { turnTimeout = setTimeout(() => r('timeout'), defaultLive ? 120000 : 60000); })]);
+  clearTimeout(turnTimeout);
   check('turn completed', finished?.status === 'completed', finished?.status ?? finished);
   check('agent message arrived', agentText.length > 0 || notifications.includes('item/completed'),
     agentText);
+  if (reasoningProbe) {
+    check('raw reasoning delta forwarded by real Codex', reasoningDeltas.some(p => p.contentIndex === 0 && p.delta === 'Mock provider thoughts.'), reasoningDeltas);
+    check('completed reasoning content forwarded by real Codex', reasoningItems.some(i => i.content?.includes('Mock provider thoughts.')), reasoningItems);
+    const restored = await request('thread/read', { threadId, includeTurns: true });
+    const items = restored.result?.thread?.turns?.flatMap(t => t.items) ?? [];
+    check('persisted reasoning content restored', items.some(i => i.type === 'reasoning' && i.content?.includes('Mock provider thoughts.')), restored.error ?? items.map(i => i.type));
+  }
 
   const listed = await request('thread/list', { limit: 10, useStateDbOnly: true,
     sourceKinds: ['cli', 'vscode', 'appServer'] });

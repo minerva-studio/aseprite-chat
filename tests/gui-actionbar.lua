@@ -37,22 +37,22 @@ local variant=app.params.variant=="fast" and "fast" or "unsupported"
 local report={variant=variant}
 local ok,err=xpcall(function()
   view:show(); view:set_models(models,"ds","high","priority"); view:set_state("ready")
-  assert(not widgets.speed.visible and not widgets.stop.visible and view.selection_valid)
-  assert(widgets.auto_approve.kind=="button" and widgets.access.kind=="button")
-  widgets.auto_approve.onclick(); assert(view.auto_approve and view.dialog.data.auto_approve)
-  widgets.auto_approve.onclick(); assert(not view.auto_approve)
-  widgets.access.onclick(); assert(view.access_dialog)
+  assert(not view.controls.speed.visible and not view.controls.stop.visible and view.selection_valid)
+  assert(widgets.composer and not widgets.model)
+  view.controls.auto_approve.onclick(); assert(view.auto_approve and view.controls.auto_approve.selected)
+  view.controls.auto_approve.onclick(); assert(not view.auto_approve)
+  view.controls.access.onclick(); assert(view.access_dialog)
   view.access_dialog:modify {id="access_level",option="Workspace write"}; widgets.access_level.onchange()
   widgets.access_apply.onclick(); assert(view.access_dialog and widgets.access_error.visible)
   view.access_dialog:modify {id="access_workspace",text="D:\\Fixture workspace"}
   widgets.access_apply.onclick(); assert(not view.access_dialog and access.access=="workspace")
-  widgets.access.onclick(); assert(view.access_dialog.data.access_level=="Workspace write")
+  view.controls.access.onclick(); assert(view.access_dialog.data.access_level=="Workspace write")
   view.access_dialog:close()
-  view:set_models(models,"sol","low","default"); assert(widgets.speed.visible and not view.dialog.data.speed)
-  widgets.speed.onclick(); assert(view.selected_tier=="priority" and view.dialog.data.speed)
-  view:set_state("working",true); assert(widgets.stop.visible and widgets.stop.enabled and not widgets.speed.enabled)
-  view:set_state("stopping"); assert(widgets.stop.visible and not widgets.stop.enabled)
-  view:set_state("ready"); assert(not widgets.stop.visible)
+  view:set_models(models,"sol","low","default"); assert(view.controls.speed.visible and not view.controls.speed.selected)
+  view.controls.speed.onclick(); assert(view.selected_tier=="priority" and view.controls.speed.selected)
+  view:set_state("working",true); assert(view.controls.stop.visible and view.controls.stop.enabled and not view.controls.speed.enabled)
+  view:set_state("stopping"); assert(view.controls.stop.visible and not view.controls.stop.enabled)
+  view:set_state("ready"); assert(not view.controls.stop.visible)
   view:show_settings(); assert(view.settings_dialog.data.access_level==nil)
   report.settingsWidth,report.settingsHeight=view.settings_dialog.bounds.width,view.settings_dialog.bounds.height
   view.settings_dialog:close()
@@ -60,7 +60,7 @@ local ok,err=xpcall(function()
   if variant=="fast" then
     view:set_approval_mode(true); view:set_state("working",true)
   else
-    view:set_models(models,"ds","high","default"); view:set_state("ready"); widgets.access.onclick()
+    view:set_models(models,"ds","high","default"); view:set_state("ready"); view.controls.access.onclick()
   end
   view.dialog:modify {title="UI TEST · " .. variant .. " action bar · no connection"}
   local bounds=view.dialog.bounds
@@ -70,10 +70,16 @@ local ok,err=xpcall(function()
     local panel=view.access_dialog.bounds
     view.access_dialog.bounds=Rectangle(bounds.width+20,42,panel.width,panel.height)
   end
+  local rects=assert(view.control_rects)
+  assert(rects[1].id=="model" and not view.controls.send)
+  assert(widgets.send.kind=="button" and widgets.send.focus==true)
+  for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width,"controls overlap") end
+  report.controls=rects
   report.mainWidth,report.mainHeight=bounds.width,bounds.height
-  report.fastVisible,report.stopVisible=widgets.speed.visible,widgets.stop.visible
+  report.fastVisible,report.stopVisible=view.controls.speed.visible,view.controls.stop.visible
 end,debug.traceback)
-report.success,report.error=ok,ok and nil or tostring(err)
+report.success=ok
+if not ok then report.error=tostring(err) end
 local file=assert(io.open(app.fs.joinPath(root,"work","actionbar-ui-"..variant..".json"),"wb"))
 file:write(json.encode(report)); file:close()
 local result=native_dialog {title="ACTION BAR UI RESULT"}

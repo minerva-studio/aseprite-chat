@@ -10,10 +10,13 @@ test("user history omits appended canvas context and preserves normal content",f
   assert(role=="You" and text:find("检查画布",1,true) and not text:find("metadata",1,true))
   assert(not text:find("base64",1,true))
 end)
-test("only supplied reasoning summaries are shown",function()
+test("Thoughts prefer supplied reasoning content and fall back to summaries",function()
   local role,text=Timeline.item {type="reasoning",id="r",summary={"Inspect the sprite","Check layers"},content={"raw hidden content"}}
-  assert(role=="Summary" and text=="Inspect the sprite\n\nCheck layers")
-  assert(Timeline.item {type="reasoning",id="r",content={"raw only"}}==nil)
+  assert(role=="Summary" and text=="raw hidden content")
+  local raw_role,raw_text=Timeline.item {type="reasoning",id="r",content={"raw only"}}
+  assert(raw_role=="Summary" and raw_text=="raw only")
+  local _,fallback=Timeline.item {type="reasoning",summary={"summary only"},content={}}
+  assert(fallback=="summary only")
 end)
 test("tool display includes actual code status and bounded textual results",function()
   local text=Timeline.tool("execute_lua",{summary="Darken highlight",code="sprite.layers[1].name='Shade'"},"Succeeded",{success=true,contentItems={{type="inputText",text="Applied"},{type="inputImage",imageUrl="data:image/png;base64,hidden"}}})
@@ -45,6 +48,13 @@ test("native JSON userdata projects like protocol item objects",function()
   local role,text=Timeline.item(json.decode('{"id":"native","type":"reasoning","summary":["你好"]}'))
   assert(role=="Summary" and text=="你好")
 end)
+test("restored and native JSON reasoning content appears in Thoughts without opaque fields",function()
+  local item=json.decode('{"id":"raw","type":"reasoning","summary":[],"content":["思考第一步","第二步"],"encryptedContent":"opaque"}')
+  local rows=Timeline.history({{id="turn",items={item}}})
+  assert(#rows==1 and rows[1].role=="Summary" and rows[1].text=="思考第一步\n\n第二步")
+  assert(not rows[1].text:find("opaque",1,true))
+end)
+
 test("unrecognized items and absent summaries produce no transcript noise",function()
   assert(Timeline.item {type="unknown",id="unknown"}==nil)
   local role,text=Timeline.item {type="plan",id="p",text="Inspect, then edit"}

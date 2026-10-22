@@ -50,13 +50,17 @@ local function sequence(value)
     and encode(value):sub(1, 1) == "["
 end
 
--- Summary indexes can arrive out of order; snapshots never share mutable parts.
-local function reasoning_item(id, parts)
-  local indexes, summary = {}, {}
+-- Both reasoning channels can arrive out of order; snapshots own their arrays.
+local function ordered_parts(parts)
+  local indexes, ordered = {}, {}
   for index in pairs(parts) do indexes[#indexes+1] = index end
   table.sort(indexes)
-  for _, index in ipairs(indexes) do summary[#summary+1] = parts[index] end
-  return {type="reasoning", id=id, summary=summary}
+  for _, index in ipairs(indexes) do ordered[#ordered+1] = parts[index] end
+  return ordered
+end
+
+local function reasoning_item(id, parts)
+  return {type="reasoning",id=id,summary=ordered_parts(parts.summary),content=ordered_parts(parts.content)}
 end
 
 local function failure(text)
@@ -136,7 +140,7 @@ end
 -- Options: tools, instructions; on_state(state),
 -- on_message(id,text,isDelta), on_tool(params,reply), on_cancel(reason),
 -- on_item(item,completed), on_error(text). on_item receives plain Lua non-agent
--- items; reasoning contains only readable summary sections, never raw content.
+-- items; reasoning preserves supplied summary/content strings, never opaque data.
 -- Public state/thread_id/turn_id belong to this client.
 -- reply({success=boolean,contentItems=array}) is single-use and generation-bound.
 -- Empty schema objects/arrays can use json.decode("{}") / json.decode("[]").
@@ -350,7 +354,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.4.1"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.4.2"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -471,9 +475,10 @@ function Client:_notification(message)
   end
   local summary_delta = method == "item/reasoning/summaryTextDelta"
   local summary_part = method == "item/reasoning/summaryPartAdded"
+  local content_delta = method == "item/reasoning/textDelta"
   if method ~= "turn/started" and method ~= "turn/completed" and method ~= "item/started"
     and method ~= "item/completed" and method ~= "item/agentMessage/delta" and method ~= "error"
-    and not summary_delta and not summary_part then return end
+    and not summary_delta and not summary_part and not content_delta then return end
   assert(object(params), "Malformed notification parameters")
   local turn_id = params.turn and params.turn.id or params.turnId
   assert(type(params.threadId) == "string" and type(turn_id) == "string", "Missing thread or turn ID")
@@ -495,19 +500,20 @@ function Client:_notification(message)
     return
   end
   if turn.stopped then return end
-  if summary_delta or summary_part then
-    local index = params.summaryIndex
+  if summary_delta or summary_part or content_delta then
+    local index = content_delta and params.contentIndex or params.summaryIndex
     assert(type(params.itemId) == "string" and type(index) == "number" and index >= 0
-      and index < math.huge and index == math.floor(index), "Malformed reasoning summary index")
-    assert(not summary_delta or type(params.delta) == "string", "Malformed reasoning summary delta")
+      and index < math.huge and index == math.floor(index), "Malformed reasoning index")
+    assert(summary_part or type(params.delta) == "string", "Malformed reasoning delta")
     if turn.items[params.itemId] == "completed" then return end
     turn.reasoning = turn.reasoning or {}
-    local parts = turn.reasoning[params.itemId] or {}
-    turn.reasoning[params.itemId] = parts
+    local reasoning = turn.reasoning[params.itemId] or {summary={},content={}}
+    turn.reasoning[params.itemId] = reasoning
+    local parts=content_delta and reasoning.content or reasoning.summary
     if summary_part and parts[index] ~= nil then return end
-    parts[index] = (parts[index] or "") .. (summary_delta and params.delta or "")
+    parts[index] = (parts[index] or "") .. (summary_part and "" or params.delta)
     turn.items[params.itemId] = "streaming"
-    self:_emit("on_item", reasoning_item(params.itemId, parts), false)
+    self:_emit("on_item", reasoning_item(params.itemId, reasoning), false)
   elseif method == "item/agentMessage/delta" then
     assert(type(params.itemId) == "string" and type(params.delta) == "string", "Malformed agent delta")
     if turn.items[params.itemId] ~= "completed" then
@@ -523,11 +529,13 @@ function Client:_notification(message)
     if item.type ~= "agentMessage" then
       local projected
       if item.type == "reasoning" then
-        assert(item.summary == nil or sequence(item.summary), "Malformed reasoning summary")
-        local parts = {}
-        for index, text in ipairs(item.summary or {}) do
-          assert(type(text) == "string", "Malformed reasoning summary text")
-          parts[index-1] = text
+        local parts = {summary={},content={}}
+        for _,channel in ipairs {"summary","content"} do
+          assert(item[channel] == nil or sequence(item[channel]), "Malformed reasoning "..channel)
+          for index, text in ipairs(item[channel] or {}) do
+            assert(type(text) == "string", "Malformed reasoning "..channel.." text")
+            parts[channel][index-1] = text
+          end
         end
         turn.reasoning = turn.reasoning or {}
         if completed then turn.reasoning[item.id] = nil else turn.reasoning[item.id] = parts end

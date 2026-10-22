@@ -360,9 +360,9 @@ scenario("failed history open preserves conversation and reports a visible error
   assert(v.messages[1]==first and v.messages[#v.messages][3]:find("Conversation unavailable",1,true))
 end)
 scenario("reasoning item updates are displayed separately from agent answers",function(c,p,e,v)
-  p.options.on_item({id="summary",type="reasoning",summary={"Inspect layers"},content={"raw hidden"}},true)
+  p.options.on_item({id="summary",type="reasoning",summary={"Inspect layers"},content={"Provider reasoning"}},true)
   local row=v.messages[#v.messages]
-  assert(row[1]=="activity:summary" and row[2]=="Summary" and row[3]=="Inspect layers")
+  assert(row[1]=="activity:summary" and row[2]=="Summary" and row[3]=="Provider reasoning")
   assert(p.sent_settings.summary=="auto", "reasoning summary was not requested")
 end)
 scenario("empty completed reasoning clears the streamed summary",function(c,p,e,v)
