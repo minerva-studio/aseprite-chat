@@ -8,8 +8,9 @@ Use read_sprite to inspect the live unsaved document before every edit; it retur
 Use read_pixels for exact pixel values of a small region; do not spend an execute_lua approval on reads.
 The metadata's openSprites lists every open document; other sprites are read-only references.
 Use switch_sprite with a spriteId to move the editing target to another open sprite; edits apply only to the current target.
-Depending on the user's access setting, shell commands and view_image may also be available.
-Use them only to read references or to write exports the user asked for; never write to a file that is currently open in Aseprite.
+File and project work follows the current Access setting below and Codex's permission approvals.
+Use available shell/file tools for the user's requested project work when Access permits it; never write directly to a file that is currently open in Aseprite.
+The canvas transaction restrictions below apply only inside execute_lua, not to shell/file tools. Earlier assistant claims about plugin-wide file bans are not access settings.
 Use execute_lua for canvas edits. Its Lua environment provides sprite, app, Aseprite constructors/constants, and basic Lua libraries.
 Use only short, terminating scripts. Edits must target the captured sprite and be undoable.
 For pixel edits, clone a cel image, modify the clone, then assign cel.image = clone; direct drawPixel on an attached image does not create Undo.
@@ -171,7 +172,7 @@ end
 
 function Controller:_create_client()
   return self.Codex.new {
-    tools = self.Executor.tools, instructions = instructions,
+    tools = self.Executor.tools,
     on_state = function(state)
       if state == "initializing" then self.models = nil; self.view:set_models(nil) end
       if state == "ready" then
@@ -215,8 +216,18 @@ function Controller:_thread_settings()
     workspace = "workspace-write", full = "danger-full-access" })[access] or "read-only"
   local cwd = access == "workspace" and account.workspace or nil
   if not cwd or cwd == "" then cwd = os.getenv("USERPROFILE") end
+  -- Native json.encode requires a container even for a quoted path string.
+  local quoted_cwd=json.encode({cwd}):match("^%[%s*(.-)%s*%]$")
+  local access_instructions=({
+    canvas="Current Access: Canvas only. Shell and view_image are disabled; use the Aseprite document tools.",
+    read="Current Access: Read files. You may inspect files and projects with available shell/file tools. The filesystem sandbox is read-only; writes require Codex permission approval.",
+    workspace="Current Access: Workspace write. You may inspect projects and edit files in the configured workspace using available shell/file tools. Writes outside the sandbox require Codex permission approval.",
+    full="Current Access: Full access. You may read, inspect and edit project files and run requested commands using available shell/file tools. There is no plugin-wide ban on external files or shell commands; Codex and operating-system permissions still apply."
+  })[access]
   return { sandbox = sandbox, cwd = cwd, approvalPolicy = "on-request",
-    approvalsReviewer = account.reviewer == "auto_review" and "auto_review" or "user" }
+    approvalsReviewer = account.reviewer == "auto_review" and "auto_review" or "user",
+    developerInstructions=instructions.."\n"..access_instructions.."\nCurrent working directory: "..quoted_cwd
+      .."\nDo not ask the user to re-grant the selected Access. Report actual tool permission errors instead of inventing restrictions. The plugin's Ask before edits setting controls execute_lua only; Codex manages file/shell approvals." }
 end
 
 --- Forward a Codex boundary approval to the shared approval window. The window

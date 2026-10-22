@@ -183,6 +183,22 @@ scenario("thread settings follow the stored access level", function(c, p)
   c.account.access = "full"
   assert(p.options.thread_settings().sandbox == "danger-full-access")
 end)
+scenario("model instructions follow Access and keep canvas constraints local to execute_lua",function(c,p)
+  local permissions={canvas="Canvas only",read="Read files",workspace="Workspace write",full="Full access"}
+  for access,label in pairs(permissions) do
+    c.account.access,c.account.workspace=access,"D:\\project"
+    local settings=p.options.thread_settings()
+    local text=assert(settings.developerInstructions,"missing current access instructions")
+    assert(text:find("Current Access: "..label,1,true),"instructions do not identify the selected access")
+    assert(not text:find("Use them only to read references or to write exports",1,true),"old plugin-wide file restriction remains")
+    assert(text:find("apply only inside execute_lua",1,true),"canvas constraints are still ambiguous")
+    if access=="full" then
+      assert(text:find("read, inspect and edit project files",1,true),"Full access does not allow project work")
+    elseif access=="workspace" then
+      assert(text:find("D:\\\\project",1,true),"workspace path is missing from instructions")
+    end
+  end
+end)
 scenario("apply_access keeps the conversation and reconnects the same client", function(c, p, e, v, request, result, l)
   p.state = "ready"
   local client = c.client

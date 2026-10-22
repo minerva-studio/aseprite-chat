@@ -137,7 +137,8 @@ end
 
 -- Construct one direct app-server client. Tools are registered verbatim; callbacks
 -- receive derived state, item text, tool requests, cancellation, and visible errors.
--- Options: tools, instructions; on_state(state),
+-- Options: tools, thread_settings() returning sandbox/cwd/approval routing and
+-- optional developerInstructions, evaluated for each thread start/resume; on_state(state),
 -- on_message(id,text,isDelta), on_tool(params,reply), on_cancel(reason),
 -- on_item(item,completed), on_error(text). on_item receives plain Lua non-agent
 -- items; reasoning preserves supplied summary/content strings, never opaque data.
@@ -338,7 +339,7 @@ function Client:_resume()
   local settings = self:_thread_settings()
   self:_request("thread/resume", {threadId=self.thread_id, excludeTurns=true,
     config=settings.config,
-    developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd, approvalPolicy=settings.approvalPolicy,
+    developerInstructions=settings.developerInstructions, sandbox=settings.sandbox, cwd=settings.cwd, approvalPolicy=settings.approvalPolicy,
     approvalsReviewer=settings.approvalsReviewer}, function(result, err)
     if err then self:_request_error(err); return end
     assert(object(result.thread) and result.thread.id == self.thread_id, "Malformed thread/resume response")
@@ -429,6 +430,7 @@ function Client:_thread_settings()
   local provider = self._options.thread_settings
   local settings = provider and provider() or {}
   return { sandbox = settings.sandbox or "read-only", cwd = settings.cwd,
+    developerInstructions=settings.developerInstructions,
     approvalPolicy = settings.approvalPolicy or "on-request",
     approvalsReviewer = settings.approvalsReviewer or "user",
     -- A nested features table replaces CLI feature overrides; a dotted key
@@ -865,7 +867,7 @@ function Client:open_thread(id, callback)
       local settings = self:_thread_settings()
       self:_request("thread/resume", {threadId=id, excludeTurns=true,
         config=settings.config,
-        developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd,
+        developerInstructions=settings.developerInstructions, sandbox=settings.sandbox, cwd=settings.cwd,
         approvalPolicy=settings.approvalPolicy, approvalsReviewer=settings.approvalsReviewer}, function(resumed, resume_error)
         if not live() then return end
         if resume_error then finish(nil, resume_error.message); return end
@@ -971,7 +973,7 @@ function Client:send(prompt, context_text, settings)
     local settings = self:_thread_settings()
     self:_request("thread/start", {dynamicTools=array(self._options.tools or {}), model=turn.model,
       config=settings.config,
-      developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd,
+      developerInstructions=settings.developerInstructions, sandbox=settings.sandbox, cwd=settings.cwd,
       approvalPolicy=settings.approvalPolicy, approvalsReviewer=settings.approvalsReviewer,
       allowProviderModelFallback=false}, function(result, err)
       if self._turn ~= turn then return end

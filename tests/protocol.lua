@@ -10,7 +10,7 @@ local function harness(overrides)
   local options = {
     tools={{type="function", name="read_sprite", description="Read live sprite",
       inputSchema={type="object", properties=json.decode("{}"), required=json.decode("[]")}}},
-    instructions="Use Aseprite tools only.",
+    thread_settings=function() return {developerInstructions="Use Aseprite tools only."} end,
     on_state=function(s) h.states[#h.states+1]=s end,
     on_error=function(e) h.errors[#h.errors+1]=e end,
     on_cancel=function(e) h.cancels[#h.cancels+1]=e end,
@@ -845,20 +845,27 @@ test("a close reason string is surfaced as an error while plain close stays quie
 end)
 
 test("thread settings reach thread start resume and history resume",function()
+  local instructions="Canvas access"
   local h=harness({thread_settings=function()
-    return {sandbox="workspace-write",cwd="D:\\ws",approvalPolicy="on-request",approvalsReviewer="auto_review"}
+    return {sandbox="workspace-write",cwd="D:\\ws",approvalPolicy="on-request",approvalsReviewer="auto_review",
+      developerInstructions=instructions}
   end}); h:open(); h:start()
   local start=h:last("thread/start")
   eq(start.params.sandbox,"workspace-write"); eq(start.params.cwd,"D:\\ws")
   eq(start.params.approvalsReviewer,"auto_review")
+  eq(start.params.developerInstructions,"Canvas access")
+  instructions="Full access allows project work"
   h.ws:event(WebSocketMessageType.CLOSE)
   local resume=h:reopen()
   eq(resume.params.sandbox,"workspace-write"); eq(resume.params.cwd,"D:\\ws")
   eq(resume.params.approvalsReviewer,"auto_review")
+  eq(resume.params.developerInstructions,"Full access allows project work")
+  instructions="Updated history access"
   h.client:open_thread("history",function() end)
   h:history_read(); h:history_resume()
   local resumed=h:last("thread/resume")
   eq(resumed.params.sandbox,"workspace-write"); eq(resumed.params.cwd,"D:\\ws")
+  eq(resumed.params.developerInstructions,"Updated history access")
 end)
 
 test("default thread settings reproduce the canvas profile",function()

@@ -63,7 +63,9 @@ On native Windows without MXC (for example Windows 10 with the `unelevated` sand
 
 ## Plugin instructions
 
-The extension sends its own developer instructions from the `instructions` constant near the top of [main.lua](main.lua) when starting or resuming a thread. They tell Codex to reply concisely in the user's language, inspect before editing, use the canvas tools, preserve undo, respect rejection and ask about consequential unresolved choices. They also require plain text and forbid document saves or external side effects inside canvas Lua. These are extension-authored instructions, separate from the chat message; the exact text is visible in that source file. They do not require confidence percentages. This release does not change their content.
+The extension sends its own developer instructions from [main.lua](main.lua): the shared `instructions` text near the top plus the current Access description and working directory built by `Controller:_thread_settings`. They are regenerated for new threads, reconnection and history restoration. These are extension-authored instructions, separate from chat messages; both parts are visible in that source file. They require concise plain text in the user's language, inspecting live documents before edits, undoable canvas operations, respecting rejection and asking about consequential unresolved choices. They do not require confidence percentages.
+
+File/project work follows the selected Access level and Codex's own approvals. **Full access** explicitly allows requested project-file reads/edits and commands; there is no extra plugin-wide references/exports restriction. **Ask before edits** controls the canvas `execute_lua` tool independently. Document saves, external file access and process calls remain prohibited inside `execute_lua`, whose transaction is limited to undoable canvas edits. That local tool contract does not disable shell/file tools allowed by Access. Direct external writes to files currently open in Aseprite remain prohibited to avoid desynchronizing the editor.
 
 ## Working together
 
