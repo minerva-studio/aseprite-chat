@@ -9,7 +9,7 @@ function Get-IdleEndpoint($Port, $ExpectedPid = $null) {
   try {
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/readyz" -UseBasicParsing -TimeoutSec 1 -ErrorAction Stop
     if ($health.service -ceq 'aseprite-chat' -and
-        ($health.protocolVersion -is [int] -or $health.protocolVersion -is [long]) -and $health.protocolVersion -eq 1 -and
+        ($health.protocolVersion -is [int] -or $health.protocolVersion -is [long]) -and $health.protocolVersion -eq 2 -and
         ($health.pid -is [int] -or $health.pid -is [long]) -and $health.pid -gt 0 -and
         ($health.port -is [int] -or $health.port -is [long]) -and $health.port -eq $Port -and
         $health.busy -is [bool] -and $health.busy -eq $false -and

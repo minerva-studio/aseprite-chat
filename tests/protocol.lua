@@ -6,7 +6,7 @@ local function eq(actual, expected)
 end
 local function test(name, fn) tests[#tests + 1] = {name, fn} end
 local function harness(overrides)
-  local h = {sockets={}, timers={}, errors={}, messages={}, calls={}, cancels={}, states={}}
+  local h = {sockets={}, timers={}, errors={}, messages={}, items={}, calls={}, cancels={}, states={}}
   local options = {
     tools={{type="function", name="read_sprite", description="Read live sprite",
       inputSchema={type="object", properties=json.decode("{}"), required=json.decode("[]")}}},
@@ -15,6 +15,7 @@ local function harness(overrides)
     on_error=function(e) h.errors[#h.errors+1]=e end,
     on_cancel=function(e) h.cancels[#h.cancels+1]=e end,
     on_message=function(id,text,delta) h.messages[#h.messages+1]={id=id,text=text,delta=delta} end,
+    on_item=function(item,completed) h.items[#h.items+1]={item=item,completed=completed} end,
     on_tool=function(p,reply) h.calls[#h.calls+1]={params=p,reply=reply} end,
     socket_factory=function(spec)
       local ws={spec=spec,sent={},raw={},closed=0}
@@ -83,6 +84,14 @@ local function harness(overrides)
     local resume=self:last("thread/resume")
     self:respond(resume,{thread={id="thread",status={type=status or "idle"}}})
     return resume
+  end
+  function h:history_read(id,status)
+    self:respond(self:last("thread/read"),{thread={id=id or "history",originator="aseprite_chat",
+      preview="previous prompt",updatedAt=100,status={type=status or "notLoaded"}}})
+  end
+  function h:history_resume(id,status)
+    self:respond(self:last("thread/resume"),{thread={id=id or "history",originator="aseprite_chat",
+      preview="previous prompt",updatedAt=100,status={type=status or "idle"}}})
   end
   return h
 end
@@ -405,6 +414,296 @@ test("catalog errors are visible to caller and a retired request cannot change s
   eq(calls,1); assert(err:find("catalog unavailable",1,true)); eq(h.client.state,"ready")
   assert(h.client:list_models(function() calls=calls+1 end)); local old=h:last()
   h.client:disconnect(); h:respond(old,{data={}}); eq(calls,1)
+end)
+
+test("thread listing sends one filtered page and returns plain Lua metadata",function()
+  local h=harness(); h:open(); local page,why,calls
+  calls=0
+  assert(h.client:list_threads({search="sprite",cursor="older"},function(value,err) page,why=value,err; calls=calls+1 end))
+  local request=h:last("thread/list")
+  eq(request.params.limit,50); eq(request.params.sortKey,"updated_at"); eq(request.params.sortDirection,"desc")
+  eq(request.params.searchTerm,"sprite"); eq(request.params.cursor,"older"); eq(request.params.originators,nil)
+  eq(request.params.sourceKinds[1],"cli"); eq(request.params.sourceKinds[2],"vscode"); eq(request.params.sourceKinds[3],"appServer")
+  eq(request.params.useStateDbOnly,true)
+  h:respond(request,{data={
+    {id="own",originator="aseprite_chat",name="Sprite",preview="hello",updatedAt=123,status={type="idle"}},
+    {id="foreign",originator="vscode",preview="private",updatedAt=124,status={type="active"}},
+    {id="unknown",preview="unknown",updatedAt=125,status={type="notLoaded"}}},nextCursor="more"})
+  eq(why,nil); eq(calls,1); eq(type(page),"table"); eq(type(page.data),"table"); eq(#page.data,1)
+  eq(type(page.data[1]),"table"); eq(page.data[1].status,"idle")
+  eq(page.data[1].id,"own"); eq(page.data[1].name,"Sprite"); eq(page.data[1].updatedAt,123)
+  eq(page.nextCursor,"more"); eq(h:last().id,request.id); eq(h.client.state,"ready")
+end)
+
+test("thread listing keeps empty pages with cursors and reports errors without retirement",function()
+  local h=harness(); h:open(); local page,why
+  local function done(value,err) page,why=value,err end
+  assert(h.client:list_threads({},done))
+  h:respond(h:last(),{data={{id="other",originator="other"}},nextCursor="next"})
+  eq(#page.data,0); eq(page.nextCursor,"next")
+  assert(h.client:list_threads({cursor="next"},done))
+  h:respond(h:last(),nil,{code=-1,message="history unavailable"})
+  eq(page,nil); assert(why:find("history unavailable",1,true)); eq(h.client.state,"ready")
+  assert(h.client:list_threads({},done))
+  h.ws:event(WebSocketMessageType.TEXT,'{"id":' .. h:last().id .. ',"result":{"data":[],"nextCursor":null}}')
+  eq(type(page.data),"table"); eq(#page.data,0); eq(page.nextCursor,nil)
+end)
+
+test("thread listing rejects malformed pages and cursor loops and ignores retired results",function()
+  local h=harness(); h:open(); local calls,why=0
+  local function done(value,err) calls=calls+1; eq(value,nil); why=err end
+  for _,page in ipairs({{data={},nextCursor=9},{data={},nextCursor="same"},{data={}},{data={{id=4,originator="aseprite_chat"}}}}) do
+    if page.nextCursor==nil and #page.data==0 then page.data={bad=true} end
+    assert(h.client:list_threads({cursor="same"},done)); h:respond(h:last(),page)
+    assert(why); eq(h.client.state,"ready")
+  end
+  eq(calls,4)
+  assert(h.client:list_threads({},done)); local old=h:last()
+  h.client:disconnect(); h:respond(old,{data={}}); eq(calls,4); eq(h.client.state,"disconnected")
+  eq(h.client:list_threads({},done),false)
+end)
+
+test("history list callbacks retained across a lost connection cannot update the picker",function()
+  for _,retirement in ipairs({"close","disconnect","open"}) do
+    local h=harness(); h:open(); local calls=0
+    assert(h.client:list_threads({},function() calls=calls+1 end))
+    local callback=h.client._pending[h:last().id].callback
+    if retirement=="close" then h.ws:event(WebSocketMessageType.CLOSE)
+    elseif retirement=="open" then h.ws:event(WebSocketMessageType.OPEN)
+    else h.client:disconnect() end
+    callback(json.decode('{"data":[]}'))
+    eq(calls,0)
+  end
+end)
+
+test("opening history loads every full ascending page before replacing binding without replay",function()
+  local h=harness(); h:open(); h:start(); h:complete(); local result,why,calls= nil,nil,0
+  assert(h.client:open_thread("history",function(value,err) result,why=value,err; calls=calls+1 end))
+  eq(h.client.state,"loading"); eq(h.client.thread_id,"thread")
+  local read=h:last("thread/read"); eq(read.params.threadId,"history"); eq(read.params.includeTurns,false)
+  eq(h.client:send("blocked",""),false); eq(h.client:new_chat(),false)
+  eq(h.client:open_thread("second",function() error("overlap") end),false)
+  h:history_read()
+  local resume=h:last("thread/resume")
+  eq(resume.params.threadId,"history"); eq(resume.params.excludeTurns,true); eq(resume.params.dynamicTools,nil)
+  eq(resume.params.developerInstructions,"Use Aseprite tools only.")
+  eq(resume.params.sandbox,"read-only"); eq(resume.params.approvalPolicy,"on-request"); eq(resume.params.approvalsReviewer,"user")
+  h:history_resume()
+  h.ws:receive({id="historical-request",method="item/tool/call",params={threadId="history",turnId="past1",
+    callId="past-call",tool="read_sprite",arguments={}}})
+  eq(h:last().result.success,false); eq(#h.calls,0)
+  local first=h:last("thread/turns/list")
+  eq(first.params.threadId,"history"); eq(first.params.sortDirection,"asc"); eq(first.params.itemsView,"full"); eq(first.params.limit,50)
+  h:respond(first,{data={{id="past1",status="completed",items={{id="tool",type="dynamicToolCall",tool="read_sprite",
+    arguments={},status="completed",success=true,contentItems={{type="inputText",text="old result"}}}}}},nextCursor="page2"})
+  eq(calls,0); eq(h.client.thread_id,"thread"); eq(h:last().params.cursor,"page2")
+  h:respond(h:last(),{data={},nextCursor="page3"}); eq(h:last().params.cursor,"page3"); eq(calls,0)
+  h:respond(h:last(),{data={{id="past2",status="interrupted",items={{id="answer",type="agentMessage",text="history"}}}}})
+  eq(calls,1); eq(why,nil); eq(h.client.state,"ready"); eq(h.client.thread_id,"history")
+  eq(type(result),"table"); eq(type(result.thread),"table"); eq(type(result.turns[1].items[1]),"table")
+  eq(#result.turns,2); eq(result.turns[1].items[1].contentItems[1].text,"old result"); eq(result.turns[2].id,"past2")
+  eq(#h.calls,0); eq(#h.messages,0)
+  assert(h.client:send("continue","canvas")); eq(h:last("turn/start").params.threadId,"history")
+  h:notify("turn/started",{threadId="history",turn={id="past1",status="inProgress"}})
+  eq(h.client.turn_id,nil)
+end)
+
+test("history rejects foreign and active reads or resumes without interrupting other editors",function()
+  for _,scenario in ipairs({"foreign","active-read","active-resume","foreign-resume"}) do
+    local h=harness(); h:open(); h:start(); h:complete(); local result,why
+    assert(h.client:open_thread("history",function(value,err) result,why=value,err end))
+    if scenario=="foreign" then
+      h:respond(h:last(),{thread={id="history",originator="vscode",status={type="idle"}}})
+    elseif scenario=="active-read" then h:history_read(nil,"active")
+    else
+      h:history_read()
+      if scenario=="foreign-resume" then
+        h:respond(h:last(),{thread={id="history",originator="other",status={type="idle"}}})
+      else h:history_resume(nil,"active") end
+    end
+    eq(result,nil); assert(why); eq(h.client.thread_id,"thread"); eq(h.client.state,"ready")
+    for _,m in ipairs(h.ws.sent) do assert(m.method~="turn/interrupt" and m.method~="thread/turns/list") end
+    if scenario=="foreign" or scenario=="active-read" then eq(h:last().method,"thread/read") end
+  end
+end)
+
+test("history request errors at every stage preserve prior binding and recover ready",function()
+  for _,stage in ipairs({"read","resume","turns"}) do
+    local h=harness(); h:open(); h:start(); h:complete(); local calls,why=0
+    assert(h.client:open_thread("history",function(value,err) eq(value,nil); calls=calls+1; why=err end))
+    if stage~="read" then h:history_read() end
+    if stage=="turns" then h:history_resume() end
+    h:respond(h:last(),nil,{code=-1,message=stage .. " unavailable"})
+    eq(calls,1); assert(why:find(stage,1,true)); eq(h.client.thread_id,"thread"); eq(h.client.state,"ready")
+    assert(h.client:send("continue original","")); eq(h:last().params.threadId,"thread")
+  end
+end)
+
+test("history validates pages and detects multi-page cursor cycles",function()
+  for _,scenario in ipairs({"cycle","cursor","object-data","bad-turn","bad-items","bad-status","wrong-id"}) do
+    local h=harness(); h:open(); local calls,why=0
+    assert(h.client:open_thread("history",function(value,err) eq(value,nil); calls=calls+1; why=err end))
+    h:history_read(scenario=="wrong-id" and "wrong" or nil)
+    if scenario~="wrong-id" then
+      h:history_resume()
+      if scenario=="cycle" then
+        h:respond(h:last(),{data={},nextCursor="a"}); h:respond(h:last(),{data={},nextCursor="b"})
+        h:respond(h:last(),{data={},nextCursor="a"})
+      elseif scenario=="cursor" then h:respond(h:last(),{data={},nextCursor=6})
+      elseif scenario=="object-data" then h:respond(h:last(),{data={bad=true}})
+      elseif scenario=="bad-turn" then h:respond(h:last(),{data={{id=4,status="completed",items={}}}})
+      elseif scenario=="bad-status" then h:respond(h:last(),{data={{id="past",status="invented",items={}}}})
+      else h:respond(h:last(),{data={{id="past",status="completed",items={bad=true}}}}) end
+    end
+    eq(calls,1); assert(why); eq(h.client.state,"ready"); eq(h.client.thread_id,nil)
+  end
+end)
+
+test("idle resumed history retains recorded in-progress turns without treating them as live execution",function()
+  local h=harness(); h:open(); local result,why
+  assert(h.client:open_thread("history",function(value,err) result,why=value,err end))
+  h:history_read(); h:history_resume()
+  h:respond(h:last(),{data={{id="past",status="inProgress",items={{id="tool",type="dynamicToolCall",
+    tool="read_sprite",arguments={},status="inProgress"}}}}})
+  eq(why,nil); eq(result.turns[1].status,"inProgress"); eq(h.client.state,"ready"); eq(#h.calls,0)
+  assert(h.client:send("continue","canvas"))
+  h:notify("turn/started",{threadId="history",turn={id="past",status="inProgress"}})
+  eq(h.client.turn_id,nil)
+end)
+
+test("retired history callbacks cannot restore ready binding or tools",function()
+  for _,stage in ipairs({"read","resume","turns"}) do
+    for _,retirement in ipairs({"disconnect","close","open","timeout"}) do
+      local h=harness(); h:open(); local calls=0
+      assert(h.client:open_thread("history",function() calls=calls+1 end))
+      if stage~="read" then h:history_read() end
+      if stage=="turns" then h:history_resume() end
+      local request=h:last(); local callback=h.client._pending[request.id].callback
+      if retirement=="disconnect" then h.client:disconnect()
+      elseif retirement=="close" then h.ws:event(WebSocketMessageType.CLOSE)
+      elseif retirement=="timeout" then h.timers[#h.timers]:fire()
+      else h.ws:event(WebSocketMessageType.OPEN) end
+      local state=h.client.state
+      callback(stage=="turns" and json.decode('{"data":[]}') or json.decode('{"thread":{"id":"history","originator":"aseprite_chat","status":{"type":"idle"}}}'))
+      h:respond(request,{data={}})
+      eq(calls,0); eq(h.client.state,state); eq(h.client.thread_id,nil); eq(h.client.turn_id,nil); eq(#h.calls,0)
+    end
+  end
+end)
+
+test("history opening refuses disconnected busy and invalid IDs without requests",function()
+  local h=harness(); eq(h.client:open_thread("history",function() end),false)
+  h:open(); local count=#h.ws.sent
+  for _,id in ipairs({"",4,false}) do eq(h.client:open_thread(id,function() end),false) end
+  eq(#h.ws.sent,count); h:start(); count=#h.ws.sent
+  eq(h.client:open_thread("history",function() end),false); eq(#h.ws.sent,count)
+end)
+
+test("synchronous state observers retiring a history operation cannot revive its completion",function()
+  for _,stage in ipairs({"loading","ready"}) do
+    local armed=false
+    local h
+    h=harness({on_state=function(state) if armed and state==stage then h.client:disconnect() end end})
+    h:open(); armed=true; local calls=0; local count=#h.ws.sent
+    assert(h.client:open_thread("history",function() calls=calls+1 end))
+    if stage=="ready" then
+      h:history_read(); h:history_resume(); h:respond(h:last(),{data={}})
+    else eq(#h.ws.sent,count) end
+    eq(h.client.state,"disconnected"); eq(calls,0); eq(h.client.turn_id,nil)
+  end
+end)
+
+test("non-agent item lifecycle is plain Lua and completed items deduplicate without tool execution",function()
+  local h=harness(); h:open(); h:start()
+  local item={id="activity",type="dynamicToolCall",tool="read_sprite",arguments={code="return 1"},status="inProgress"}
+  h:notify("item/started",{threadId="thread",turnId="turn",item=item})
+  eq(#h.items,1); eq(h.items[1].completed,false); eq(type(h.items[1].item),"table")
+  eq(type(h.items[1].item.arguments),"table"); eq(h.items[1].item.arguments.code,"return 1")
+  h:notify("item/started",{threadId="thread",turnId="turn",item=item}); eq(#h.items,1)
+  item.status="completed"; item.success=true; item.contentItems={{type="inputText",text="result"}}
+  h:notify("item/completed",{threadId="thread",turnId="turn",item=item})
+  eq(#h.items,2); eq(h.items[2].completed,true); eq(h.items[2].item.contentItems[1].text,"result")
+  eq(h.items[1].item.status,"inProgress")
+  h:notify("item/completed",{threadId="thread",turnId="turn",item=item}); eq(#h.items,2)
+  h:notify("item/started",{threadId="thread",turnId="turn",item=item}); eq(#h.items,2)
+  eq(#h.calls,0); eq(#h.messages,0)
+  h:notify("item/completed",{threadId="thread",turnId="turn",item={id="answer",type="agentMessage",text="answer"}})
+  eq(#h.items,2); eq(#h.messages,1)
+end)
+
+test("reasoning summary deltas preserve section order and authoritative completion hides raw reasoning",function()
+  local h=harness(); h:open(); h:start()
+  local function summary(method,index,delta)
+    h:notify("item/reasoning/" .. method,{threadId="thread",turnId="turn",itemId="r",summaryIndex=index,delta=delta})
+  end
+  summary("summaryTextDelta",1,"Second")
+  eq(#h.items,1); eq(h.items[1].item.type,"reasoning"); eq(h.items[1].completed,false)
+  summary("summaryPartAdded",0); summary("summaryTextDelta",0,"First")
+  summary("summaryTextDelta",0," section")
+  local latest=h.items[#h.items].item
+  eq(latest.id,"r"); eq(latest.summary[1],"First section"); eq(latest.summary[2],"Second")
+  eq(h.items[1].item.summary[1],"Second")
+  local count=#h.items
+  summary("summaryPartAdded",0); eq(#h.items,count)
+  h:notify("item/started",{threadId="thread",turnId="turn",item={id="r",type="reasoning",summary={},content={"private start"}}})
+  eq(#h.items,count)
+  summary("textDelta",0,"hidden raw chain")
+  h:notify("item/reasoning/contentDelta",{threadId="thread",turnId="turn",itemId="r",delta="hidden content"})
+  eq(#h.items,count)
+  h:notify("item/completed",{threadId="thread",turnId="turn",item={id="r",type="reasoning",summary={"Final"},content={"private final"}}})
+  eq(#h.items,count+1); eq(h.items[#h.items].completed,true)
+  latest=h.items[#h.items].item; eq(type(latest.summary),"table"); eq(#latest.summary,1); eq(latest.summary[1],"Final")
+  eq(latest.content,nil); eq(latest.text,nil); eq(#h.messages,0)
+  summary("summaryTextDelta",0,"late"); summary("summaryPartAdded",2)
+  h:notify("item/completed",{threadId="thread",turnId="turn",item={id="r",type="reasoning",summary={"duplicate"}}})
+  eq(#h.items,count+1)
+end)
+
+test("reasoning starts seed summaries while empty authoritative completion clears streamed text",function()
+  local h=harness(); h:open(); h:start()
+  h:notify("item/started",{threadId="thread",turnId="turn",item={id="r",type="reasoning",summary={"seed"},content={"hidden"}}})
+  eq(#h.items,1); eq(h.items[1].item.summary[1],"seed"); eq(h.items[1].item.content,nil)
+  h:notify("item/reasoning/summaryTextDelta",{threadId="thread",turnId="turn",itemId="r",summaryIndex=0,delta=" text"})
+  eq(h.items[2].item.summary[1],"seed text")
+  h:notify("item/completed",{threadId="thread",turnId="turn",item={id="r",type="reasoning",summary={},content={"hidden"}}})
+  eq(#h.items[3].item.summary,0)
+end)
+
+test("activity and summaries ignore wrong turns stopped turns terminal turns and retired sockets",function()
+  local h=harness(); h:open(); h:start()
+  h:notify("item/started",{threadId="other",turnId="turn",item={id="p",type="plan",text="wrong"}})
+  h:notify("item/reasoning/summaryTextDelta",{threadId="thread",turnId="other",itemId="r",summaryIndex=0,delta="wrong"})
+  eq(#h.items,0)
+  h:notify("item/started",{threadId="thread",turnId="turn",item={id="p",type="plan",text="plan"}})
+  eq(#h.items,1); h.client:stop()
+  h:notify("item/reasoning/summaryTextDelta",{threadId="thread",turnId="turn",itemId="r",summaryIndex=0,delta="stopped"})
+  h:notify("item/completed",{threadId="thread",turnId="turn",item={id="p",type="plan",text="late"}})
+  eq(#h.items,1); h:complete()
+  h:notify("item/reasoning/summaryTextDelta",{threadId="thread",turnId="turn",itemId="r",summaryIndex=0,delta="ended"})
+  eq(#h.items,1); h:start("next")
+  h:notify("item/completed",{threadId="thread",turnId="next",item={id="p",type="plan",text="next"}})
+  eq(#h.items,2)
+  local old=h.ws; h.client:disconnect()
+  old:receive({method="item/started",params={threadId="thread",turnId="next",item={id="late",type="plan",text="retired"}}})
+  eq(#h.items,2)
+end)
+
+test("malformed reasoning summary notifications retire the transport",function()
+  for _,index in ipairs({-1,0.5,"0"}) do
+    local h=harness(); h:open(); h:start()
+    h:notify("item/reasoning/summaryTextDelta",{threadId="thread",turnId="turn",itemId="r",summaryIndex=index,delta="bad"})
+    eq(h.client.state,"error"); eq(h.ws.closed,1)
+  end
+end)
+
+test("optional turn summary mode is snapshotted across thread creation and never globally enabled",function()
+  local h=harness(); h:open(); local settings={model="reasoning",effort="high",summary="auto"}
+  assert(h.client:send("hello","",settings)); settings.summary="none"
+  h:respond(h:last(),{thread={id="thread",status={type="idle"}}})
+  eq(h:last("turn/start").params.summary,"auto")
+  h:respond(h:last(),{turn={id="turn",status="inProgress"}}); h:complete()
+  assert(h.client:send("plain model","",{model="nonreasoning"}))
+  eq(h:last("turn/start").params.summary,nil)
 end)
 
 test("per-turn model and reasoning changes retain the same thread",function()

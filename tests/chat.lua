@@ -13,9 +13,10 @@ local function native_view(callbacks, preferences)
   local dialogs = {}
   local env = setmetatable({Dialog=function(spec)
     local dialog = {data={},widgets={},buttons={},spec=spec}
-    setmetatable(dialog,{__index=function(_,method)
+    setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
+      __index=function(_,method)
       return function(self,widget)
-        if method=="close" then self.closed=true; if self.spec.onclose then self.spec.onclose() end
+        if method=="close" then rawset(self,"closed",true); if self.spec.onclose then self.spec.onclose() end
         elseif widget and widget.id then
           if method=="modify" then
             for key,value in pairs(widget) do self.widgets[widget.id][key]=value end
@@ -146,6 +147,212 @@ test("settings show only the current connection action with a short caption",fun
   view:set_state("starting")
   assert(settings.widgets.connect.visible==false and settings.widgets.disconnect.visible==true)
   assert(settings.widgets.disconnect.text=="Cancel startup")
+  view:close()
+end)
+
+test("history picker loads pages, deduplicates threads, and preserves empty-page cursors",function()
+  local requests={}
+  local view,dialogs=native_view({
+    on_list_threads=function(search,cursor,callback)
+      requests[#requests+1]={search=search,cursor=cursor,callback=callback}
+      return true
+    end,
+    on_open_thread=function() return true end
+  })
+  view:set_state("ready")
+  local main=dialogs[1]
+  assert(main.widgets.history and main.widgets.history.text=="History", "missing History button")
+  main.widgets.history.onclick()
+  local picker=dialogs[2]
+  assert(picker and picker.widgets.search.kind=="entry" and picker.widgets.threads.kind=="combobox")
+  assert(#requests==1 and requests[1].search=="" and requests[1].cursor==nil, "picker did not load first page")
+  requests[1].callback({data={{id="thread-1",name="A long conversation title",preview="",updatedAt="today",status="idle"}},nextCursor="next"})
+  assert(picker.widgets.more.enabled and picker.widgets.open.enabled)
+  picker.widgets.more.onclick()
+  assert(requests[2].cursor=="next")
+  requests[2].callback({data={{id="thread-1",name="duplicate",preview="",updatedAt="today"}},nextCursor="later"})
+  assert(#picker.widgets.threads.options==1, "duplicate thread was appended")
+  picker.widgets.more.onclick()
+  requests[3].callback({data={},nextCursor="last"})
+  assert(picker.widgets.more.enabled, "empty page discarded its next cursor")
+  picker.widgets.more.onclick()
+  requests[4].callback({data={{id="thread-2",preview="preview",updatedAt="yesterday"}}})
+  assert(#picker.widgets.threads.options==2 and not picker.widgets.more.enabled)
+  assert(picker.widgets.threads.options[1]:find("thread%-1"), "picker title omits short id")
+  view:close()
+end)
+
+test("history search and picker identity retire stale callbacks",function()
+  local requests={}
+  local view,dialogs=native_view({on_list_threads=function(search,cursor,callback)
+    requests[#requests+1]={search=search,cursor=cursor,callback=callback}; return true
+  end})
+  view:set_state("ready")
+  dialogs[1].widgets.history.onclick()
+  local first=dialogs[2]
+  first.data.search="old"; first.widgets.search.onchange()
+  first.data.search="new"; first.widgets.search.onchange()
+  requests[3].callback({data={{id="new-thread",name="New"}}})
+  requests[2].callback({data={{id="old-thread",name="Old"}}})
+  assert(#first.widgets.threads.options==1 and first.widgets.threads.options[1]:find("new%-thr"))
+  first.widgets.done.onclick()
+  dialogs[1].widgets.history.onclick()
+  local reopened=dialogs[3]
+  requests[1].callback({data={{id="late-thread",name="Late"}}})
+  assert(#reopened.widgets.threads.options==0, "closed picker callback changed reopened picker")
+  view:close()
+end)
+
+test("opening a history thread is locked unless ready and closes only after accepted start",function()
+  local opened={}
+  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="thread-1",name="Conversation"}}}); return true
+  end,on_open_thread=function(id) opened[#opened+1]=id; return true end})
+  dialogs[1].widgets.history.onclick()
+  local picker=dialogs[2]
+  assert(not picker.widgets.open.enabled, "thread can open before ready")
+  picker.data.threads=picker.widgets.threads.options[1]
+  view:set_state("working")
+  assert(not picker.widgets.open.enabled, "thread can open while working")
+  view:set_state("ready")
+  assert(picker.widgets.open.enabled)
+  picker.widgets.open.onclick()
+  assert(opened[1]=="thread-1" and picker.closed, "accepted thread open did not close picker")
+  view:close()
+end)
+
+test("rejected history open remains visible with error and non-ready states stay locked",function()
+  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="thread-1",name="Conversation"}}}); return true
+  end,on_open_thread=function() return false,"cannot open" end})
+  dialogs[1].widgets.history.onclick()
+  local picker=dialogs[2]
+  view:set_state("loading")
+  assert(not picker.widgets.open.enabled)
+  view:set_state("ready")
+  picker.data.threads=picker.widgets.threads.options[1]
+  picker.widgets.open.onclick()
+  assert(picker.closed~=true and picker.widgets.status.text:find("cannot open",1,true))
+  view:close()
+end)
+
+test("history errors remain visible and a failed More request can be retried",function()
+  local requests={}
+  local view,dialogs=native_view({on_list_threads=function(search,cursor,callback)
+    requests[#requests+1]={search=search,cursor=cursor,callback=callback}; return true
+  end})
+  dialogs[1].widgets.history.onclick()
+  local picker=dialogs[2]
+  requests[1].callback(nil,"offline")
+  assert(picker.widgets.status.text=="offline" and picker.widgets.refresh.enabled)
+  picker.data.search="needle"; picker.widgets.search.onchange()
+  assert(requests[2].search=="needle" and requests[2].cursor==nil)
+  requests[2].callback({data={{id="thread-1",name="A"}},nextCursor="next"})
+  picker.widgets.more.onclick()
+  requests[3].callback(nil,"page failed")
+  assert(picker.widgets.status.text=="page failed" and picker.widgets.more.enabled)
+  picker.widgets.more.onclick()
+  assert(requests[4].search=="needle" and requests[4].cursor=="next")
+  requests[4].callback({data={{id="thread-2",name="B"}}})
+  picker.widgets.refresh.onclick()
+  assert(requests[5].search=="needle" and requests[5].cursor==nil)
+  view:close()
+end)
+
+test("history labels truncate on UTF-8 boundaries and distinguish matching titles",function()
+  local requests={}
+  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
+    requests[#requests+1]=callback; return true
+  end})
+  dialogs[1].widgets.history.onclick()
+  local picker=dialogs[2]
+  requests[1]({data={
+    {id="abcdefgh-1",name=string.rep("界",50)},
+    {id="abcdefgh-2",name=string.rep("界",50)}
+  }})
+  local first,second=picker.widgets.threads.options[1],picker.widgets.threads.options[2]
+  assert(first~=second and first:find("abcdefgh%-1",1)==nil and first:find("abcdefgh",1,true))
+  assert(utf8.len(first)<50 and utf8.len(second)<50, "long title was not bounded")
+  dialogs[1]:close()
+  assert(picker.closed==true and view.history_dialog==nil, "closing chat left history open")
+end)
+
+test("short history previews hide appended canvas metadata",function()
+  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="short-id",preview='hi\n\nCurrent Aseprite target:\n{"revision":123}',status="idle"}}}); return true
+  end})
+  view:set_state("ready"); view:show_history()
+  assert(dialogs[2].widgets.threads.options[1]=="hi · short-id", "history title exposed internal canvas context")
+  view:close()
+end)
+
+test("active history cannot be opened by a state refresh or selection change",function()
+  local opened=false
+  local view,dialogs=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="busy-thread",name="Busy",status="active"},{id="idle-thread",name="Idle",status="idle"}}}); return true
+  end,on_open_thread=function() opened=true; return true end})
+  view:set_state("ready"); view:show_history()
+  local picker=dialogs[2]
+  assert(not picker.widgets.open.enabled)
+  picker.widgets.open.onclick(); assert(not opened)
+  picker.data.threads=picker.widgets.threads.options[2]; picker.widgets.threads.onchange()
+  assert(picker.widgets.open.enabled)
+  view:set_state("working"); assert(not picker.widgets.open.enabled)
+  view:close()
+end)
+
+test("connection loss retires an open picker instead of leaving a permanent loading state",function()
+  local callbacks={}
+  local view,dialogs=native_view({on_list_threads=function(_,_,callback) callbacks[#callbacks+1]=callback; return true end})
+  view:set_state("ready"); view:show_history()
+  local old=dialogs[2]
+  view:set_state("disconnected")
+  assert(old.closed and not view.history_dialog and not view.history_loading)
+  view:set_state("ready"); view:show_history()
+  callbacks[1]({data={{id="stale",name="Old"}}})
+  assert(dialogs[3].widgets.open.enabled==false)
+  callbacks[2]({data={{id="fresh",name="New",status="idle"}}})
+  assert(dialogs[3].widgets.open.enabled)
+  view:close()
+end)
+
+test("an empty authoritative summary clears the streamed preview without an empty heading",function()
+  local view,dialogs,gc=native_view()
+  view:add_message("summary","Summary","temporary summary",false)
+  view:add_message("summary","Summary","",false)
+  local visible={}; function gc:fillText(text) visible[#visible+1]=text end
+  dialogs[1].widgets.transcript.onpaint {context=gc}
+  assert(not table.concat(visible):find("temporary summary",1,true) and not table.concat(visible):find("Summary",1,true))
+  view:close()
+end)
+
+test("approval setting projects controller state, reverts rejection, and marks main status",function()
+  local decisions={}
+  local view,dialogs=native_view({on_approval_mode=function(enabled)
+    decisions[#decisions+1]=enabled
+    if enabled then return false,"denied" end
+    return true
+  end})
+  view:set_state("ready")
+  view:show_settings()
+  local settings=dialogs[2]
+  assert(settings.widgets.auto_approve and settings.widgets.auto_approve.selected==false,
+    "automatic approval does not default off")
+  assert(not settings.widgets.auto_approve.label, "approval row adds form label indentation")
+  view:set_approval_mode(true)
+  assert(settings.widgets.auto_approve.selected==true and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
+  settings.data.auto_approve=true; settings.widgets.auto_approve.onclick()
+  assert(decisions[1]==true and settings.widgets.auto_approve.selected==true,
+    "rejected controller projection was not restored")
+  view:set_state("working")
+  assert(not settings.widgets.auto_approve.enabled)
+  settings.data.auto_approve=false; settings.widgets.auto_approve.onclick()
+  assert(#decisions==1, "disabled approval control still changed controller state")
+  view:set_state("ready")
+  settings.data.auto_approve=false; settings.widgets.auto_approve.onclick()
+  assert(decisions[2]==false)
+  view:set_approval_mode(false)
+  assert(settings.widgets.auto_approve.selected==false)
   view:close()
 end)
 

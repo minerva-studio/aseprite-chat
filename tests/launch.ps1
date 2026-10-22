@@ -19,7 +19,7 @@ function Write-Json([string]$Path, $Value) {
   [IO.File]::WriteAllText($Path, ($Value | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
 }
 function Healthy([int]$Port = 45121, [int]$ProcessId = 12345) {
-  return @{service='aseprite-chat'; protocolVersion=1; pid=$ProcessId; port=$Port; busy=$false}
+  return @{service='aseprite-chat'; protocolVersion=2; pid=$ProcessId; port=$Port; busy=$false}
 }
 function Reset-Scenario {
   $global:asepriteLaunchScenario = @{responses=@{}; starts=@(); commands=@(); missingNode=$false; missingCodex=$false;
@@ -106,7 +106,7 @@ try {
     Assert ((Bootstrap).endpoint -eq 'ws://127.0.0.1:4500') 'Malformed hint blocked automatic connection'
   }
   Test 'foreign incompatible busy or malformed health cannot be stolen' {
-    foreach ($mutation in @(@{service='other'}, @{protocolVersion=2}, @{protocolVersion='1'},
+    foreach ($mutation in @(@{service='other'}, @{protocolVersion=1}, @{protocolVersion='2'},
         @{busy=$true}, @{busy='false'}, @{busy=$null}, @{pid=0}, @{pid='12345'}, @{port=4500})) {
       Reset-Scenario
       Write-Json (Join-Path $env:LOCALAPPDATA 'AsepriteChat/bridge.json') (Healthy)
@@ -192,11 +192,11 @@ let busy = false;
 const server = http.createServer((req, res) => {
   if (req.url === '/busy') busy = true;
   res.setHeader('content-type', 'application/json');
-  res.end(JSON.stringify({service:'aseprite-chat',protocolVersion:1,pid:process.pid,port:server.address().port,busy}));
+  res.end(JSON.stringify({service:'aseprite-chat',protocolVersion:2,pid:process.pid,port:server.address().port,busy}));
 });
 server.listen(Number(process.env.ASEPRITE_CHAT_PORT), '127.0.0.1', () => {
   const port=server.address().port;
-  const data={service:'aseprite-chat',protocolVersion:1,pid:process.pid,port,busy};
+  const data={service:'aseprite-chat',protocolVersion:2,pid:process.pid,port,busy};
   fs.writeFileSync(process.env.ASEPRITE_CHAT_DISCOVERY_FILE,JSON.stringify(data));
   fs.writeFileSync(process.env.ASEPRITE_CHAT_READY_FILE,JSON.stringify({endpoint:`ws://127.0.0.1:${port}`}));
 });

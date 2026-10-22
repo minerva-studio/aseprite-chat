@@ -23,6 +23,11 @@ local function scenario(name, body, configuration)
         })
         return true
       end
+      function protocol:list_threads(options,callback) self.history_options=options; self.list_history_callback=callback; return true end
+      function protocol:open_thread(id,callback)
+        self.selected_history=id; self.open_history_callback=callback
+        self.state="loading"; opts.on_state("loading"); return true
+      end
       function protocol:stop() self.allowed = false; opts.on_cancel("stopped") end
       function protocol:new_chat() return true end
       return protocol
@@ -48,8 +53,9 @@ local function scenario(name, body, configuration)
       function executor:dispose() end
       return executor
     end },
-    ["chat.lua"] = { new = function()
-      view = { messages = {} }
+    ["timeline.lua"] = dofile(app.fs.joinPath(root,"timeline.lua")),
+    ["chat.lua"] = { new = function(callbacks)
+      view = { messages = {},callbacks=callbacks }
       function view:show() end
       function view:set_state(state) self.state=state end
       function view:add_message(...) self.messages[#self.messages + 1] = {...} end
@@ -58,6 +64,7 @@ local function scenario(name, body, configuration)
       function view:close() end
       function view:clear() self.messages = {} end
       function view:set_models(models,model,effort) self.catalog,self.model,self.effort=models,model,effort end
+      function view:set_approval_mode(enabled) self.auto_approve=enabled end
       return view
     end }
   }
@@ -72,7 +79,7 @@ local function scenario(name, body, configuration)
   if protocol.state=="ready" then protocol.options.on_state("ready") end
   local sprite = Sprite(4, 4)
   if not configuration.skip_send then assert(controller:send("edit")) end
-  local params = { threadId = "thread", turnId = "turn", tool = "execute_lua",
+  local params = { threadId = "thread", turnId = "turn", callId="call-1", tool = "execute_lua",
     arguments = { code = "return 1", summary = "test", expectedRevision = 1 } }
   local function request()
     protocol.options.on_tool(params, function(result) replies[#replies + 1] = result end)
@@ -184,5 +191,68 @@ scenario("a new automatic port preserves the current thread and transcript",func
   p.thread_id="remembered-thread"; local count=#v.messages
   c:disconnect(); c:connect(); l:complete("ws://127.0.0.1:45992")
   assert(c.client==p and p.thread_id=="remembered-thread" and #v.messages==count)
+end)
+scenario("automatic edit approval is opt-in and still revalidates and executes once",function(c,p,e,v,request,result)
+  assert(c.auto_approve==false)
+  assert(not c:set_approval_mode(true), "approval mode changed during generation")
+  p.state="ready"; assert(c:set_approval_mode(true)); assert(v.auto_approve)
+  p.state="working"; request()
+  local count,replies=result()
+  assert(count==1 and #replies==1 and replies[1].success and not v.decision)
+  local logged=false
+  for _,row in ipairs(v.messages) do if row[2]=="Tool" and row[3]:find("Succeeded",1,true) and row[3]:find("return 1",1,true) then logged=true end end
+  assert(logged, "approved edit has no actual execution record")
+end)
+scenario("automatic approval rejects stale documents without execution",function(c,p,e,v,request,result)
+  p.state="ready"; assert(c:set_approval_mode(true)); p.state="working"
+  local checks=0
+  function e:check() checks=checks+1; return checks==1,"stale after initial check" end
+  request(); local count,replies=result()
+  assert(count==0 and #replies==1 and not replies[1].success)
+end)
+scenario("new chat and close reset temporary automatic approval",function(c,p,e,v)
+  p.state="ready"; assert(c:set_approval_mode(true)); c:new_chat()
+  assert(c.auto_approve==false and v.auto_approve==false)
+  assert(c:set_approval_mode(true)); c:close()
+  assert(c.auto_approve==false and v.auto_approve==false)
+end)
+scenario("opening history replaces display only on success and never replays edits",function(c,p,e,v,request,result)
+  p.state="ready"; assert(c:set_approval_mode(true))
+  local count=#v.messages
+  assert(c:open_thread("stored")); assert(#v.messages==count and v.state=="loading")
+  p.thread_id="stored"; p.state="ready"; p.options.on_state("ready")
+  p.open_history_callback({thread={id="stored",preview='Old prompt\n\nCurrent Aseprite target:\n{"revision":123}'},turns={{items={
+    {id="old-user",type="userMessage",content={{type="text",text="Old prompt"}}},
+    {id="old-tool",type="dynamicToolCall",tool="execute_lua",arguments={code="return 123"},status="completed",success=true},
+    {id="old-agent",type="agentMessage",text="Old answer"}
+  }}}})
+  local executed,replies=result()
+  assert(executed==0 and #replies==0 and not c.auto_approve)
+  assert(v.messages[1][3]=="Old prompt" and v.messages[3][3]=="Old answer")
+  assert(v.messages[#v.messages][3]=="Opened conversation: stored", "open notice exposed raw metadata preview")
+end)
+scenario("failed history open preserves conversation and reports a visible error",function(c,p,e,v)
+  p.state="ready"; local first=v.messages[1]
+  assert(c:open_thread("missing")); p.state="ready"
+  p.open_history_callback(nil,"Conversation unavailable")
+  assert(v.messages[1]==first and v.messages[#v.messages][3]:find("Conversation unavailable",1,true))
+end)
+scenario("reasoning item updates are displayed separately from agent answers",function(c,p,e,v)
+  p.options.on_item({id="summary",type="reasoning",summary={"Inspect layers"},content={"raw hidden"}},true)
+  local row=v.messages[#v.messages]
+  assert(row[1]=="activity:summary" and row[2]=="Summary" and row[3]=="Inspect layers")
+  assert(p.sent_settings.summary=="auto", "reasoning summary was not requested")
+end)
+scenario("empty completed reasoning clears the streamed summary",function(c,p,e,v)
+  p.options.on_item({id="summary",type="reasoning",summary={"Temporary summary"}},false)
+  p.options.on_item({id="summary",type="reasoning",summary={}},true)
+  local row=v.messages[#v.messages]
+  assert(row[1]=="activity:summary" and row[2]=="Summary" and row[3]=="", "final empty summary did not replace streaming content")
+end)
+scenario("live user notifications do not duplicate the local send echo",function(c,p,e,v)
+  local count=#v.messages
+  p.options.on_item({id="sent-user",type="userMessage",content={{type="text",text="edit"}}},false)
+  p.options.on_item({id="sent-user",type="userMessage",content={{type="text",text="edit"}}},true)
+  assert(#v.messages==count, "provider user item duplicated the local send echo")
 end)
 print("controller: " .. passed .. " passed")

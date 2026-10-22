@@ -1,0 +1,42 @@
+local root=app.fs.filePath(app.fs.filePath(debug.getinfo(1,"S").source:sub(2)))
+assert(app.fs.isFile(app.fs.joinPath(root,"timeline.lua")),"timeline projection is not implemented")
+local Timeline=dofile(app.fs.joinPath(root,"timeline.lua"))
+local passed=0
+local function test(name,fn)
+  local ok,err=pcall(fn); assert(ok,name .. ": " .. tostring(err)); passed=passed+1
+end
+test("user history omits appended canvas context and preserves normal content",function()
+  local role,text=Timeline.item {type="userMessage",id="u",content={{type="text",text="检查画布\n\nCurrent Aseprite target:\n{large metadata}"},{type="image",url="data:image/png;base64,hidden"}}}
+  assert(role=="You" and text:find("检查画布",1,true) and not text:find("metadata",1,true))
+  assert(not text:find("base64",1,true))
+end)
+test("only supplied reasoning summaries are shown",function()
+  local role,text=Timeline.item {type="reasoning",id="r",summary={"Inspect the sprite","Check layers"},content={"raw hidden content"}}
+  assert(role=="Summary" and text=="Inspect the sprite\n\nCheck layers")
+  assert(Timeline.item {type="reasoning",id="r",content={"raw only"}}==nil)
+end)
+test("tool display includes actual code status and bounded textual results",function()
+  local text=Timeline.tool("execute_lua",{summary="Darken highlight",code="sprite.layers[1].name='Shade'"},"Succeeded",{success=true,contentItems={{type="inputText",text="Applied"},{type="inputImage",imageUrl="data:image/png;base64,hidden"}}})
+  assert(text:find("execute_lua",1,true) and text:find("Darken highlight",1,true) and text:find("sprite.layers",1,true))
+  assert(text:find("Succeeded",1,true) and text:find("Applied",1,true) and not text:find("base64",1,true))
+  assert(#Timeline.tool("read_sprite",{},"Succeeded",{contentItems={{type="inputText",text=string.rep("x",10000)}}})<3000)
+end)
+test("persisted dynamic tool success false is not displayed as success",function()
+  local role,text=Timeline.item {type="dynamicToolCall",id="t",tool="execute_lua",arguments={summary="Edit",code="return 1"},status="completed",success=false,contentItems={{type="inputText",text="Stale document"}}}
+  assert(role=="Tool" and text:find("Failed",1,true) and text:find("Stale document",1,true))
+end)
+test("history retains turn and item order without executing anything",function()
+  local rows=Timeline.history({{id="one",items={{id="u",type="userMessage",content={{type="text",text="Hello"}}},{id="r",type="reasoning",summary={"Check"}},{id="t",type="dynamicToolCall",tool="read_sprite",arguments={},status="completed",success=true},{id="a",type="agentMessage",text="Done"}}}})
+  assert(#rows==4 and rows[1].role=="You" and rows[2].role=="Summary" and rows[3].role=="Tool" and rows[4].role=="Codex")
+  assert(rows[3].id=="tool:t" and rows[2].id=="activity:r")
+end)
+test("native JSON userdata projects like protocol item objects",function()
+  local role,text=Timeline.item(json.decode('{"id":"native","type":"reasoning","summary":["你好"]}'))
+  assert(role=="Summary" and text=="你好")
+end)
+test("unrecognized items and absent summaries produce no transcript noise",function()
+  assert(Timeline.item {type="unknown",id="unknown"}==nil)
+  local role,text=Timeline.item {type="plan",id="p",text="Inspect, then edit"}
+  assert(role=="Plan" and text=="Inspect, then edit")
+end)
+print("timeline: " .. passed .. " passed")

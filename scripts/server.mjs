@@ -21,7 +21,7 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
     const isReady = allowed && request.url === '/readyz';
     response.writeHead(!allowed ? 403 : isReady ? 200 : 404, isReady ? { 'Content-Type': 'application/json; charset=utf-8' } : {});
     response.end(isReady ? JSON.stringify({
-      service: 'aseprite-chat', protocolVersion: 1, pid: process.pid,
+      service: 'aseprite-chat', protocolVersion: 2, pid: process.pid,
       port: server.address()?.port, busy: !!active
     }) : '');
   });
@@ -77,7 +77,10 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
       scheduleIdleClose();
     });
     let child;
-    try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }); }
+    // Keep durable thread ownership independent of the editor/launcher host's
+    // Codex originator override. This affects only this bridge-owned child.
+    try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'aseprite_chat' } }); }
     catch {
       client.close(1011, 'Cannot start Codex; check CODEX_CLI and your PATH.');
       return;
@@ -158,7 +161,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       onClose: () => removeOwnedMetadata().catch(() => {})
     });
     const endpoint = `ws://127.0.0.1:${bridge.port}`;
-    const metadata = { service: 'aseprite-chat', protocolVersion: 1, pid: process.pid, port: bridge.port, endpoint };
+    const metadata = { service: 'aseprite-chat', protocolVersion: 2, pid: process.pid, port: bridge.port, endpoint };
     await atomicWriteJson(discoveryFile, metadata);
     metadataWritten = true;
     if (readyFile) await atomicWriteJson(readyFile, { endpoint });

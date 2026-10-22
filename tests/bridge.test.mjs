@@ -51,6 +51,7 @@ test('native Aseprite Origin reaches stdio with Unicode and exact request IDs', 
   const response = JSON.parse((await reply)[0].toString());
   assert.equal(response.id, 'native-id');
   assert.equal(response.result.received.params.text, '你好');
+  assert.equal(response.result.originator, 'aseprite_chat');
 });
 test('browser, null, foreign origins, fetch headers and foreign Host are rejected', async t => {
   const { url } = await setup(t);
@@ -142,7 +143,7 @@ function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 test('readyz reports bridge identity, bound port, process and live busy state', async t => {
   const { bridge, url } = await setup(t);
   const idle = await getJson(`${url}/readyz`);
-  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 1, pid: process.pid, port: bridge.port, busy: false });
+  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 2, pid: process.pid, port: bridge.port, busy: false });
   const socket = await connect(t, url);
   const busy = await getJson(`${url}/readyz`);
   assert.equal(busy.value.busy, true, JSON.stringify(busy));
@@ -198,7 +199,7 @@ test('CLI writes readiness and atomically replaces an existing discovery hint', 
   assert.equal(ready.endpoint, metadata.endpoint);
   assert.match(ready.endpoint, /^ws:\/\/127\.0\.0\.1:\d+$/);
   assert.deepEqual(metadata, {
-    service: 'aseprite-chat', protocolVersion: 1, pid: child.pid,
+    service: 'aseprite-chat', protocolVersion: 2, pid: child.pid,
     port: Number(new URL(ready.endpoint).port), endpoint: ready.endpoint
   });
   assert.notEqual(metadata.pid, 123, 'atomic metadata replacement must replace a prior discovery hint');

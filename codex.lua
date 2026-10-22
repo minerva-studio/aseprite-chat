@@ -32,6 +32,33 @@ local function object(value)
     and encode(value):sub(1, 1) == "{"
 end
 
+-- Native decoded JSON containers must not escape into controller-owned state.
+local function plain(value)
+  if type(value) ~= "table" and type(value) ~= "userdata" then return value end
+  local copy = {}
+  -- Aseprite's JSON arrays support ipairs, but pairs yields no array entries.
+  if encode(value):sub(1, 1) == "[" then
+    for index, item in ipairs(value) do copy[index] = plain(item) end
+  else
+    for key, item in pairs(value) do copy[key] = plain(item) end
+  end
+  return copy
+end
+
+local function sequence(value)
+  return (type(value) == "table" or type(value) == "userdata")
+    and encode(value):sub(1, 1) == "["
+end
+
+-- Summary indexes can arrive out of order; snapshots never share mutable parts.
+local function reasoning_item(id, parts)
+  local indexes, summary = {}, {}
+  for index in pairs(parts) do indexes[#indexes+1] = index end
+  table.sort(indexes)
+  for _, index in ipairs(indexes) do summary[#summary+1] = parts[index] end
+  return {type="reasoning", id=id, summary=summary}
+end
+
 local function failure(text)
   return {success=false, contentItems={{type="inputText", text=text}}}
 end
@@ -44,7 +71,9 @@ end
 -- receive derived state, item text, tool requests, cancellation, and visible errors.
 -- Options: tools, instructions; on_state(state),
 -- on_message(id,text,isDelta), on_tool(params,reply), on_cancel(reason),
--- on_error(text). Public state/thread_id/turn_id belong to this client.
+-- on_item(item,completed), on_error(text). on_item receives plain Lua non-agent
+-- items; reasoning contains only readable summary sections, never raw content.
+-- Public state/thread_id/turn_id belong to this client.
 -- reply({success=boolean,contentItems=array}) is single-use and generation-bound.
 -- Empty schema objects/arrays can use json.decode("{}") / json.decode("[]").
 -- socket_factory/timer_factory accept the native constructor specs for tests.
@@ -91,6 +120,7 @@ function Client:_cancel(reason, respond)
 end
 
 function Client:_retire(state, reason)
+  self._opening = nil
   if self._heartbeat then self._heartbeat:stop(); self._heartbeat = nil end
   local lifetime = self._lifetime
   self._lifetime, self._socket = nil, nil
@@ -110,6 +140,9 @@ function Client:_retire(state, reason)
 end
 
 function Client:_lost(reason)
+  -- Retire callbacks immediately, while retaining the socket for native reconnect.
+  self._generation = self._generation + 1
+  self._opening = nil
   if self._heartbeat then self._heartbeat:stop(); self._heartbeat = nil end
   self._initialized = false
   self:_clear_requests()
@@ -142,8 +175,11 @@ end
 function Client:_request(method, params, callback)
   self._next_id = self._next_id + 1
   local id = self._next_id
-  local request = {callback=callback}
-  local generation = self._generation
+  local generation, lifetime = self._generation, self._lifetime
+  local request = {callback=function(...)
+    if self._generation ~= generation or self._lifetime ~= lifetime or not lifetime.valid then return end
+    callback(...)
+  end}
   request.timer = (self._options.timer_factory or Timer){interval=30, ontick=function()
     if self._generation == generation and self._pending[id] == request then
       self:_guard(function() self:_fail("Request timed out: " .. method) end)
@@ -219,6 +255,7 @@ function Client:_resume()
 end
 
 function Client:_opened()
+  self._opening = nil
   if self._heartbeat then self._heartbeat:stop(); self._heartbeat = nil end
   self._generation = self._generation + 1
   self._initialized = false
@@ -226,7 +263,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.2.2"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.3.0"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -296,8 +333,11 @@ end
 
 function Client:_notification(message)
   local method, params = message.method, message.params
+  local summary_delta = method == "item/reasoning/summaryTextDelta"
+  local summary_part = method == "item/reasoning/summaryPartAdded"
   if method ~= "turn/started" and method ~= "turn/completed" and method ~= "item/started"
-    and method ~= "item/completed" and method ~= "item/agentMessage/delta" and method ~= "error" then return end
+    and method ~= "item/completed" and method ~= "item/agentMessage/delta" and method ~= "error"
+    and not summary_delta and not summary_part then return end
   assert(object(params), "Malformed notification parameters")
   local turn_id = params.turn and params.turn.id or params.turnId
   assert(type(params.threadId) == "string" and type(turn_id) == "string", "Missing thread or turn ID")
@@ -319,7 +359,20 @@ function Client:_notification(message)
     return
   end
   if turn.stopped then return end
-  if method == "item/agentMessage/delta" then
+  if summary_delta or summary_part then
+    local index = params.summaryIndex
+    assert(type(params.itemId) == "string" and type(index) == "number" and index >= 0
+      and index < math.huge and index == math.floor(index), "Malformed reasoning summary index")
+    assert(not summary_delta or type(params.delta) == "string", "Malformed reasoning summary delta")
+    if turn.items[params.itemId] == "completed" then return end
+    turn.reasoning = turn.reasoning or {}
+    local parts = turn.reasoning[params.itemId] or {}
+    turn.reasoning[params.itemId] = parts
+    if summary_part and parts[index] ~= nil then return end
+    parts[index] = (parts[index] or "") .. (summary_delta and params.delta or "")
+    turn.items[params.itemId] = "streaming"
+    self:_emit("on_item", reasoning_item(params.itemId, parts), false)
+  elseif method == "item/agentMessage/delta" then
     assert(type(params.itemId) == "string" and type(params.delta) == "string", "Malformed agent delta")
     if turn.items[params.itemId] ~= "completed" then
       turn.items[params.itemId] = "streaming"
@@ -327,8 +380,27 @@ function Client:_notification(message)
     end
   else
     local item = params.item
-    assert(object(item) and type(item.id) == "string", "Malformed item notification")
-    if item.type ~= "agentMessage" or turn.items[item.id] == "completed" then return end
+    assert(object(item) and type(item.id) == "string" and type(item.type) == "string", "Malformed item notification")
+    if turn.items[item.id] == "completed" then return end
+    if method == "item/started" and turn.items[item.id] then return end
+    local completed = method == "item/completed"
+    if item.type ~= "agentMessage" then
+      local projected
+      if item.type == "reasoning" then
+        assert(item.summary == nil or sequence(item.summary), "Malformed reasoning summary")
+        local parts = {}
+        for index, text in ipairs(item.summary or {}) do
+          assert(type(text) == "string", "Malformed reasoning summary text")
+          parts[index-1] = text
+        end
+        turn.reasoning = turn.reasoning or {}
+        if completed then turn.reasoning[item.id] = nil else turn.reasoning[item.id] = parts end
+        projected = reasoning_item(item.id, parts)
+      else projected = plain(item) end
+      turn.items[item.id] = completed and "completed" or "started"
+      self:_emit("on_item", projected, completed)
+      return
+    end
     assert(type(item.text) == "string", "Malformed agent message")
     if method == "item/completed" then
       turn.items[item.id] = "completed"
@@ -437,10 +509,140 @@ function Client:list_models(callback)
   end)
 end
 
+--- Fetch exactly one history page; filtering may leave an empty page with a cursor.
+--- callback(page,errorText) receives plain Lua metadata, unless the connection retires.
+--- options={cursor?,search?}; source and originator restrictions are not caller options.
+function Client:list_threads(options, callback)
+  if not self._initialized then return false, "Client is not initialized" end
+  options = options or {}
+  if options.cursor ~= nil and (type(options.cursor) ~= "string" or options.cursor == "") then
+    return false, "Invalid thread cursor"
+  end
+  if options.search ~= nil and type(options.search) ~= "string" then return false, "Invalid history search" end
+  local cursor = options.cursor
+  return self:_guard(function()
+    -- Local scan-and-repair can block on large rollout stores; persisted threads
+    -- are already indexed by Codex, so query that authoritative index directly.
+    self:_request("thread/list", {cursor=cursor, searchTerm=options.search, limit=50, useStateDbOnly=true,
+      sortKey="updated_at", sortDirection="desc", sourceKinds={"cli", "vscode", "appServer"}}, function(result, err)
+      if err then callback(nil, err.message); return end
+      local ok, page = pcall(function()
+        assert(object(result) and sequence(result.data), "Malformed thread/list page")
+        local next_cursor = result.nextCursor
+        assert(next_cursor == nil or (type(next_cursor) == "string" and next_cursor ~= ""
+          and next_cursor ~= cursor), "Invalid thread history cursor")
+        local data = {}
+        for _, entry in ipairs(result.data) do
+          assert(object(entry), "Malformed thread entry")
+          if entry.originator == "aseprite_chat" then
+            assert(type(entry.id) == "string" and entry.id ~= "" and type(entry.preview) == "string"
+              and type(entry.updatedAt) == "number" and object(entry.status)
+              and type(entry.status.type) == "string"
+              and (entry.name == nil or type(entry.name) == "string"), "Malformed Aseprite thread metadata")
+            data[#data+1] = {id=entry.id, name=entry.name, preview=entry.preview,
+              updatedAt=entry.updatedAt, status=entry.status.type}
+          end
+        end
+        return {data=data, nextCursor=next_cursor}
+      end)
+      if ok then callback(page) else callback(nil, tostring(page)) end
+    end)
+  end)
+end
+
+--- Reopen an idle Aseprite conversation without replaying historical tool calls.
+--- callback({thread=metadata,turns=fullTurns},errorText) runs after all pages load.
+--- Failure retains the old binding; retirement cancels the callback entirely.
+function Client:open_thread(id, callback)
+  if not self._initialized or self.state ~= "ready" or self._turn or self._opening then
+    return false, "Client is not idle"
+  end
+  if type(id) ~= "string" or id == "" then return false, "Invalid thread ID" end
+  return self:_guard(function()
+    local operation = {}
+    local generation, lifetime = self._generation, self._lifetime
+    self._opening = operation
+    local function live()
+      return self._opening == operation and self._generation == generation
+        and self._lifetime == lifetime and lifetime.valid and self._initialized
+    end
+    local function finish(result, err)
+      if not live() then return end
+      self._opening = nil
+      if result then
+        self.thread_id, self.turn_id, self._terminal = id, nil, {}
+        for _, turn in ipairs(result.turns) do self._terminal[turn.id] = true end
+      end
+      self:_state("ready")
+      -- State observers can synchronously disconnect or replace this generation.
+      if self._generation == generation and self._lifetime == lifetime and lifetime.valid
+        and self._initialized then callback(result, err) end
+    end
+    local function validate_thread(result, resumed)
+      assert(object(result) and object(result.thread) and result.thread.id == id, "Malformed history thread response")
+      local thread = result.thread
+      assert(thread.originator == "aseprite_chat", "Only Aseprite Chat history can be opened")
+      assert(object(thread.status), "Missing history thread status")
+      local status = thread.status.type
+      assert(status == "idle" or (not resumed and status == "notLoaded"),
+        "Cannot open history thread: " .. tostring(status))
+      return plain(thread)
+    end
+    self:_state("loading")
+    if not live() then return end
+    self:_request("thread/read", {threadId=id, includeTurns=false}, function(read, read_error)
+      if not live() then return end
+      if read_error then finish(nil, read_error.message); return end
+      local ok, thread = pcall(validate_thread, read, false)
+      if not ok then finish(nil, tostring(thread)); return end
+      self:_request("thread/resume", {threadId=id, excludeTurns=true,
+        developerInstructions=self._options.instructions, sandbox="read-only",
+        approvalPolicy="on-request", approvalsReviewer="user"}, function(resumed, resume_error)
+        if not live() then return end
+        if resume_error then finish(nil, resume_error.message); return end
+        local valid, metadata = pcall(validate_thread, resumed, true)
+        if not valid then finish(nil, tostring(metadata)); return end
+        local turns, cursors = {}, {}
+        local function page(cursor)
+          if not live() then return end
+          self:_request("thread/turns/list", {threadId=id, cursor=cursor, limit=50,
+            sortDirection="asc", itemsView="full"}, function(result, list_error)
+            if not live() then return end
+            if list_error then finish(nil, list_error.message); return end
+            local parsed, next_cursor = pcall(function()
+              assert(object(result) and sequence(result.data), "Malformed history turns page")
+              for _, turn in ipairs(result.data) do
+                assert(object(turn) and type(turn.id) == "string" and turn.id ~= ""
+                  and (terminal(turn.status) or turn.status == "inProgress")
+                  and sequence(turn.items), "Malformed history turn")
+                for _, item in ipairs(turn.items) do
+                  assert(object(item) and type(item.id) == "string" and type(item.type) == "string",
+                    "Malformed history item")
+                end
+                turns[#turns+1] = plain(turn)
+              end
+              local next_page = result.nextCursor
+              assert(next_page == nil or (type(next_page) == "string" and next_page ~= ""
+                and not cursors[next_page]), "Invalid history turns cursor")
+              return next_page
+            end)
+            if not parsed then finish(nil, tostring(next_cursor)); return end
+            if next_cursor then
+              cursors[next_cursor] = true
+              page(next_cursor)
+            else finish({thread=metadata, turns=turns}) end
+          end)
+        end
+        page()
+      end)
+    end)
+  end)
+end
+
 function Client:_start_turn(turn, prompt, context_text)
   if self._turn ~= turn then return end
   if turn.stopped then self:_finish(turn); return end
-  self:_request("turn/start", {threadId=self.thread_id, model=turn.model, effort=turn.effort,
+  self:_request("turn/start", {threadId=self.thread_id, model=turn.model, effort=turn.effort, summary=turn.summary,
     input={{type="text", text=prompt .. "\n\nCurrent Aseprite target:\n" .. context_text}}}, function(result, err)
     if self._turn ~= turn then return end
     if err then self:_request_error(err); return end
@@ -454,14 +656,16 @@ end
 
 -- Send accepts exactly one active turn and returns whether the request was sent
 -- locally. Later protocol failures are reported through on_error, without replay.
--- Optional settings={model=canonicalModel,effort=advertisedEffort} is copied for
--- this turn; model/effort overrides preserve the thread and apply to later turns.
+-- Optional settings={model=canonicalModel,effort=advertisedEffort,summary=mode}
+-- is snapshotted for this turn. The caller supplies summary only for capable models;
+-- omission never enables summaries globally. Overrides preserve the thread.
 function Client:send(prompt, context_text, settings)
   if self.state ~= "ready" or self._turn then return false, "Client is not ready" end
   if type(prompt) ~= "string" or prompt:match("^%s*$") then return false, "Prompt is empty" end
   if type(context_text) ~= "string" then return false, "Context must be text" end
   return self:_guard(function()
-    local turn = {items={}, model=settings and settings.model, effort=settings and settings.effort}
+    local turn = {items={}, model=settings and settings.model, effort=settings and settings.effort,
+      summary=settings and settings.summary}
     self._turn = turn
     self:_state("working")
     if self.thread_id then self:_start_turn(turn, prompt, context_text); return end

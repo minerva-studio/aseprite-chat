@@ -23,7 +23,26 @@ end
 function Chat.new(callbacks, preferences)
   return setmetatable({ callbacks = callbacks, preferences = preferences,
     messages = {}, by_id = {}, state = "disconnected",
+    auto_approve = false,
     scroll = { offset = 0, maximum = 0, follow = true } }, Chat)
+end
+
+local function history_label(thread, id_length)
+  local title = thread.name
+  if not title or title == "" then
+    title = thread.preview
+    local marker = title and title:find("\n\nCurrent Aseprite target:\n",1,true)
+    if marker then title = title:sub(1,marker-1) end
+  end
+  if not title or title == "" then title = "Conversation" end
+  local chars, truncated = {}, false
+  for _, code in utf8.codes(title) do
+    if #chars >= 36 then truncated = true; break end
+    chars[#chars + 1] = utf8.char(code)
+  end
+  title = table.concat(chars) .. (truncated and "…" or "")
+  local short_id = tostring(thread.id):sub(1, id_length or 8)
+  return title .. " · " .. short_id
 end
 
 local function paint(gc, text, scroll)
@@ -122,12 +141,15 @@ end
 
 --- Update controls from protocol state and the current native editor context.
 function Chat:set_state(state)
+  local previous=self.state
   self.state = state
   local idle = state == "ready"
   local offline = state == "disconnected" or state == "error"
+  if offline and previous~=state and self.history_dialog then self.history_dialog:close() end
   if self.dialog then
-    self.dialog:modify { id = "status", text = self.approval and "Awaiting approval"
-      or state == "starting" and "正在启动本地连接…" or state }
+    local status = self.approval and "Awaiting approval"
+      or state == "starting" and "正在启动本地连接…" or state
+    self.dialog:modify { id = "status", text = status .. " · Auto-approve: " .. (self.auto_approve and "on" or "off") }
     self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
     self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
     self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
@@ -142,12 +164,133 @@ function Chat:set_state(state)
       connecting="Connecting",initializing="Connecting to Codex",recovering="Restoring conversation",
       disconnected="Disconnected",error="Connection failed"})[state] or state
     self.settings_dialog:modify { id = "status", text = "Status: " .. status }
+    self.settings_dialog:modify { id = "auto_approve", selected = self.auto_approve,
+      enabled = idle and self.approval == nil }
     self.settings_dialog:modify { id = "manual", enabled = offline }
     self.settings_dialog:modify { id = "auto_info", visible = not manual }
     self.settings_dialog:modify { id = "endpoint", visible = manual, enabled = offline and manual }
     self.settings_dialog:modify { id = "connect", visible = offline, enabled = offline, text = manual and "Connect" or "Retry" }
     self.settings_dialog:modify { id = "disconnect", visible = not offline, enabled = not offline, text = state == "starting" and "Cancel startup" or "Disconnect" }
   end
+  if self.history_dialog then
+    local picker = self.history_dialog
+    local selected=self.history_choices and self.history_choices[picker.data.threads]
+    picker:modify { id = "open", enabled = self.state == "ready" and not self.history_loading
+      and selected ~= nil and selected.status ~= "active" }
+  end
+end
+
+--- Project the controller-owned, per-chat automatic edit approval mode into native controls.
+function Chat:set_approval_mode(enabled)
+  self.auto_approve = enabled == true
+  if self.dialog then self:set_state(self.state) end
+  if self.settings_dialog then
+    self.settings_dialog:modify { id = "auto_approve", selected = self.auto_approve,
+      enabled = self.state == "ready" and self.approval == nil }
+  end
+end
+
+--- Open one modeless history picker and page persisted conversations on demand.
+function Chat:show_history()
+  if self.history_dialog then self.history_dialog:show { wait = false }; return end
+  local dlg, entries, cursor, query = nil, {}, nil, ""
+  local serial = 0
+  local function current(picker, request)
+    return self.history_dialog == picker and serial == request
+  end
+  local function update_options()
+    local labels, used = {}, {}
+    self.history_choices = {}
+    for _, thread in ipairs(entries) do
+      local label = history_label(thread)
+      local id = tostring(thread.id)
+      local suffix_length = 8
+      while used[label] and suffix_length < #id do
+        suffix_length = math.min(#id, suffix_length + 1)
+        label = history_label(thread, suffix_length)
+      end
+      used[label] = true
+      labels[#labels + 1] = label
+      self.history_choices[label] = thread
+    end
+    dlg:modify { id = "threads", options = labels, option = labels[1] or "", enabled = #labels > 0 }
+    self:set_state(self.state)
+  end
+  local function load_page(search, page_cursor, append)
+    serial = serial + 1
+    local request = serial
+    query = search
+    self.history_loading = true
+    dlg:modify { id = "status", text = page_cursor and "Loading more…" or "Loading history…" }
+    dlg:modify { id = "more", enabled = false }
+    dlg:modify { id = "refresh", enabled = false }
+    dlg:modify { id = "open", enabled = false }
+    if not append then
+      entries, cursor = {}, nil
+      update_options()
+    end
+    local function received(page, error_text)
+      if not current(dlg, request) then return end
+      self.history_loading = false
+      if error_text then
+        dlg:modify { id = "status", text = error_text }
+        dlg:modify { id = "refresh", enabled = true }
+        dlg:modify { id = "more", enabled = cursor ~= nil }
+        update_options()
+        return
+      end
+      page = page or {}
+      local seen = {}
+      for _, thread in ipairs(entries) do seen[thread.id] = true end
+      for _, thread in ipairs(page.data or {}) do
+        if thread.id and not seen[thread.id] then
+          entries[#entries + 1] = thread
+          seen[thread.id] = true
+        end
+      end
+      cursor = page.nextCursor
+      dlg:modify { id = "status", text = #entries == 0 and "No conversations found." or ("Loaded " .. #entries .. " conversations.") }
+      dlg:modify { id = "refresh", enabled = true }
+      dlg:modify { id = "more", enabled = cursor ~= nil }
+      update_options()
+    end
+    local started, error_text = self.callbacks.on_list_threads(search, page_cursor, received)
+    if not started and current(dlg, request) then received(nil, error_text or "Could not load history.") end
+  end
+  dlg = Dialog {title="Aseprite Chat · History", autofit=Align.LEFT | Align.TOP, onclose=function()
+    if self.history_dialog == dlg then
+      serial = serial + 1
+      self.history_dialog = nil
+      self.history_loading, self.history_choices = nil,nil
+    end
+  end}
+  self.history_dialog = dlg
+  self.history_loading, self.history_choices = false,{}
+  dlg:entry {id="search", text="", onchange=function()
+    load_page(dlg.data.search or "", nil, false)
+  end}
+  dlg:combobox {id="threads", options={}, enabled=false,onchange=function() self:set_state(self.state) end}
+  dlg:label {id="status", text="Ready to search history."}
+  dlg:button {id="open", text="Open", enabled=false, onclick=function()
+    if self.state ~= "ready" or self.history_loading then return end
+    local selected = self.history_choices[dlg.data.threads]
+    if not selected or selected.status=="active" then return end
+    local started, error_text = self.callbacks.on_open_thread(selected.id)
+    if started then
+      dlg:close()
+    else
+      dlg:modify {id="status", text=error_text or "Could not open conversation."}
+    end
+  end}
+  dlg:button {id="refresh", text="Refresh", onclick=function()
+    load_page(dlg.data.search or query, nil, false)
+  end}
+  dlg:button {id="more", text="More", enabled=false, onclick=function()
+    if cursor ~= nil and not self.history_loading then load_page(dlg.data.search or query, cursor, true) end
+  end}
+  dlg:button {id="done", text="Done", onclick=function() dlg:close() end}
+  dlg:show {wait=false}
+  load_page("", nil, false)
 end
 
 --- Project the server catalog and persisted selection into native dropdowns.
@@ -204,6 +347,22 @@ function Chat:show_settings()
   dlg:label {id="status", text="Status: " .. self.state}
   dlg:check {id="manual", text="Manual server (advanced)", selected=self.preferences.manual_server == true,
     onclick=function() self:set_state(self.state) end}
+  dlg:newrow()
+  dlg:check {id="auto_approve", text="Auto-approve edits (this chat)", selected=self.auto_approve,
+    enabled=self.state == "ready" and self.approval == nil, onclick=function()
+      if self.state ~= "ready" or self.approval ~= nil then
+        self.settings_dialog:modify {id="auto_approve", selected=self.auto_approve}
+        return
+      end
+      local enabled = dlg.data.auto_approve == true
+      local accepted, error_text = self.callbacks.on_approval_mode(enabled)
+      if accepted then
+        self:set_approval_mode(enabled)
+      else
+        self.settings_dialog:modify {id="auto_approve", selected=self.auto_approve}
+        if error_text then self.settings_dialog:modify {id="status", text="Status: " .. error_text} end
+      end
+    end}
   dlg:label {id="auto_info", text="Local service starts automatically."}
   dlg:entry {id="endpoint", text=self.preferences.endpoint or "ws://127.0.0.1:4500"}
   dlg:button {id="connect", text="Connect", onclick=function()
@@ -226,6 +385,10 @@ function Chat:show()
       local settings = self.settings_dialog
       self.settings_dialog = nil
       if settings then settings:close() end
+      local history = self.history_dialog
+      self.history_dialog = nil
+      self.history_loading, self.history_choices = nil,nil
+      if history then history:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
@@ -247,7 +410,7 @@ function Chat:show()
   add_scroll_canvas(dlg, {id="transcript", width=360, height=260, hexpand=true, vexpand=true}, self.scroll,
     function()
       local parts = {}
-      for _, m in ipairs(self.messages) do parts[#parts + 1] = m.role .. ":\n" .. m.text end
+      for _, m in ipairs(self.messages) do if m.text~="" then parts[#parts + 1] = m.role .. ":\n" .. m.text end end
       return #parts > 0 and table.concat(parts, "\n\n") or "Chat with Codex about the current sprite. The local connection starts automatically."
     end)
   dlg:newrow()
@@ -263,6 +426,7 @@ function Chat:show()
     self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
   end }
   dlg:button { id = "settings", text = "Settings...", onclick = function() self:show_settings() end }
+  dlg:button { id = "history", text = "History", onclick = function() self:show_history() end }
   self:set_models(self.models, self.selected_model, self.selected_effort)
   dlg:show { wait = false }
 end
@@ -307,6 +471,10 @@ function Chat:close()
   local settings = self.settings_dialog
   self.settings_dialog = nil
   if settings then settings:close() end
+  local history = self.history_dialog
+  self.history_dialog = nil
+  self.history_loading, self.history_choices = nil,nil
+  if history then history:close() end
   local dlg = self.dialog
   self.dialog = nil
   if dlg then dlg:close() end

@@ -10,7 +10,8 @@ Use only short, terminating scripts. Edits must target the captured sprite and b
 For pixel edits, clone a cel image, modify the clone, then assign cel.image = clone; direct drawPixel on an attached image does not create Undo.
 The plugin owns the app.transaction boundary. Do not save/open/close documents, access external files, run shell commands, or call other apps.
 If the document or context became stale, inspect again. Never claim an edit succeeded until execute_lua returns success.
-The user must approve each execute_lua call. Treat rejection as a decision, not an invitation to retry the same edit.
+The client controls edit approval: each execute_lua call is either approved individually or covered by the user's explicit auto-approval for this chat.
+Treat rejection as a decision, not an invitation to retry the same edit.
 Each prompt includes the current target sprite/frame/layer context. Conversation history may concern a different target.
 ]]
 
@@ -31,31 +32,40 @@ function Controller:_cancel_pending(reason)
   local pending = self.pending
   self.pending = nil
   self.view:dismiss_approval()
-  if pending then pending.reply(failure(reason)) end
+  if pending then pending.reply(failure(reason),"Cancelled") end
 end
 
 function Controller:_tool(params, reply)
   if not self.client:can_execute(params) then reply(failure("Turn is no longer active.")); return end
   local args = params.arguments
+  local id="tool:" .. params.callId
+  local function respond(result,status)
+    local delivered=reply(result)
+    status=status or (result.success and "Succeeded" or "Failed")
+    if delivered==false then status=result.success and "Completed locally; reply not sent" or "Cancelled" end
+    self.view:add_message(id,"Tool",self.Timeline.tool(params.tool,args,status,result),false)
+    return delivered
+  end
+  self.view:add_message(id,"Tool",self.Timeline.tool(params.tool,args,"Running"),false)
   if params.tool == "read_sprite" then
     local ok, result = pcall(self.executor.read, self.executor, args)
-    reply(ok and result or failure(result))
+    respond(ok and result or failure(result))
     return
   end
-  if params.tool ~= "execute_lua" then reply(failure("Unknown Aseprite tool.")); return end
+  if params.tool ~= "execute_lua" then respond(failure("Unknown Aseprite tool.")); return end
   if not args or type(args.code) ~= "string" or type(args.summary) ~= "string"
       or type(args.expectedRevision) ~= "number" or args.expectedRevision % 1 ~= 0 then
-    reply(failure("execute_lua requires code, summary, and an integer expectedRevision.")); return
+    respond(failure("execute_lua requires code, summary, and an integer expectedRevision.")); return
   end
-  if self.pending then reply(failure("Another Lua request is awaiting approval.")); return end
+  if self.pending then respond(failure("Another Lua request is awaiting approval.")); return end
   local valid, reason = self.executor:check(args.expectedRevision)
-  if not valid then reply(failure(reason)); return end
-  local pending = { params = params, args = args, reply = reply }
+  if not valid then respond(failure(reason)); return end
+  local pending = { params = params, args = args, reply = respond }
   self.pending = pending
-  self.view:request_approval(args, function(accepted)
+  local function decide(accepted)
     if self.pending ~= pending then return end
     self.pending = nil
-    if not accepted then reply(failure("User rejected the proposed edit.")); return end
+    if not accepted then respond(failure("User rejected the proposed edit."),"Rejected"); return end
     local ok, result = pcall(function()
       if not self.client:can_execute(params) then return failure("Turn is no longer active.") end
       local current, why = self.executor:check(args.expectedRevision)
@@ -63,10 +73,13 @@ function Controller:_tool(params, reply)
       return self.executor:execute(args)
     end)
     if not ok then result = failure(result) end
-    reply(result)
-    self:_message("Aseprite", result.success and ("Applied: " .. args.summary .. " · Undo is available.")
-      or ("Edit failed: " .. tostring(result.contentItems[1].text)))
-  end)
+    respond(result)
+  end
+  if self.auto_approve then decide(true)
+  else
+    self.view:add_message(id,"Tool",self.Timeline.tool(params.tool,args,"Awaiting approval"),false)
+    self.view:request_approval(args,decide)
+  end
 end
 
 local function valid_settings(models, model, effort)
@@ -118,6 +131,15 @@ function Controller:_create_client()
       self:_refresh_state()
     end,
     on_message = function(id, text, delta) self.view:add_message(id, "Codex", text, delta) end,
+    on_item = function(item,completed)
+      -- Local tool results are authoritative; notifications must not overwrite
+      -- cancellation/rejection with a generic completed dynamic-tool status.
+      -- User prompts already have one local echo; history projects stored items.
+      if item.type=="dynamicToolCall" or item.type=="userMessage" then return end
+      local role,text=self.Timeline.item(item)
+      if item.type=="reasoning" and completed and not role then role,text="Summary","" end
+      if role and text then self.view:add_message("activity:" .. item.id,role,text,false) end
+    end,
     on_tool = function(params, reply) self:_tool(params, reply) end,
     on_cancel = function(reason)
       self:_cancel_pending(reason or "Turn cancelled.")
@@ -129,9 +151,10 @@ end
 
 --- Assemble one editor session; path is the installed extension directory.
 function Main.create(options)
-  local self = setmetatable({ preferences = options.preferences, message_id = 0 }, Controller)
+  local self = setmetatable({ preferences = options.preferences, message_id = 0,auto_approve=false }, Controller)
   self.Codex = dofile(app.fs.joinPath(options.path, "codex.lua"))
   self.Executor = dofile(app.fs.joinPath(options.path, "executor.lua"))
+  self.Timeline = dofile(app.fs.joinPath(options.path,"timeline.lua"))
   local Launcher = dofile(app.fs.joinPath(options.path, "launcher.lua"))
   self.launcher = Launcher.new {path=options.path}
   local Chat = dofile(app.fs.joinPath(options.path, "chat.lua"))
@@ -143,6 +166,9 @@ function Main.create(options)
     on_send = function(text) return self:send(text) end,
     on_stop = function() self:stop() end,
     on_new_chat = function() self:new_chat() end,
+    on_list_threads = function(search,cursor,callback) return self.client:list_threads({search=search,cursor=cursor},callback) end,
+    on_open_thread = function(id) return self:open_thread(id) end,
+    on_approval_mode = function(enabled) return self:set_approval_mode(enabled) end,
     on_close = function() self:close() end
   }, self.preferences)
   self.client = self:_create_client()
@@ -183,6 +209,7 @@ function Controller:connect(endpoint)
   local server_changed = manual and self.preferences.endpoint and self.preferences.endpoint ~= endpoint
   if mode_changed or server_changed then
     self:disconnect()
+    self:set_approval_mode(false)
     self.client = self:_create_client()
     self.view:clear()
   else self.client:disconnect() end
@@ -203,6 +230,31 @@ function Controller:connect(endpoint)
     self:_message("Error", self.startup_error)
   end
   self:_refresh_state()
+end
+
+--- Permit automatic captured-sprite edits only for this open chat, never preferences.
+--- Enabling requires an idle client; disabling is valid during lifecycle cleanup.
+function Controller:set_approval_mode(enabled)
+  if type(enabled)~="boolean" then return false,"Approval mode must be a boolean." end
+  if enabled and (self.client.state~="ready" or self.pending) then return false,"Wait until the chat is idle." end
+  self.auto_approve=enabled
+  self.view:set_approval_mode(enabled)
+  return true
+end
+
+--- Restore a persisted plugin conversation as display data; historical tools never run.
+function Controller:open_thread(id)
+  if self.client.state~="ready" or self.pending then return false,"Wait until the chat is idle." end
+  return self.client:open_thread(id,function(result,err)
+    if not result then self:_message("Error",err or "Cannot open conversation."); return end
+    self:set_approval_mode(false)
+    self.executor:dispose()
+    self.view:clear()
+    for _,row in ipairs(self.Timeline.history(result.turns)) do self.view:add_message(row.id,row.role,row.text,false) end
+    local name=result.thread.name
+    if not name or name=="" then name=result.thread.id end
+    self:_message("Aseprite","Opened conversation: " .. name)
+  end)
 end
 
 --- Select catalog-supported settings for the next turn without replacing its thread.
@@ -227,7 +279,8 @@ function Controller:send(text)
     return json.encode(self.executor:metadata())
   end)
   if not ok then self:_message("Error", context); return false end
-  local sent, err = self.client:send(text, context, {model=self.preferences.model, effort=self.preferences.effort})
+  local sent, err = self.client:send(text, context, {model=self.preferences.model, effort=self.preferences.effort,
+    summary=self.preferences.effort and "auto" or nil})
   if sent then self:_message("You", text) else self:_message("Error", err or "Message was not sent.") end
   return sent
 end
@@ -252,6 +305,7 @@ end
 function Controller:new_chat()
   local ok, err = self.client:new_chat()
   if ok then
+    self:set_approval_mode(false)
     self:_cancel_pending("New conversation.")
     self.executor:dispose()
     self.view:clear()
@@ -260,6 +314,7 @@ end
 
 --- Release all native resources owned by this editor session.
 function Controller:close()
+  self:set_approval_mode(false)
   self:disconnect()
   if self.site_listener then app.events:off(self.site_listener); self.site_listener = nil end
   self.view:close()

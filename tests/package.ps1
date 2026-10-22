@@ -12,7 +12,7 @@ try {
   if ($firstManifest.FullName -ne 'package.json' -or $manifest.name -ne 'aseprite-chat') {
     throw "Aseprite would install '$($manifest.name)' from '$($firstManifest.FullName)' instead of Aseprite Chat"
   }
-  foreach ($file in @('main.lua','launcher.lua','scripts/launch.ps1','scripts/server.mjs','node_modules/ws/package.json','node_modules/ws/wrapper.mjs','node_modules/ws/LICENSE')) {
+  foreach ($file in @('main.lua','launcher.lua','timeline.lua','scripts/launch.ps1','scripts/server.mjs','node_modules/ws/package.json','node_modules/ws/wrapper.mjs','node_modules/ws/LICENSE')) {
     if (-not $archive.GetEntry($file)) { throw "Missing installed runtime: $file" }
   }
   Write-Output "PASS Aseprite installer selects aseprite-chat $($manifest.version) at archive root; runtime remains inside this extension"

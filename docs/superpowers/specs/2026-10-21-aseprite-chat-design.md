@@ -10,6 +10,8 @@ The revised runtime is Aseprite Lua WebSocket -> loopback Node bridge -> Codex a
 
 The user's subsequent automatic-connection request supersedes manual terminal startup. Opening the chat resolves an idle compatible service from a per-user discovery hint or port 4500, or starts a hidden bridge on an OS-assigned loopback port. The Windows bootstrap finds installed native Node/Codex executables; it does not take over arbitrary Codex processes. Lua writes a unique temporary cmd containing encoded fixed PowerShell commands so Aseprite's native permission dialog displays a short readable command path. PowerShell reads the installed bootstrap as inline commands with an explicit extension root; it does not modify execution policy. The bridge exits after 120 idle seconds, with no idle limit while connected. Settings exposes manual server configuration only as an advanced opt-in. Bootstrap cancellation invalidates callbacks; it does not kill a service that another client might own.
 
+History requires stable persisted ownership. The bridge sets only its own Codex child's `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` to `aseprite_chat`, overriding any host-specific value without changing global environment/configuration. Discovery and readiness use protocol version 2; automatic startup must not reuse version 1. History list requests use the supported `useStateDbOnly=true` index path, preserving updated_at sorting and avoiding the rollout scan-and-repair latency observed in actual testing.
+
 The listener binds only 127.0.0.1, validates its exact Host, accepts only no Origin or the exact native ws:// loopback Origin matching its port, and rejects browser http(s)/null/foreign origins and Fetch Metadata headers. It does not disable Codex's browser-origin policy or transparently forward arbitrary browser clients. Each text frame must contain one JSON value; binary/multiple-JSON input and oversized traffic are rejected. Child process errors close the client visibly. Tests must establish those behaviors and actual authenticated inference through the bridge.
 
 ## Goal and accepted scope
@@ -57,6 +59,7 @@ On connection, query all pages of `model/list` with `includeHidden=false`. Use t
 - `codex.lua`: WebSocket, JSON encoding/decoding, connection generation, request IDs and callbacks, initialization, thread ID, active turn ID, streaming items, stop requests, and transport errors. It owns protocol state; the UI receives derived views of it.
 - `chat.lua`: modeless native Dialog, plain-text transcript canvas, scrolling, input, status, settings, new-chat action, stop, and approve/reject controls. It owns presentation state only.
 - `executor.lua`: target binding, document revision tracking, structured inspection, rendered previews, and transaction-wrapped Lua execution. It owns the authoritative local revision counter for its bound sprite.
+- `timeline.lua`: stateless projection of persisted items and live tool results into transcript entries. It omits raw reasoning and image payloads, bounds code/results, and never invokes tools.
 - `launcher.lua`: one cancellable bootstrap attempt, short temporary startup command and non-reentrant result polling; connection state stays in the protocol client.
 - `scripts/launch.ps1`: bounded native executable discovery, live idle-service validation and hidden process startup; accepts an explicit extension root for inline invocation.
 - `scripts/package.ps1`: deterministic extension packaging with the complete pinned ws runtime into `dist/aseprite-chat.aseprite-extension`.
@@ -74,6 +77,10 @@ User messages and agent output appear as plain text. Transcript entries are keye
 At Send, bind the currently active sprite, frame, and layer to that turn. Include fresh structured context with the prompt. Subsequent messages use the same server thread. A later turn can bind a different current sprite, and its prompt explicitly identifies the new target. There is one active turn and one pending Lua approval at a time; sending another prompt is disabled until that turn ends.
 
 New Chat is enabled only while idle. It clears the current local transcript and thread binding, then creates a new server thread on the next message. Closing the window cancels the active turn, rejects pending execution, closes the socket, and removes document listeners. Reopening starts a fresh client session.
+
+The user's approved history/activity revision adds a modeless History picker with search, refresh and pagination from Codex's persisted threads. Only originator `aseprite_chat` conversations appear. Explicit opening verifies an inactive thread, resumes it with current developer instructions and reads full turn pages in chronological order before replacing the local binding/transcript. Failure preserves the old conversation. Historical tools are display-only; the next turn binds the current editor target. Active conversations in other editors are not interrupted. Protocol ownership remains in `codex.lua`, with no second history store.
+
+The transcript also shows keyed live tool activity and bounded persisted code/textual results, plus provider-supplied reasoning summaries. Summary deltas are ordered by section; the completed summary replaces streaming text, including an empty final summary. Raw reasoning content is omitted. Live user messages use the local send echo once; persisted user items are projected when opening history.
 
 ## Wire protocol and failure behavior
 
@@ -117,6 +124,8 @@ Input: `code` (string), `summary` (short user-facing explanation), and `expected
 Check that the request belongs to the live active thread/turn, the captured sprite is still open and active, the frame/layer context is unchanged, and its revision equals `expectedRevision`. A failed check returns a tool failure instructing Codex to inspect again. It never switches the user's active document to run stale code.
 
 Show the summary and complete proposed Lua in a scrollable modeless native approval dialog with Approve and Reject. Keep receiving protocol events while the user considers it. Approval applies only to that request, target, and revision. Recheck all conditions immediately before execution because the user may have drawn while the approval was pending. Cancellation, disconnect, closed target, or a resolved request invalidates the approval.
+
+The user's explicit additional option **Auto-approve edits (this chat)** defaults off and lives only in the controller, with the view projecting it. It can be enabled only while idle, is never persisted, resets on New Chat, successful explicit history selection, closing the chat or changing the server, and survives reconnection of the same open chat. Both approval modes use the same single-use execution path, immediate target/revision/turn checks and Undo transaction. Aseprite native file/process/network trust remains a separate user decision stored by script filename.
 
 Compile text-only Lua with `load(code, name, "t", environment)`. Provide the captured `sprite`, native `app`, Aseprite constructors/constants, and ordinary math/string/table/UTF-8 functions. Do not expose `io`, `os`, `debug`, `package`, `require`, `dofile`, `loadfile`, or recursive `load` to model code. The native Aseprite objects remain powerful; this is an approved editor automation contract, not a security sandbox for hostile Lua.
 
