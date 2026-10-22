@@ -9,18 +9,22 @@ local function test(name, fn)
   passed = passed + 1
 end
 local function measure(text) return utf8.len(text) end
-local function native_view(callbacks, preferences)
+local function native_view(callbacks, preferences, question_fixture)
   local dialogs,timers = {},{}
-  local env = setmetatable({Timer=function(spec)
+  local env = setmetatable({app=setmetatable({window={height=question_fixture and question_fixture.window_height or 900},uiScale=1},{__index=app}),Timer=function(spec)
     local timer={start=function() end,stop=function() end,ontick=spec.ontick}
     timers[#timers+1]=timer; return timer
   end,Dialog=function(spec)
-    local dialog = {data={},widgets={},buttons={},modifications={},rows={},row=0,spec=spec,bounds=Rectangle(0,0,500,420)}
+    local dialog = {data={},widgets={},buttons={},modifications={},rows={},row=0,spec=spec,bounds=Rectangle(0,0,500,420),sizeHint=Size(500,220)}
     setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
       __index=function(_,method)
       return function(self,widget)
         if method=="newrow" then rawset(self,"new_row",true)
         elseif method=="close" then rawset(self,"closed",true); if self.spec.onclose then self.spec.onclose() end
+        elseif method=="repaint" and question_fixture and self.widgets.question_body then
+          local gc=question_fixture.gc
+          gc.width,gc.height=self.bounds.width-80,math.max(40,self.bounds.height-(self.sizeHint.height-40))
+          self.widgets.question_body.onpaint {context=gc}
         elseif method=="show" then
           local snapshot={}
           for id,spec in pairs(self.widgets) do snapshot[id]={text=spec.text,visible=spec.visible,kind=spec.kind} end
@@ -30,6 +34,14 @@ local function native_view(callbacks, preferences)
           if method=="modify" then
             self.modifications[#self.modifications+1]=widget
             for key,value in pairs(widget) do self.widgets[widget.id][key]=value end
+            if question_fixture and widget.id=="question_prompt" and widget.text then
+              local _,breaks=widget.text:gsub("\n","")
+              self.sizeHint=Size(500,220+breaks*14)
+            end
+            -- Native default autofit remaps to the minimum on text updates.
+            if question_fixture and self.widgets.question_body and widget.text and self.spec.autofit~=0 then
+              self.bounds=Rectangle(0,0,500,220)
+            end
           else
             if self.last_kind~=method or self.new_row then self.row=self.row+1 end
             rawset(self,"last_kind",method); rawset(self,"new_row",false)
@@ -1147,6 +1159,85 @@ test("question layout contains tall fallback glyphs without overlapping followin
   local positions=repaint()
   assert(positions["Cool highlights"].y>=positions["界"].y+34,"description overlaps a tall option label")
   assert(positions.Gold.y>=positions["Cool highlights"].y+14,"following option overlaps its predecessor")
+  view:close()
+end)
+test("question stays outside options and default height includes Other with actual font metrics",function()
+  local positions={}
+  local gc={}
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("界",1,true) and 24 or 10} end
+  function gc:fillRect() end
+  function gc:fillText(text,x,y) positions[text]={y=y,height=self:measureText(text).height} end
+  local view,dialogs=native_view(nil,nil,{gc=gc})
+  view:request_question({questions={{id="test",header="Layout",question="Which layout?",isOther=true,options={
+    {label="界 First",description="First description"},{label="界 Second",description="Second description"},
+    {label="界 Third",description="Third description"}}}}},function() end)
+  local dialog=dialogs[#dialogs]
+  assert(dialog.widgets.question_prompt and dialog.widgets.question_prompt.text=="Which layout?","question is still inside scrolling options")
+  assert(not positions["Which layout?"],"question was drawn inside scrolling options")
+  assert(view.question.scroll.maximum==0,"default window requires scrolling to reach Other")
+  assert(positions["Write your own answer below."].y+10<=gc.height,"Other is clipped at default size")
+  dialog.widgets.question_body.onkeydown {code="Digit4",stopPropagation=function() end}
+  dialog.data.note="Custom answer"; dialog.widgets.note.onchange(); dialog:repaint()
+  assert(view.question.scroll.maximum==0,"selecting Other or typing a note shrank the fitted window")
+  dialog.bounds=Rectangle(0,0,500,260); positions={}; dialog:repaint()
+  assert(view.question.scroll.maximum>0,"manually shrunken options should scroll")
+  dialog.widgets.question_body.onwheel {deltaY=1}
+  assert(dialog.widgets.question_prompt.text=="Which layout?","scrolling changed fixed question")
+  view:close()
+end)
+test("oversized choices scroll within host bounds and each page fits its own content",function()
+  local gc={}
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=10} end
+  function gc:fillRect() end
+  function gc:fillText() end
+  local view,dialogs=native_view(nil,nil,{gc=gc,window_height=600})
+  view:request_question({questions={
+    {id="long",header="Long",question="A fixed question",options={{label="Long answer",description=string.rep("Long description ",100)}}},
+    {id="short",header="Short",question="Another fixed question",isOther=true,options={{label="Short answer",description="Brief"}}}}},function() end)
+  local dialog=dialogs[#dialogs]
+  assert(dialog.bounds.height<=576 and view.question.scroll.maximum>0,"oversized list escaped the host")
+  dialog.widgets.question_body.onkeydown {code="Digit1",stopPropagation=function() end}
+  dialog.widgets.next.onclick()
+  assert(dialog.widgets.question_prompt.text=="Another fixed question")
+  assert(view.question.scroll.maximum==0,"short page kept an unnecessary scrollbar")
+  dialog.widgets.back.onclick()
+  assert(dialog.widgets.question_prompt.text=="A fixed question" and view.question.scroll.maximum>0)
+  view:close()
+end)
+test("a tall fixed question reserves native label height before fitting all options",function()
+  local gc={}
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=10} end
+  function gc:fillRect() end
+  function gc:fillText() end
+  local view,dialogs=native_view(nil,nil,{gc=gc})
+  view:request_question({questions={{id="test",header="Long question",question=string.rep("A question line\n",20),isOther=true,
+    options={{label="One",description="First"},{label="Two",description="Second"},{label="Three",description="Third"}}}}},function() end)
+  assert(view.question.scroll.maximum==0,"new fixed question labels consumed the fitted option height")
+  assert(dialogs[#dialogs].bounds.height<=876)
+  view:close()
+end)
+test("resizing rewraps the fixed prompt outside paint without overriding manual bounds",function()
+  local gc={}
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=10} end
+  function gc:fillRect() end
+  function gc:fillText() end
+  local view,dialogs,_,timers=native_view(nil,nil,{gc=gc})
+  view:request_question({questions={{id="test",header="Resize",question=string.rep("Question ",6),
+    options={{label="One",description="First"}}}}},function() end)
+  local dialog=dialogs[#dialogs]
+  assert(not dialog.widgets.question_prompt.text:find("\n",1,true))
+  dialog.bounds=Rectangle(0,0,300,350)
+  local changes=#dialog.modifications
+  dialog:repaint()
+  assert(#dialog.modifications==changes,"resize paint modified native layout")
+  for _,timer in ipairs(timers) do timer.ontick() end
+  local prompt=dialog.widgets.question_prompt.text
+  assert(prompt:find("\n",1,true),"fixed prompt retained its wider line breaks")
+  for line in (prompt.."\n"):gmatch("(.-)\n") do assert(gc:measureText(line).width<=196) end
+  assert(dialog.bounds.width==300 and dialog.bounds.height==350,"rewrapping overrode manual bounds")
+  view:dismiss_question()
+  rawset(dialog,"repaint",function() error("retired prompt timer repainted the dialog") end)
+  for _,timer in ipairs(timers) do timer.ontick() end
   view:close()
 end)
 print("chat: " .. passed .. " passed")

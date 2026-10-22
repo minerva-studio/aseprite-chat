@@ -969,15 +969,17 @@ end
 --- Dismissing programmatically never answers a retired request.
 function Chat:request_question(request,callback)
   self:dismiss_question()
+  local option_min_height=40
   local pending={request=request,index=1,drafts={},updating=true,
     scroll={offset=0,maximum=0,follow=false,auto_follow=false}}
-  local dlg
+  local dlg,fit_page
   local function finish(answers)
     if self.question~=pending then return end
+    if pending.prompt_timer then pending.prompt_timer:stop() end
     self.question=nil; dlg:close(); self:set_state(self.state)
     callback(answers)
   end
-  dlg=Dialog {title="Aseprite Chat · Question",resizeable=true,onclose=function() finish(nil) end}
+  dlg=Dialog {title="Aseprite Chat · Question",resizeable=true,autofit=0,onclose=function() finish(nil) end}
   pending.dialog=dlg; self.question=pending
   local function choice_count(question)
     local count=#(question.options or {})
@@ -1017,7 +1019,7 @@ function Chat:request_question(request,callback)
     dlg:modify {id="back",enabled=pending.index>1}
     update_controls()
     pending.updating=false
-    if pending.shown then dlg:repaint() end
+    if pending.shown then fit_page() end
   end
   local function select_choice(index)
     if self.question~=pending then return end
@@ -1039,7 +1041,11 @@ function Chat:request_question(request,callback)
     for index,question in ipairs(request.questions) do answers[question.id]=answer_values(question,pending.drafts[index]) end
     finish(answers)
   end
-  add_scroll_canvas(dlg,{id="question_body",width=420,height=200,hexpand=true,vexpand=true},pending.scroll,function(gc)
+  dlg:label {id="question_heading",text=""}
+  dlg:newrow()
+  dlg:label {id="question_prompt",text=""}
+  dlg:newrow()
+  add_scroll_canvas(dlg,{id="question_body",width=420,height=option_min_height,hexpand=true,vexpand=true},pending.scroll,function(gc)
     if self.question~=pending then return end
     local question=request.questions[pending.index]
     local draft=pending.drafts[pending.index]
@@ -1053,8 +1059,12 @@ function Chat:request_question(request,callback)
         y=y+height
       end
     end
-    paragraph(pending.index.." / "..#request.questions.." · "..question.header,12,muted)
-    y=y+6; paragraph(question.question,12,bright); y=y+10
+    pending.prompt=table.concat(Chat.wrap(question.question,math.max(1,gc.width-24),function(value)
+      return gc:measureText(value).width
+    end),"\n")
+    if pending.prompt~=pending.projected_prompt and not pending.prompt_scheduled then
+      pending.prompt_scheduled=true; pending.prompt_timer:start()
+    end
     local count=choice_count(question)
     local text_x=12+gc:measureText(tostring(count)..". ").width+8
     for index=1,count do
@@ -1065,7 +1075,8 @@ function Chat:request_question(request,callback)
       if option.description~="" then y=y+2; paragraph(option.description,text_x,muted) end
       y=y+6; row.height=y-row.top; rows[#rows+1]=row; y=y+4
     end
-    surface(gc,pending.scroll,y+8)
+    pending.content_height=y+8
+    surface(gc,pending.scroll,pending.content_height)
     if pending.reveal then
       local selected=rows[draft.choice or 0]
       if selected then
@@ -1133,16 +1144,47 @@ function Chat:request_question(request,callback)
   end}
   dlg:button {id="next",text="Continue",onclick=advance}
   dlg:button {id="skip",text="Skip",onclick=function() finish(nil) end}
-  -- Repaint only after native show has initialized the canvas surface. Paint
-  -- updates derived hit regions and scrolling, never native widget geometry.
-  show_page(); dlg:show {wait=false}; pending.shown=true; dlg:repaint(); self:set_state(self.state)
+  pending.prompt_timer=Timer {interval=0.01,ontick=function()
+    pending.prompt_timer:stop(); pending.prompt_scheduled=false
+    if self.question~=pending or pending.prompt==pending.projected_prompt then return end
+    -- Width changes are observed while painting; native label layout must wait
+    -- until after that callback and must preserve the user's resized bounds.
+    pending.projected_prompt=pending.prompt
+    dlg:modify {id="question_prompt",text=pending.projected_prompt}
+    dlg:repaint()
+  end}
+  fit_page=function()
+    -- Native canvas dimensions cannot be modified. Measure on its initialized
+    -- surface, then grow the dialog outside paint so the expanding canvas fits
+    -- every option. Keep a scrollable viewport only when the host cannot fit it.
+    dlg:repaint()
+    if not pending.content_height then return end
+    local question=request.questions[pending.index]
+    dlg:modify {id="question_heading",text=pending.index.." / "..#request.questions.." · "..question.header}
+    pending.projected_prompt=pending.prompt
+    dlg:modify {id="question_prompt",text=pending.projected_prompt}
+    dlg:repaint()
+    local bounds,scale=dlg.bounds,app.uiScale
+    local host_height=app.window.height
+    local height=math.min(host_height-24*scale,
+      dlg.sizeHint.height+math.max(0,pending.content_height-option_min_height)*scale)
+    local top=math.max(8*scale,math.min(bounds.y,host_height-height-8*scale))
+    dlg.bounds=Rectangle(bounds.x,top,bounds.width,height)
+    dlg:repaint()
+  end
+  -- Paint only updates derived geometry; native layout changes stay here and
+  -- in page transitions, never in paint or ordinary option selection.
+  show_page(); dlg:show {wait=false}; pending.shown=true; fit_page(); self:set_state(self.state)
 end
 
 --- Close only the currently displayed question, without manufacturing an answer.
 function Chat:dismiss_question()
   local pending=self.question
   self.question=nil
-  if pending then pending.dialog:close() end
+  if pending then
+    pending.prompt_timer:stop()
+    pending.dialog:close()
+  end
   if self.dialog then self:set_state(self.state) end
 end
 
