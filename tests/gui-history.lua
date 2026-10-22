@@ -93,6 +93,9 @@ timer=Timer {interval=0.1,ontick=function()
       assert(opened=="native-1" and not view.history_dialog)
       view:show_history(); phase=4
     elseif phase==4 then
+      view:set_state("working",true); assert(view.can_steer)
+      view:set_state("steering",false); assert(not view.can_steer)
+      view:set_state("ready")
       view:show_settings(); assert(view.settings_dialog.data.auto_approve==nil)
       assert(view.dialog.data.auto_approve=="Ask before edits")
       view.dialog:modify {id="auto_approve",option="Auto-approve edits"}; widgets.auto_approve.onchange()

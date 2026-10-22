@@ -154,6 +154,23 @@ test("speed selection uses advertised IDs, locks while working and repairs a mis
   view:close()
 end)
 
+test("steering availability controls the composer while Stop remains usable",function()
+  local view,dialogs=native_view()
+  view:set_models({{model="sol",displayName="Sol",supportedReasoningEfforts={{reasoningEffort="low"}}}},"sol","low")
+  view:set_state("working",false); assert(not dialogs[1].widgets.send.enabled)
+  view:set_state("working",true)
+  assert(dialogs[1].widgets.send.enabled and dialogs[1].widgets.send.text=="Steer")
+  assert(not dialogs[1].widgets.model.enabled and dialogs[1].widgets.stop.enabled)
+  view:set_state("steering",false)
+  assert(not dialogs[1].widgets.send.enabled and dialogs[1].widgets.stop.enabled)
+  view:add_message("thought","Summary","Inspect the layers",false)
+  local labels={}; local gc={width=500,height=200,measureText=function(_,s) return {width=#s*6,height=10} end,fillRect=function() end,
+    fillText=function(_,s) labels[#labels+1]=s end}
+  dialogs[1].widgets.transcript.onpaint {context=gc}
+  assert(table.concat(labels):find("Thoughts",1,true))
+  view:close()
+end)
+
 test("rename waits for acknowledgement, preserves named titles and cleans up on disconnect",function()
   local callback,requested
   local view,dialogs=native_view({on_rename=function(name,done) requested,callback=name,done; return true end})

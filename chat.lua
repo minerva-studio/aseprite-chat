@@ -100,7 +100,7 @@ local function paint_messages(gc,view)
       if message.role=="Tool" then
         title=message.text:match("^[^\n]+") or "Tool"
         title=title:gsub("^read_sprite","Read canvas"):gsub("^execute_lua","Edit canvas")
-      elseif message.role=="Summary" then title="Reasoning summary" end
+      elseif message.role=="Summary" then title="Thoughts" end
       if folded then title=(message.expanded and "[-] " or "[+] ")..title end
       local header_height=math.max(base_header_height,gc:measureText(title).height+10)
       local lines={}
@@ -280,9 +280,12 @@ function Chat:clear()
 end
 
 --- Update controls from protocol state and the current native editor context.
-function Chat:set_state(state)
+--- can_steer projects the client's live-turn availability, independent of canvas presence.
+function Chat:set_state(state,can_steer)
   local previous=self.state
   self.state = state
+  if can_steer~=nil then self.can_steer=can_steer==true end
+  if state~="working" then self.can_steer=false end
   local idle = state == "ready"
   local offline = state == "disconnected" or state == "error"
   if offline and previous~=state and self.history_dialog then self.history_dialog:close() end
@@ -297,9 +300,10 @@ function Chat:set_state(state)
     self.dialog:modify { id = "auto_approve", option=self.auto_approve and "Auto-approve edits" or "Ask before edits",
       enabled=idle and self.approval==nil }
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
-    self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
+    self.dialog:modify { id = "send", enabled = (state=="working" and self.can_steer==true)
+      or (idle and self.selection_valid == true and app.sprite ~= nil),text=state=="working" and "Steer" or state=="steering" and "Steering..." or "Send" }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
-    self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
+    self.dialog:modify { id = "stop", enabled = state == "working" or state=="steering" or self.approval ~= nil }
     self.dialog:modify { id = "retry", visible = offline, enabled = offline }
   end
   if self.rename_dialog then

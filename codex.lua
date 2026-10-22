@@ -127,6 +127,7 @@ end
 
 function Client:_retire(state, reason)
   self._opening = nil
+  self._steering = nil
   if self._heartbeat then self._heartbeat:stop(); self._heartbeat = nil end
   local lifetime = self._lifetime
   self._lifetime, self._socket = nil, nil
@@ -149,6 +150,7 @@ function Client:_lost(reason)
   -- Retire callbacks immediately, while retaining the socket for native reconnect.
   self._generation = self._generation + 1
   self._opening = nil
+  self._steering = nil
   if self._heartbeat then self._heartbeat:stop(); self._heartbeat = nil end
   self._initialized = false
   self:_clear_requests()
@@ -200,6 +202,7 @@ function Client:_request_error(err)
   local message = err.message or tostring(err)
   self:_cancel(message, true)
   self._turn, self.turn_id = nil, nil
+  self._steering = nil
   self:_state("error")
   self:_emit("on_error", message)
 end
@@ -221,7 +224,7 @@ function Client:_finish(turn, result)
   self:_cancel("Turn ended", true)
   self._turn, self.turn_id = nil, nil
   if result and result.error and result.error.message then self:_emit("on_error", result.error.message) end
-  self:_state("ready")
+  self:_state(self._steering==turn and "steering" or "ready")
 end
 
 function Client:_match(thread_id, turn_id)
@@ -231,6 +234,7 @@ function Client:_match(thread_id, turn_id)
   if self._terminal[turn_id] then return nil end
   turn.id, self.turn_id = turn_id, turn_id
   if turn.stopped then self:_interrupt(turn) end
+  self:_state(self.state)
   return turn
 end
 
@@ -263,6 +267,7 @@ end
 
 function Client:_opened()
   self._opening = nil
+  self._steering = nil
   if self._heartbeat then self._heartbeat:stop(); self._heartbeat = nil end
   self._generation = self._generation + 1
   self._initialized = false
@@ -270,7 +275,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.3.3"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.3.4"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -672,7 +677,36 @@ function Client:_start_turn(turn, prompt, context_text)
     if turn.id and turn.id ~= result.turn.id then error("Turn/start ID mismatch") end
     turn.id, self.turn_id = result.turn.id, result.turn.id
     if terminal(result.turn.status) then self:_finish(turn, result.turn)
-    elseif turn.stopped then self:_interrupt(turn) end
+    elseif turn.stopped then self:_interrupt(turn)
+    else self:_state(self.state) end
+  end)
+end
+
+--- True only when steering can target a known, live turn with no pending steer.
+function Client:can_steer()
+  local turn=self._turn
+  return self._initialized and self._lifetime~=nil and self._lifetime.valid
+    and self.state=="working" and turn~=nil and turn.id~=nil and not turn.stopped and self._steering==nil
+end
+
+--- Append input to the current turn. Local acceptance is echoed once by the UI;
+--- server rejection reports the original text and never starts a replacement turn.
+function Client:steer(prompt,context_text)
+  if not self:can_steer() then return false,"Wait for an active turn before steering." end
+  if type(prompt)~="string" or prompt:match("^%s*$") then return false,"Prompt is empty" end
+  if type(context_text)~="string" then return false,"Context must be text" end
+  return self:_guard(function()
+    local turn=self._turn
+    self._steering=turn
+    self:_state("steering")
+    self:_request("turn/steer",{threadId=self.thread_id,expectedTurnId=turn.id,
+      input={{type="text",text=prompt .. "\n\nCurrent Aseprite target:\n" .. context_text}}},function(result,err)
+      if self._steering~=turn then return end
+      self._steering=nil
+      if not err then assert(result and result.turnId==turn.id,"Steering acknowledged a different turn") end
+      self:_state(self._turn==turn and (turn.stopped and "stopping" or "working") or "ready")
+      if err then self:_emit("on_error","Steering was not accepted: " .. (err.message or tostring(err)) .. "\nYour instruction: " .. prompt) end
+    end)
   end)
 end
 
@@ -722,6 +756,7 @@ function Client:new_chat()
   end
   return self:_guard(function()
     self:_set_thread(nil)
+    self._steering=nil
     self.turn_id, self._terminal = nil, {}
     self:_cancel("New chat", false)
     self:_state("ready")

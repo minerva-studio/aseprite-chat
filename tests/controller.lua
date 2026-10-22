@@ -15,6 +15,8 @@ local function scenario(name, body, configuration)
       function protocol:disconnect() self.state="disconnected"; self.allowed = false; opts.on_cancel("disconnect") end
       function protocol:can_execute() return self.allowed end
       function protocol:send(_,_,settings) self.sent_settings=settings; self.state = "working"; return true end
+      function protocol:can_steer() return self.state=="working" and self.turn_id~=nil end
+      function protocol:steer(text,context) self.steered_text,self.steered_context=text,context; self.state="steering"; return true end
       function protocol:list_models(callback)
         self.catalog_calls=(self.catalog_calls or 0)+1
         callback({
@@ -88,7 +90,7 @@ local function scenario(name, body, configuration)
   end
   body(controller, protocol, executor, view, request, function() return executed, replies end, launcher)
   controller:close()
-  sprite:close()
+  if sprite.isValid then sprite:close() end
   passed = passed + 1
   print("PASS " .. name)
 end
@@ -106,6 +108,26 @@ scenario("reject does not execute", function(c, p, e, v, request, result)
   request(); v.decision(false)
   local count, replies = result()
   assert(count == 0 and #replies == 1 and not replies[1].success)
+end)
+scenario("steering cancels old approval, refreshes the captured target and echoes once",function(c,p,e,v,request,result)
+  p.turn_id="turn"; request(); local old=v.decision
+  function e:bind() self.revision=self.revision+1 end
+  assert(c:send("Use blue instead")); assert(p.steered_text=="Use blue instead" and p.steered_context)
+  old(true); local count,replies=result()
+  assert(count==0 and #replies==1 and not replies[1].success)
+  assert(v.messages[#v.messages][2]=="You" and v.messages[#v.messages][3]=="Use blue instead")
+  assert(not c:send("duplicate"))
+  p.state="working"; request(); count,replies=result()
+  assert(count==0 and #replies==2 and not replies[2].success, "old revision was executed after steering")
+end)
+scenario("steering waits for a known turn ID without consuming the input",function(c,p)
+  assert(not c:send("too early")); assert(not p.steered_text)
+end)
+scenario("steering remains available after closing the canvas and disposes the captured target",function(c,p,e)
+  p.turn_id="turn"; app.sprite:close(); assert(not app.sprite)
+  local disposed=false; function e:dispose() disposed=true end
+  assert(c:send("Do not edit; explain the result"))
+  assert(disposed and p.steered_context=="No open sprite. Canvas tools are unavailable.")
 end)
 scenario("stop invalidates pending and late approval", function(c, p, e, v, request, result)
   request(); local decide = v.decision; c:stop(); decide(true)

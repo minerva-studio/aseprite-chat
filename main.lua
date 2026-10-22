@@ -26,7 +26,7 @@ end
 
 function Controller:_refresh_state()
   self.view:set_thread(self.client.thread_id,self.client.thread_name)
-  self.view:set_state(self.startup_error and "error" or self.launcher.pending and "starting" or self.client.state)
+  self.view:set_state(self.startup_error and "error" or self.launcher.pending and "starting" or self.client.state,self.client:can_steer())
 end
 
 function Controller:_cancel_pending(reason)
@@ -278,20 +278,26 @@ function Controller:select_settings(model, effort, tier)
   return true
 end
 
---- Submit a prompt against the currently open sprite without saving it.
+--- Start a turn or steer its direction; steering retires proposals and rebinds the target.
 function Controller:send(text)
   if not text or text:match("^%s*$") then return false end
-  if self.client.state ~= "ready" then self:_message("Aseprite", "Connect and wait for the current turn to finish."); return false end
+  local steering=self.client.state=="working"
+  if self.client.state ~= "ready" and not steering then self:_message("Aseprite", "Wait for the current request or connect first."); return false end
+  if steering and not self.client:can_steer() then self:_message("Aseprite","Wait for the active turn before steering."); return false end
   local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
   if not valid then self:_message("Aseprite", why); return false end
-  if not app.sprite then self:_message("Aseprite", "Open a sprite before sending a message."); return false end
+  if not app.sprite and not steering then self:_message("Aseprite", "Open a sprite before sending a message."); return false end
+  if steering then self:_cancel_pending("Superseded by your steering instruction.") end
   local ok, context = pcall(function()
+    if not app.sprite then self.executor:dispose(); return "No open sprite. Canvas tools are unavailable." end
     self.executor:bind(app.sprite, app.frame, app.layer)
     return json.encode(self.executor:metadata())
   end)
   if not ok then self:_message("Error", context); return false end
-  local sent, err = self.client:send(text, context, {model=self.preferences.model, effort=self.preferences.effort,
-    summary=self.preferences.effort and "auto" or nil,serviceTier=self.preferences.service_tier or "default"})
+  local sent, err
+  if steering then sent,err=self.client:steer(text,context)
+  else sent,err=self.client:send(text, context, {model=self.preferences.model, effort=self.preferences.effort,
+    summary=self.preferences.effort and "auto" or nil,serviceTier=self.preferences.service_tier or "default"}) end
   if sent then self:_message("You", text) else self:_message("Error", err or "Message was not sent.") end
   return sent
 end
