@@ -27,6 +27,33 @@ local function bound(s, frame, layer)
   e:bind(s, frame or app.frame, layer or app.layer)
   return e
 end
+test("bind returns the exact snapshot captured while installing its listeners",function()
+  local s=sprite()
+  local e=Executor.new(); executors[#executors+1]=e
+  local observed=0
+  local metadata=e.metadata
+  function e:metadata() observed=observed+1; return metadata(self) end
+  local captured=e:bind(s,1,s.layers[1])
+  assert(type(captured)=="table" and captured.spriteId==s.id and captured.revision==e.revision)
+  eq(observed,1)
+end)
+test("each observation digests linked pixel data once and rechecks unversioned writes",function()
+  local reads,pixels=0,"first"
+  local image=setmetatable({id=9,version=1,width=1,height=1},{__index=function(_,key)
+    if key=="bytes" then reads=reads+1; return pixels end
+  end})
+  local frames={{frameNumber=1,duration=0.1},{frameNumber=2,duration=0.1}}
+  local target={id=1,width=1,height=1,colorMode=ColorMode.RGB,filename="fixture",isModified=true,
+    hasAssociatedFile=false,selection={bounds={x=0,y=0,width=0,height=0},isEmpty=true},
+    tags={},slices={},palettes={},frames=frames,layers={},cels={}}
+  for i=1,2 do target.cels[i]={image=image,layer={id=3},frameNumber=i,position={x=0,y=0},opacity=255,zIndex=0} end
+  local e=Executor.new(); e.sprite,e.frame=target,frames[1]
+  local _,first=e:_observe(target,true)
+  eq(reads,1)
+  pixels="changed"
+  local _,second=e:_observe(target,true)
+  eq(reads,2); assert(first~=second,"digest caching hid an unversioned pixel change")
+end)
 local function execute(e, code, revision)
   return e:execute { code = code, summary = "Executor test", expectedRevision = revision or e:metadata().revision }
 end

@@ -425,6 +425,7 @@ function Executor:dispose()
 end
 
 --- Capture the turn's native target without changing the active editor. Frame accepts a native Frame or 1-based number.
+--- Return the metadata snapshot captured during binding, avoiding a second full document observation.
 function Executor:bind(sprite, frame, layer)
   self:dispose()
   assert(sprite and sprite.isValid, "An open sprite is required; inspect again.")
@@ -441,7 +442,7 @@ function Executor:bind(sprite, frame, layer)
   local function listen(events, name, callback, owner)
     self.listeners[#self.listeners + 1] = { events = events, handle = events:on(name, callback), sprite = owner }
   end
-  local ok, err = pcall(function()
+  local ok, captured = pcall(function()
     local weak = setmetatable({ self }, { __mode = "v" })
     for _, name in ipairs { "change", "filenamechange", "layerblendmode", "layername", "layeropacity", "layervisibility" } do
       listen(sprite.events, name, function()
@@ -453,9 +454,10 @@ function Executor:bind(sprite, frame, layer)
     listen(app.events, "aftercommand", function()
       if app.sprite == self.sprite then self.revision = self.revision + 1 end
     end)
-    self:metadata()
+    return self:metadata()
   end)
-  if not ok then self:dispose(); error(err) end
+  if not ok then self:dispose(); error(captured) end
+  return captured
 end
 
 -- Collect the descriptive half of the metadata. When signed is true, also return
@@ -501,14 +503,18 @@ function Executor:_observe(sprite, signed)
   end
   if not signed then return data end
   local observation = { metadata = data, cels = {}, palettes = {}, tags = tags, slices = slices }
+  -- Linked cels share image IDs; reuse only within this observation because drawPixel can bypass image.version.
+  local digests = {}
   local cels = sprite.cels
   for i = 1, #cels do
     local cel = cels[i]
     local image, position = cel.image, cel.position
+    local digest = digests[image.id]
+    if not digest then digest = pixel_digest(image); digests[image.id] = digest end
     observation.cels[#observation.cels + 1] = {
       layer = cel.layer.id, frame = cel.frameNumber, x = position.x, y = position.y,
       opacity = cel.opacity, zIndex = cel.zIndex, imageId = image.id, imageVersion = image.version,
-      width = image.width, height = image.height, pixels = pixel_digest(image)
+      width = image.width, height = image.height, pixels = digest
     }
   end
   local palettes = sprite.palettes

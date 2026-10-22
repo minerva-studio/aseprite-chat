@@ -14,16 +14,30 @@ local account_rows = { "account_home_label", "account_home", "account_url_label"
 function Chat.wrap(text, width, measure)
   local lines = {}
   for paragraph in (text .. "\n"):gmatch("(.-)\n") do
-    local line = ""
-    for _, code in utf8.codes(paragraph:gsub("\r$", ""):gsub("\t", "    ")) do
-      local char = utf8.char(code)
-      if line ~= "" and measure(line .. char) > width then
-        lines[#lines + 1] = line
-        line = ""
+    paragraph=paragraph:gsub("\r$", ""):gsub("\t", "    ")
+    local offsets={}
+    for offset in utf8.codes(paragraph) do offsets[#offsets+1]=offset end
+    local count=#offsets
+    offsets[count+1]=#paragraph+1
+    if count==0 then lines[#lines+1]="" end
+    local first=1
+    while first<=count do
+      -- Bracket a line with exponentially longer prefixes, then refine it.
+      -- Every decision still uses this paint's real font/fallback metrics.
+      local fit,probe=first,math.min(count,first+1)
+      while probe>fit and measure(paragraph:sub(offsets[first],offsets[probe+1]-1))<=width do
+        fit=probe
+        probe=math.min(count,first+(fit-first+1)*2-1)
       end
-      line = line .. char
+      local low,high=fit+1,probe-1
+      while low<=high do
+        local middle=math.floor((low+high)/2)
+        if measure(paragraph:sub(offsets[first],offsets[middle+1]-1))<=width then fit=middle; low=middle+1
+        else high=middle-1 end
+      end
+      lines[#lines+1]=paragraph:sub(offsets[first],offsets[fit+1]-1)
+      first=fit+1
     end
-    lines[#lines + 1] = line
   end
   return lines
 end
@@ -97,20 +111,32 @@ local function project_selector(view,id,options,selected)
 end
 
 local function paint_composer(gc,view)
-  local controls,widths={},{}
-  for _,id in ipairs {"speed","retry","stop"} do
+  local widths={}
+  for _,id in ipairs {"speed","retry","stop","send"} do
     local control=view.controls[id]
     if control.visible~=false then
-      local width=math.min(132,math.max(28,gc:measureText(control.text).width+16))
-      controls[#controls+1],widths[id]=control,width
+      widths[id]=math.min(132,math.max(28,gc:measureText(control.text).width+16))
     end
   end
   view.control_rects={}
-  local x=0
-  for index,control in ipairs(controls) do
-    local width=widths[control.id]
-    local rect={id=control.id,x=x,y=0,width=width,height=gc.height}
-    view.control_rects[#view.control_rects+1]=rect
+  local left,right=0,gc.width
+  for _,id in ipairs {"speed","retry"} do
+    if widths[id] then
+      view.control_rects[#view.control_rects+1]={id=id,x=left,y=0,width=widths[id],height=gc.height}
+      left=left+widths[id]+4
+    end
+  end
+  for _,id in ipairs {"send","stop"} do
+    if widths[id] then
+      right=right-widths[id]
+      view.control_rects[#view.control_rects+1]={id=id,x=right,y=0,width=widths[id],height=gc.height}
+      right=right-4
+    end
+  end
+  table.sort(view.control_rects,function(a,b) return a.x<b.x end)
+  for _,rect in ipairs(view.control_rects) do
+    local control=view.controls[rect.id]
+    local x,width=rect.x,rect.width
     gc.color=Color {r=75,g=80,b=91}; gc:fillRect(Rectangle(x,0,width,gc.height))
     gc.color=control.selected and Color {r=48,g=77,b=96} or Color {r=38,g=41,b=49}
     gc:fillRect(Rectangle(x+1,1,width-2,gc.height-2))
@@ -121,29 +147,6 @@ local function paint_composer(gc,view)
     if view.control_focus==control.id then
       gc.color=Color {r=137,g=180,b=210}; gc:fillRect(Rectangle(x+2,gc.height-3,width-4,1))
     end
-    x=x+width+4
-  end
-end
-
-local function align_send(gc,view)
-  -- The headerless content tab spans the root grid's two columns. Only Send
-  -- uses the root label column, so measured padding cannot indent the chat.
-  -- Update before relayout to prevent paint/modify recursion on size changes.
-  local padding=string.rep(" ",math.max(0,math.floor((gc.width-gc:measureText(send_caption(view.state)).width-24)
-    /math.max(1,gc:measureText(" ").width))))
-  if view.send_padding~=padding then
-    view.send_padding=padding
-    -- Native Dialog skips relayout during window resize. Flush on the next UI
-    -- tick rather than recursively changing the grid from a paint callback.
-    if not view.layout_timer then
-      local timer
-      timer=Timer {interval=0.05,ontick=function()
-        timer:stop()
-        if view.layout_timer==timer and view.dialog then view.dialog:modify {id="send",label=view.send_padding} end
-      end}
-      view.layout_timer=timer
-    end
-    view.layout_timer:start()
   end
 end
 
@@ -362,7 +365,19 @@ function Chat:add_message(id, role, text, append)
   message.text = append and (message.text .. text) or text
   if self.dialog then
     if role=="You" then self:set_thread(self.thread_id,self.thread_name) end
-    self.dialog:repaint()
+    -- Native repaint executes every canvas immediately. Bound streaming redraws
+    -- to one per UI tick instead of wrapping the full history for every token.
+    if not self.repaint_timer then
+      local dlg,timer=self.dialog
+      timer=Timer {interval=0.05,ontick=function()
+        timer:stop()
+        if self.repaint_timer~=timer then return end
+        self.repaint_timer=nil
+        if self.dialog==dlg then dlg:repaint() end
+      end}
+      self.repaint_timer=timer
+      timer:start()
+    end
   end
 end
 
@@ -418,12 +433,11 @@ function Chat:set_state(state,can_steer)
       enabled=idle and self.approval==nil}
     self.updating_selectors=updating
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
-    self.dialog:modify { id = "send", enabled = self:can_submit(),text=send_caption(state) }
+    update_control(self,{id="send",enabled=self:can_submit(),text=send_caption(state)})
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     local can_stop=state=="working" or state=="steering" or self.approval~=nil
     update_control(self,{ id = "stop", visible=can_stop or state=="stopping",enabled=can_stop })
     update_control(self,{ id = "retry", visible = offline, enabled = offline })
-    self.dialog:modify {id="composer",visible=self.fast_tier~=nil or can_stop or state=="stopping" or offline}
     self.dialog:repaint()
   end
   if self.rename_dialog then
@@ -826,7 +840,7 @@ function Chat:show()
   local dlg
   dlg = Dialog { title = "Aseprite Chat · Codex", resizeable = true, autofit=0, onclose = function()
     if self.dialog == dlg then
-      if self.layout_timer then self.layout_timer:stop(); self.layout_timer=nil end
+      if self.repaint_timer then self.repaint_timer:stop(); self.repaint_timer=nil end
       self.dialog = nil
       self:dismiss_approval()
       local settings = self.settings_dialog
@@ -843,9 +857,6 @@ function Chat:show()
   end }
   self.dialog = dlg
   self.selector_options={}
-  -- A hidden selector gives the content its own grid. Send has no focus magnet;
-  -- Enter is routed by a registered command rather than a background button.
-  dlg:tab {id="chat_content",text="",visible=false}
   dlg:button {id="history",text="Chats...",onclick=function() self:show_history() end}
   dlg:button {id="new",text="New chat",onclick=self.callbacks.on_new_chat}
   dlg:button {id="rename",text="Rename...",enabled=self.thread_id~=nil,onclick=function() self:show_rename() end}
@@ -856,7 +867,7 @@ function Chat:show()
   dlg:label {id="status",text=self.state}
   dlg:newrow()
   add_scroll_canvas(dlg,{id="transcript",width=440,height=280,hexpand=true,vexpand=true},self.scroll,
-    function(gc) paint_messages(gc,self); align_send(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
+    function(gc) paint_messages(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
   dlg:newrow()
   dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
   dlg:newrow()
@@ -905,6 +916,7 @@ function Chat:show()
   dlg:newrow()
   self.controls={}
   local function add(spec) self.controls[spec.id]=spec end
+  add {id="send",text="Send",onclick=function() self:submit() end}
   add {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
   add {id="speed",text="Fast",visible=false,onclick=function()
     if self.state~="ready" or not self.fast_tier then self:set_state(self.state); return end
@@ -939,12 +951,6 @@ function Chat:show()
       else return end
       ev:stopPropagation(); dlg:repaint()
     end}
-  dlg:endtabs {selected="chat_content",vexpand=true}
-  dlg:newrow()
-  self.send_padding=nil
-  dlg:button {id="send",label="",text="Send",hexpand=false,onclick=function()
-    self:submit()
-  end}
   self:set_models(self.models, self.selected_model, self.selected_effort,self.selected_tier)
   self:set_thread(self.thread_id,self.thread_name)
   dlg:show { wait = false }
@@ -990,7 +996,7 @@ end
 
 --- Close owned native dialogs. on_close is reserved for user-initiated closing.
 function Chat:close()
-  if self.layout_timer then self.layout_timer:stop(); self.layout_timer=nil end
+  if self.repaint_timer then self.repaint_timer:stop(); self.repaint_timer=nil end
   self:dismiss_approval()
   self.scroll.grab = nil
   local settings = self.settings_dialog

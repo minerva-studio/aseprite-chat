@@ -381,8 +381,7 @@ function Controller:send(text)
   if steering then self:_cancel_pending("Superseded by your steering instruction.") end
   local ok, context = pcall(function()
     if not app.sprite then self.executor:dispose(); return "No open sprite. Canvas tools are unavailable." end
-    self.executor:bind(app.sprite, app.frame, app.layer)
-    return json.encode(self.executor:metadata())
+    return json.encode(self.executor:bind(app.sprite, app.frame, app.layer))
   end)
   if not ok then self:_message("Error", context); return false end
   local sent, err

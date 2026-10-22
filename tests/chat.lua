@@ -10,8 +10,11 @@ local function test(name, fn)
 end
 local function measure(text) return utf8.len(text) end
 local function native_view(callbacks, preferences)
-  local dialogs = {}
-  local env = setmetatable({Timer=function(spec) return {start=function() end,stop=function() end,ontick=spec.ontick} end,Dialog=function(spec)
+  local dialogs,timers = {},{}
+  local env = setmetatable({Timer=function(spec)
+    local timer={start=function() end,stop=function() end,ontick=spec.ontick}
+    timers[#timers+1]=timer; return timer
+  end,Dialog=function(spec)
     local dialog = {data={},widgets={},buttons={},modifications={},rows={},row=0,spec=spec,bounds=Rectangle(0,0,500,420)}
     setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
       __index=function(_,method)
@@ -49,7 +52,7 @@ local function native_view(callbacks, preferences)
   function gc:measureText(text) return {width=utf8.len(text)*6,height=10} end
   function gc:fillRect() end
   function gc:fillText() end
-  return view,dialogs,gc
+  return view,dialogs,gc,timers
 end
 test("model reasoning access and approval use compact native dropdowns",function()
   local view,dialogs=native_view()
@@ -61,11 +64,11 @@ test("model reasoning access and approval use compact native dropdowns",function
     "approval is not on the same native row as the selectors")
   assert(not view.controls.model and not view.controls.effort and not view.controls.access)
   assert(not view.controls.auto_approve)
-  assert(main.widgets.send.kind=="button" and main.widgets.send.focus~=true)
+  assert(not main.widgets.send and main.widgets.composer.kind=="canvas" and view.controls.send)
   view:close()
 end)
 
-test("composer fits running controls and keeps native Send and guarded Stop",function()
+test("one footer keeps content-sized Stop beside Send and guards both actions",function()
   local sent,stopped=0,0
   local view,dialogs,gc=native_view({on_send=function(text) sent=sent+1; assert(text=="hello"); return true end,
     on_stop=function() stopped=stopped+1 end})
@@ -76,29 +79,70 @@ test("composer fits running controls and keeps native Send and guarded Stop",fun
   main.widgets.composer.onpaint {context=gc}
   local rects=view.control_rects
   for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width,"running controls overlap") end
-  local stop=rects[#rects]
-  assert(stop.id=="stop" and main.widgets.send.focus~=true)
+  local stop,send
+  for _,rect in ipairs(rects) do if rect.id=="stop" then stop=rect elseif rect.id=="send" then send=rect end end
+  assert(stop and send and stop.y==send.y and stop.x+stop.width+4==send.x)
+  assert(send.x+send.width==gc.width and send.width<100,"Send was stretched across the footer")
   main.data.input="hello"
-  main.widgets.send.onclick()
+  main.widgets.composer.onmousedown {button=MouseButton.LEFT,x=send.x+2,y=5}
   assert(sent==1 and main.data.input=="")
   main.widgets.composer.onmousedown {button=MouseButton.LEFT,x=stop.x+2,y=5}; assert(stopped==1)
   view:set_state("stopping")
-  main.widgets.send.onclick(); assert(sent==1)
+  view.controls.send.onclick(); assert(sent==1)
   view:close()
 end)
 
-test("native Send padding follows resizing without changing other content rows",function()
+test("footer resizing right-aligns actions without timers or native relayout from paint",function()
   local view,dialogs,gc=native_view()
   local main=dialogs[1]
-  assert(main.widgets.chat_content.visible==false and main.widgets.send.kind=="button")
+  assert(not main.widgets.chat_content and not main.widgets.send)
   gc.width,gc.height=440,26
-  main.widgets.transcript.onpaint {context=gc}; view.layout_timer.ontick(); local narrow=main.widgets.send.label
-  gc.width=640; main.widgets.transcript.onpaint {context=gc}; view.layout_timer.ontick(); assert(#main.widgets.send.label>#narrow)
-  gc.width=440; main.widgets.transcript.onpaint {context=gc}; view.layout_timer.ontick(); assert(main.widgets.send.label==narrow)
+  local changes=#main.modifications
+  for _,width in ipairs {440,640,440} do
+    gc.width=width; main.widgets.composer.onpaint {context=gc}
+    local send=view.control_rects[#view.control_rects]
+    assert(send.id=="send" and send.x+send.width==width)
+  end
+  assert(#main.modifications==changes,"paint initiated native relayout")
   assert(not main.widgets.input.label and not main.widgets.transcript.label)
-  local timer=view.layout_timer
-  view:close(); assert(not view.layout_timer)
-  timer.ontick()
+  assert(not view.layout_timer)
+  view:close()
+end)
+
+test("streaming bursts update text immediately but coalesce synchronous native repaints",function()
+  local view,dialogs,gc,timers=native_view()
+  local paints=0
+  rawset(dialogs[1],"repaint",function() paints=paints+1 end)
+  view:add_message("answer","Codex","one",true)
+  view:add_message("answer","Codex"," two",true)
+  assert(view.by_id.answer.text=="one two")
+  assert(paints==0 and #timers==1,"each stream delta synchronously repainted history")
+  timers[1].ontick()
+  assert(paints==1 and not view.repaint_timer)
+  view:add_message("answer","Codex"," three",true)
+  local retired=view.repaint_timer
+  view:close(); local closed_paints=paints
+  view:show()
+  rawset(dialogs[2],"repaint",function() paints=paints+1 end)
+  view:add_message("answer","Codex"," four",true)
+  local active=view.repaint_timer
+  retired.ontick()
+  assert(paints==closed_paints and view.repaint_timer==active,"retired timer changed a reopened chat")
+  active.ontick(); assert(paints==closed_paints+1)
+  view:close()
+end)
+
+test("long text wrapping uses bounded measured-prefix searches with variable glyph advances",function()
+  local calls=0
+  local text=string.rep("inspect current canvas and layer highlights ",200)
+  local lines=Chat.wrap(text,80,function(value) calls=calls+1; return #value end)
+  assert(#lines==110 and table.concat(lines)==text)
+  assert(calls<2200,"wrapping still measures every character in a long history")
+  local widths={a=1,["界"]=3,b=1,c=1,["龘"]=2,z=1}
+  local varied=Chat.wrap("a界bc龘z",5,function(value)
+    local total=0; for _,code in utf8.codes(value) do total=total+widths[utf8.char(code)] end; return total
+  end)
+  assert(#varied==2 and varied[1]=="a界b" and varied[2]=="c龘z")
 end)
 
 test("background Settings never disable mouse sending while keyboard submission stays guarded",function()
@@ -109,21 +153,21 @@ test("background Settings never disable mouse sending while keyboard submission 
   view:set_models({{model="plain",displayName="Plain",supportedReasoningEfforts={}}},"plain",nil)
   view:set_state("ready")
   main.data.input="pending message"
-  assert(main.widgets.send.enabled)
+  assert(view.controls.send.enabled)
   view:show_settings()
-  assert(main.widgets.send.enabled,"background Settings disabled mouse Send")
+  assert(view.controls.send.enabled,"background Settings disabled mouse Send")
   assert(not view:can_submit(true))
   view:submit(true)
   assert(sent==0 and main.data.input=="pending message","Settings allowed the message to be sent")
-  main.widgets.send.onclick()
+  view.controls.send.onclick()
   assert(sent==1 and main.data.input=="")
   main.data.input="pending steering"
   view:set_state("working",true)
-  assert(main.widgets.send.enabled and not view:can_submit(true))
+  assert(view.controls.send.enabled and not view:can_submit(true))
   view:submit(true)
   assert(sent==1 and main.data.input=="pending steering")
   view.settings_dialog:close()
-  assert(main.widgets.send.enabled and main.widgets.send.text=="Steer")
+  assert(view.controls.send.enabled and view.controls.send.text=="Steer")
   assert(view:submit(true))
   assert(sent==2 and main.data.input=="" and main.widgets.input.focus==true)
   view:close(); sprite:close()
@@ -147,7 +191,7 @@ test("owned auxiliary dialogs block only shortcut submission until the last one 
   for _,case in ipairs(cases) do
     main.data.input="keep draft"
     case.open()
-    assert(main.widgets.send.enabled,case.field.." disabled mouse Send")
+    assert(view.controls.send.enabled,case.field.." disabled mouse Send")
     assert(not view:can_submit(true))
     view:submit(true)
     assert(sent==0 and main.data.input=="keep draft",case.field.." allowed sending")
@@ -155,10 +199,10 @@ test("owned auxiliary dialogs block only shortcut submission until the last one 
     if case.field=="approval" then view:dismiss_approval() else view[case.field]:close() end
     assert(not view:can_submit(true),"closing one dialog ignored the remaining Settings window")
     view.settings_dialog:close()
-    assert(main.widgets.send.enabled and view:can_submit(true),"closing the last dialog failed to restore keyboard submission")
+    assert(view.controls.send.enabled and view:can_submit(true),"closing the last dialog failed to restore keyboard submission")
   end
   view:set_state("disconnected"); view:show_settings(); view.settings_dialog:close()
-  assert(not main.widgets.send.enabled,"closing Settings enabled a disconnected chat")
+  assert(not view.controls.send.enabled,"closing Settings enabled a disconnected chat")
   view:close(); sprite:close()
 end)
 
@@ -283,7 +327,7 @@ test("Fast toggles the advertised tier, locks during work and disappears for uns
   models[1].serviceTiers={}
   view:set_models(models,"sol","low","priority"); view:set_state("ready")
   assert(not view.controls.speed.visible and view.selection_valid and view.selected_tier=="default")
-  assert(main.widgets.composer.visible==false,"unsupported Fast leaves an empty action row")
+  assert(view.controls.send.visible~=false,"unsupported Fast hides the shared footer")
   view:close()
 end)
 
@@ -357,12 +401,12 @@ end)
 test("steering availability controls the composer while Stop remains usable",function()
   local view,dialogs=native_view()
   view:set_models({{model="sol",displayName="Sol",supportedReasoningEfforts={{reasoningEffort="low"}}}},"sol","low")
-  view:set_state("working",false); assert(not dialogs[1].widgets.send.enabled)
+  view:set_state("working",false); assert(not view.controls.send.enabled)
   view:set_state("working",true)
-  assert(dialogs[1].widgets.send.enabled and dialogs[1].widgets.send.text=="Steer")
+  assert(view.controls.send.enabled and view.controls.send.text=="Steer")
   assert(not dialogs[1].widgets.model.enabled and view.controls.stop.enabled)
   view:set_state("steering",false)
-  assert(not dialogs[1].widgets.send.enabled and view.controls.stop.enabled)
+  assert(not view.controls.send.enabled and view.controls.stop.enabled)
   view:add_message("thought","Summary","Inspect the layers",false)
   local labels={}; local gc={width=500,height=200,measureText=function(_,s) return {width=#s*6,height=10} end,fillRect=function() end,
     fillText=function(_,s) labels[#labels+1]=s end}

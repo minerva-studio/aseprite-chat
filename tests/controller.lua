@@ -14,7 +14,7 @@ local function scenario(name, body, configuration)
       end
       function protocol:disconnect() self.state="disconnected"; self.allowed = false; opts.on_cancel("disconnect") end
       function protocol:can_execute() return self.allowed end
-      function protocol:send(_,_,settings) self.sent_settings=settings; self.state = "working"; return true end
+      function protocol:send(_,context,settings) self.sent_context=context; self.sent_settings=settings; self.state = "working"; return true end
       function protocol:can_steer() return self.state=="working" and self.turn_id~=nil end
       function protocol:steer(text,context) self.steered_text,self.steered_context=text,context; self.state="steering"; return true end
       function protocol:list_models(callback)
@@ -48,7 +48,7 @@ local function scenario(name, body, configuration)
     end},
     ["executor.lua"] = { tools = {}, new = function()
       executor = { revision = 1 }
-      function executor:bind() end
+      function executor:bind() return self:metadata() end
       function executor:metadata() return { revision = self.revision } end
       function executor:check(rev) return rev == self.revision, "stale revision" end
       function executor:execute() executed = executed + 1; return { success = true, contentItems = {} } end
@@ -121,7 +121,7 @@ scenario("reject does not execute", function(c, p, e, v, request, result)
 end)
 scenario("steering cancels old approval, refreshes the captured target and echoes once",function(c,p,e,v,request,result)
   p.turn_id="turn"; request(); local old=v.decision
-  function e:bind() self.revision=self.revision+1 end
+  function e:bind() self.revision=self.revision+1; return self:metadata() end
   assert(c:send("Use blue instead")); assert(p.steered_text=="Use blue instead" and p.steered_context)
   old(true); local count,replies=result()
   assert(count==0 and #replies==1 and not replies[1].success)
@@ -225,6 +225,12 @@ scenario("closing and reopening starts a fresh client session", function(c, p, e
   c:close(); c:open()
   assert(c.client ~= p and #v.messages == 0)
 end)
+scenario("sending serializes the captured bind snapshot without a second full document scan",function(c,p,e)
+  function e:bind(sprite,frame,layer) return {revision=123,spriteId=sprite.id} end
+  function e:metadata() error("duplicate full document scan") end
+  assert(c:send("inspect"),"send discarded bind's already captured snapshot")
+  assert(json.decode(p.sent_context).revision==123)
+end,{skip_send=true})
 scenario("approval-time observation failure is returned once and displayed", function(c, p, e, v, request, result)
   request()
   function e:check() error("observation failed") end
