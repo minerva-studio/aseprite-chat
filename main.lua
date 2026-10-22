@@ -263,19 +263,22 @@ function Controller:_question(request,reply)
     reply(answers)
   end
   self.questions[#self.questions+1]=entry
-  self.view:add_message(entry.id,"Question","Awaiting your answer\n"..entry.body,false)
+  self.view:add_message(entry.id,"Question","Awaiting your answer\n"..request.questions[1].question,false)
   if #self.questions==1 then self.view:request_question(request,entry.answer) end
 end
 
 function Controller:_question_resolved(key,status)
   for index,entry in ipairs(self.questions) do
     if entry.request.key==key then
-      local lines={status.."\n"..entry.body}
-      for _,question in ipairs(entry.request.questions) do
-        local answers=entry.answers and entry.answers[question.id]
-        if answers then lines[#lines+1]="You: "..table.concat(answers,", ") end
+      if status=="Answered" and entry.answers then
+        self.view:add_message(entry.id,"Question","",false)
+        for number,question in ipairs(entry.request.questions) do
+          self.view:add_message(entry.id..":q:"..number,"Codex",question.question,false)
+          self.view:add_message(entry.id..":a:"..number,"You",table.concat(entry.answers[question.id],", "),false)
+        end
+      else
+        self.view:add_message(entry.id,"Question",status.."\n"..entry.body,false)
       end
-      self.view:add_message(entry.id,"Question",table.concat(lines,"\n"),false)
       table.remove(self.questions,index)
       if index==1 then
         self.view:dismiss_question()

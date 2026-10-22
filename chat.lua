@@ -961,7 +961,7 @@ function Chat:show()
   dlg.bounds=Rectangle(bounds.x,bounds.y,bounds.width,bounds.height+40)
 end
 
---- Show one model request with per-question drafts. No option is preselected.
+--- Show one model request with native option buttons and per-question drafts.
 --- callback receives {[questionId]={answer}} after all pages, or nil on Skip/close.
 --- Dismissing programmatically never answers a retired request.
 function Chat:request_question(request,callback)
@@ -975,42 +975,63 @@ function Chat:request_question(request,callback)
   end
   dlg=Dialog {title="Aseprite Chat · Question",resizeable=true,onclose=function() finish(nil) end}
   pending.dialog=dlg; self.question=pending
-  local scroll={offset=0,maximum=0,follow=false}
+  local option_count=0
+  for _,question in ipairs(request.questions) do option_count=math.max(option_count,#(question.options or {})) end
   local function save()
-    pending.drafts[pending.index]={choice=dlg.data.choice,text=dlg.data.answer}
+    local draft=pending.drafts[pending.index] or {}
+    draft.text=dlg.data.answer
+    pending.drafts[pending.index]=draft
   end
   local function show_page()
     local question=request.questions[pending.index]
     local draft=pending.drafts[pending.index] or {}
-    local options={"Select an answer"}
-    for index,option in ipairs(question.options or {}) do options[#options+1]=index..". "..option.label end
-    if question.isOther then options[#options+1]="Other..." end
+    pending.drafts[pending.index]=draft
     pending.updating=true
     dlg:modify {id="question_page",text="Question "..pending.index.." / "..#request.questions.." · "..question.header}
-    dlg:modify {id="choice",options=options,option=draft.choice or options[1],visible=#(question.options or {})>0}
-    dlg:modify {id="answer",text=draft.text or "",visible=#(question.options or {})==0 or draft.choice=="Other..."}
+    dlg:modify {id="question_body",text=question.question}
+    for index=1,option_count do
+      local option=(question.options or {})[index]
+      dlg:modify {id="option_"..index,text=option and index..". "..option.label or "",visible=option~=nil,selected=draft.choice==index}
+      dlg:modify {id="option_description_"..index,text=option and option.description or "",visible=option~=nil and option.description~=""}
+    end
+    local free_text=#(question.options or {})==0 or question.isOther==true
+    dlg:modify {id="other_label",text=#(question.options or {})==0 and "Your answer" or "Other",visible=free_text}
+    dlg:modify {id="answer",text=draft.text or "",visible=free_text}
     dlg:modify {id="question_error",text=""}
     dlg:modify {id="back",enabled=pending.index>1}
     dlg:modify {id="next",text=pending.index==#request.questions and "Submit answer" or "Next"}
     pending.updating=false
-    scroll.offset,scroll.follow=0,false
-    dlg:repaint()
   end
   dlg:label {id="question_page",text=""}
-  add_scroll_canvas(dlg,{id="question_body",width=420,height=180,hexpand=true,vexpand=true},scroll,function(gc)
-    local question=request.questions[pending.index]
-    local lines={question.question}
-    for index,option in ipairs(question.options or {}) do
-      lines[#lines+1]=index..". "..option.label.."\n"..option.description
-    end
-    paint(gc,table.concat(lines,"\n\n"),scroll)
-  end)
-  dlg:combobox {id="choice",options={"Select an answer"},onchange=function()
+  dlg:newrow()
+  dlg:label {id="question_body",text=""}
+  for index=1,option_count do
+    local option_index=index
+    dlg:newrow()
+    dlg:button {id="option_"..index,text="",hexpand=true,onclick=function()
+      if self.question~=pending then return end
+      local question=request.questions[pending.index]
+      if not (question.options or {})[option_index] then return end
+      local draft=pending.drafts[pending.index]
+      draft.choice,draft.text=option_index,""
+      show_page()
+    end}
+    dlg:newrow()
+    dlg:label {id="option_description_"..index,text=""}
+  end
+  dlg:newrow()
+  dlg:label {id="other_label",text="Other"}
+  dlg:newrow()
+  dlg:entry {id="answer",text="",hexpand=true,onchange=function()
     if self.question~=pending or pending.updating then return end
-    dlg:modify {id="answer",visible=dlg.data.choice=="Other..."}
-    dlg:modify {id="question_error",text=""}
+    local draft=pending.drafts[pending.index]
+    draft.text=dlg.data.answer
+    if draft.text:match("%S") then
+      draft.choice=nil
+      for index=1,option_count do dlg:modify {id="option_"..index,selected=false} end
+    end
   end}
-  dlg:entry {id="answer",text="",hexpand=true}
+  dlg:newrow()
   dlg:label {id="question_error",text=""}
   dlg:newrow()
   dlg:button {id="back",text="Back",onclick=function()
@@ -1022,19 +1043,24 @@ function Chat:request_question(request,callback)
     save()
     local question=request.questions[pending.index]
     local draft=pending.drafts[pending.index]
-    local option=(question.options or {})[tonumber((draft.choice or ""):match("^(%d+)%. ")) or 0]
-    local answer=option and option.label or (#(question.options or {})==0 or draft.choice=="Other...") and draft.text
+    local option=(question.options or {})[draft.choice or 0]
+    local answer=option and option.label or (#(question.options or {})==0 or question.isOther) and draft.text
     if not answer or not answer:match("%S") then
       dlg:modify {id="question_error",text="请选择一项或填写回答。"}; return
     end
-    draft.answer=answer
     if pending.index<#request.questions then pending.index=pending.index+1; show_page(); return end
     local answers={}
-    for index,item in ipairs(request.questions) do answers[item.id]={pending.drafts[index].answer} end
+    for index,item in ipairs(request.questions) do
+      local saved=pending.drafts[index]
+      local selected=(item.options or {})[saved.choice or 0]
+      answers[item.id]={selected and selected.label or saved.text}
+    end
     finish(answers)
   end}
   dlg:button {id="skip",text="Skip",onclick=function() finish(nil) end}
-  show_page(); dlg:show {wait=false}; self:set_state(self.state)
+  -- Native controls contain their text before the first show, avoiding a blank
+  -- canvas waiting for a later paint. Native sizing uses the installed fonts.
+  show_page(); dlg:show {wait=false,autoscrollbars=true}; self:set_state(self.state)
 end
 
 --- Close only the currently displayed question, without manufacturing an answer.

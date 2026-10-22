@@ -21,6 +21,10 @@ local function native_view(callbacks, preferences)
       return function(self,widget)
         if method=="newrow" then rawset(self,"new_row",true)
         elseif method=="close" then rawset(self,"closed",true); if self.spec.onclose then self.spec.onclose() end
+        elseif method=="show" then
+          local snapshot={}
+          for id,spec in pairs(self.widgets) do snapshot[id]={text=spec.text,visible=spec.visible,kind=spec.kind} end
+          rawset(self,"show_snapshot",snapshot)
         elseif widget and widget.id then
           local previous=self.data[widget.id]
           if method=="modify" then
@@ -993,9 +997,12 @@ test("question window pages options and free text without selecting a default an
   local dialog=dialogs[#dialogs]
   assert(view.question and dialog.closed~=true)
   dialog.widgets.next.onclick(); assert(not received and dialog.closed~=true,"unselected answer was submitted")
-  dialog.data.choice="2. Gold"; dialog.widgets.choice.onchange()
+  assert(dialog.widgets.option_1.kind=="button" and dialog.widgets.option_2.kind=="button")
+  assert(dialog.widgets.question_body.kind=="label" and dialog.widgets.question_body.text=="Which highlight?")
+  assert(not dialog.widgets.choice,"options are still hidden in a dropdown")
+  dialog.widgets.option_2.onclick()
   dialog.widgets.next.onclick()
-  dialog.widgets.back.onclick(); assert(dialog.data.choice=="2. Gold","back navigation discarded the draft")
+  dialog.widgets.back.onclick(); assert(dialog.widgets.option_2.selected==true,"back navigation discarded the draft")
   dialog.widgets.next.onclick(); dialog.data.answer="Keep the outline"
   dialog.widgets.next.onclick()
   assert(received.color[1]=="Gold" and received.detail[1]=="Keep the outline")
@@ -1008,11 +1015,9 @@ test("question custom answers descriptions and cancel remain separate from edit 
   view:request_question({questions={{id="color",header="Color",question="Which highlight?",isOther=true,
     options={{label="Blue",description="Cool highlights"}}}}},function(value) answers=value; calls=calls+1 end)
   local dialog=dialogs[#dialogs]
-  local painted={}; function gc:fillText(text) painted[#painted+1]=text end
-  dialog.widgets.question_body.onpaint {context=gc}
-  assert(table.concat(painted," "):find("Cool highlights",1,true))
-  dialog.data.choice="Other..."; dialog.widgets.choice.onchange()
-  dialog.data.answer="Purple"; dialog.widgets.next.onclick()
+  assert(dialog.widgets.option_description_1.text=="Cool highlights")
+  assert(dialog.widgets.answer.visible and dialog.widgets.other_label.text=="Other")
+  dialog.data.answer="Purple"; dialog.widgets.answer.onchange(); dialog.widgets.next.onclick()
   assert(answers.color[1]=="Purple" and calls==1)
   view:request_question({questions={{id="text",header="Text",question="What?"}}},function(value)
     assert(value==nil); calls=calls+1 end)
@@ -1031,5 +1036,37 @@ test("dismissed questions cannot reply later and owned question windows guard En
   view:dismiss_question(); dialog.data.answer="late"; submit()
   assert(calls==0 and dialog.closed)
   view:close(); sprite:close()
+end)
+test("native question choices replace Other text and submit the explicit selection",function()
+  local answer
+  local view,dialogs=native_view()
+  view:request_question({questions={{id="color",header="Color",question="Which highlight?",isOther=true,
+    options={{label="Blue",description="Cool highlights"},{label="Gold",description="Warm highlights"}}}}},function(value) answer=value end)
+  local dialog=dialogs[#dialogs]
+  assert(dialog.widgets.question_body.kind=="label" and dialog.widgets.option_1.kind=="button")
+  assert(dialog.show_snapshot.question_body.text=="Which highlight?")
+  assert(dialog.show_snapshot.option_2.text=="2. Gold" and dialog.show_snapshot.option_2.visible)
+  assert(dialog.show_snapshot.answer.visible,"Other was hidden on first open")
+  dialog.data.answer="Purple"; dialog.widgets.answer.onchange()
+  dialog.widgets.option_1.onclick()
+  assert(dialog.data.answer=="" and dialog.widgets.option_1.selected and not dialog.widgets.option_2.selected)
+  dialog.widgets.next.onclick(); assert(answer.color[1]=="Blue")
+  view:close()
+end)
+test("question paging hides old options and restores Other drafts",function()
+  local answers
+  local view,dialogs=native_view()
+  view:request_question({questions={
+    {id="color",header="Color",question="Which color?",isOther=true,options={{label="Blue",description="Cool"}}},
+    {id="text",header="Text",question="What else?"}}},function(value) answers=value end)
+  local dialog=dialogs[#dialogs]
+  dialog.data.answer="Purple"; dialog.widgets.answer.onchange(); dialog.widgets.next.onclick()
+  assert(dialog.widgets.option_1.visible==false and dialog.widgets.other_label.text=="Your answer")
+  dialog.widgets.option_1.onclick()
+  dialog.data.answer="Outline"; dialog.widgets.answer.onchange(); dialog.widgets.back.onclick()
+  assert(dialog.widgets.answer.visible and dialog.data.answer=="Purple" and not dialog.widgets.option_1.selected)
+  dialog.widgets.next.onclick(); assert(dialog.data.answer=="Outline")
+  dialog.widgets.next.onclick(); assert(answers.color[1]=="Purple" and answers.text[1]=="Outline")
+  view:close()
 end)
 print("chat: " .. passed .. " passed")

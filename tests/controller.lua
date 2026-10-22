@@ -511,4 +511,20 @@ scenario("Stop closes queued questions and retired UI callbacks cannot answer",f
   c:stop(); assert(not v.question_request and replies==1)
   old({text={"late"}}); assert(replies==1)
 end)
+scenario("completed questions appear as alternating model questions and user answers",function(c,p,e,v)
+  local request={key="pair",questions={{id="color",question="Which color?"},{id="layer",question="Which layer?"}}}
+  p.options.on_question(request,function(answers) p.options.on_question_resolved("pair","Answered"); return true end)
+  local start=#v.messages
+  v.question_reply({color={"Gold"},layer={"Wings"}})
+  local rows={}
+  for index=start+1,#v.messages do
+    local entry=v.messages[index]
+    if entry[3]~="" then rows[#rows+1]={role=entry[2],text=entry[3]} end
+  end
+  assert(#rows==4,"answers were not split into paired conversation rows")
+  assert(rows[1].role=="Codex" and rows[1].text=="Which color?")
+  assert(rows[2].role=="You" and rows[2].text=="Gold")
+  assert(rows[3].role=="Codex" and rows[3].text=="Which layer?")
+  assert(rows[4].role=="You" and rows[4].text=="Wings")
+end)
 print("controller: " .. passed .. " passed")
