@@ -63,6 +63,15 @@ local function send_caption(state)
   return state=="working" and "Steer" or state=="steering" and "Steering..." or "Send"
 end
 
+-- Unhandled Enter propagates across modeless windows. Both the native default
+-- button and its callback must reject submission while an owned dialog is open.
+local function can_submit(view)
+  if not view.dialog or view.settings_dialog or view.access_dialog or view.history_dialog
+    or view.rename_dialog or view.approval then return false end
+  return (view.state=="working" and view.can_steer==true)
+    or (view.state=="ready" and view.selection_valid==true and app.sprite~=nil)
+end
+
 -- Setting native options deletes the current popup's items. Cache the last
 -- projected list so ordinary selection changes leave an open popup intact.
 local function project_selector(view,id,options,selected)
@@ -395,8 +404,7 @@ function Chat:set_state(state,can_steer)
     self.dialog:modify {id="access",option=access_caption,enabled=idle or offline}
     self.updating_selectors=updating
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
-    self.dialog:modify { id = "send", enabled = (state=="working" and self.can_steer==true)
-      or (idle and self.selection_valid == true and app.sprite ~= nil),text=send_caption(state) }
+    self.dialog:modify { id = "send", enabled = can_submit(self),text=send_caption(state) }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     local can_stop=state=="working" or state=="steering" or self.approval~=nil
     update_control(self,{ id = "stop", visible=can_stop or state=="stopping",enabled=can_stop })
@@ -579,7 +587,10 @@ function Chat:show_history()
     return true
   end
   dlg=Dialog {title="Aseprite Chat · Conversations",resizeable=true,onclose=function()
-    if self.history_dialog==dlg then self.history_dialog,self.history=nil,nil end
+    if self.history_dialog==dlg then
+      self.history_dialog,self.history=nil,nil
+      self:set_state(self.state)
+    end
   end}
   self.history_dialog=dlg
   dlg:label {text="Search conversations"}
@@ -662,7 +673,10 @@ function Chat:show_settings()
   if self.settings_dialog then self.settings_dialog:show {wait=false}; return end
   local dlg
   dlg = Dialog {title="Aseprite Chat · Settings", autofit=Align.LEFT | Align.TOP, onclose=function()
-    if self.settings_dialog == dlg then self.settings_dialog = nil end
+    if self.settings_dialog == dlg then
+      self.settings_dialog = nil
+      self:set_state(self.state)
+    end
   end}
   self.settings_dialog = dlg
   -- Native label= fields reserve a form column for every subsequent row.
@@ -729,7 +743,10 @@ function Chat:show_access(requested_level)
   end
   local dlg
   dlg=Dialog {title="Aseprite Chat · Access",autofit=Align.LEFT | Align.TOP,onclose=function()
-    if self.access_dialog==dlg then self.access_dialog=nil end
+    if self.access_dialog==dlg then
+      self.access_dialog=nil
+      self:set_state(self.state)
+    end
   end}
   self.access_dialog=dlg
   dlg:combobox {id="access_level", options=access_options,
@@ -766,7 +783,10 @@ function Chat:show_rename()
   if self.state~="ready" or not self.thread_id then return end
   local dlg
   dlg=Dialog {title="Rename conversation",onclose=function()
-    if self.rename_dialog==dlg then self.rename_dialog=nil end
+    if self.rename_dialog==dlg then
+      self.rename_dialog=nil
+      self:set_state(self.state)
+    end
   end}
   self.rename_dialog=dlg
   dlg:entry {id="name",text=self.thread_name or "",focus=true}
@@ -781,6 +801,7 @@ function Chat:show_rename()
     if not accepted and self.rename_dialog==dlg then dlg:modify {id="error",text=err or "Could not rename conversation."} end
   end}
   dlg:button {text="Cancel",onclick=function() dlg:close() end}
+  self:set_state(self.state)
   dlg:show {wait=false}
 end
 
@@ -906,9 +927,7 @@ function Chat:show()
   dlg:newrow()
   self.send_padding=nil
   dlg:button {id="send",label="",text="Send",focus=true,hexpand=false,onclick=function()
-    local can_send=(self.state=="working" and self.can_steer==true)
-      or (self.state=="ready" and self.selection_valid==true and app.sprite~=nil)
-    if can_send and self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text="",focus=true} end
+    if can_submit(self) and self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text="",focus=true} end
   end}
   self:set_models(self.models, self.selected_model, self.selected_effort,self.selected_tier)
   self:set_thread(self.thread_id,self.thread_name)

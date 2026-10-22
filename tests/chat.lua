@@ -91,6 +91,62 @@ test("native Send padding follows resizing without changing other content rows",
   timer.ontick()
 end)
 
+test("settings block Send and Steer without consuming the pending message",function()
+  local sprite=Sprite(1,1)
+  local sent=0
+  local view,dialogs=native_view({on_send=function() sent=sent+1; return true end})
+  local main=dialogs[1]
+  view:set_models({{model="plain",displayName="Plain",supportedReasoningEfforts={}}},"plain",nil)
+  view:set_state("ready")
+  main.data.input="pending message"
+  assert(main.widgets.send.enabled)
+  view:show_settings()
+  assert(not main.widgets.send.enabled,"Settings left the native Enter target enabled")
+  main.widgets.send.onclick()
+  assert(sent==0 and main.data.input=="pending message","Settings allowed the message to be sent")
+  view:set_state("working",true)
+  assert(not main.widgets.send.enabled,"a live turn re-enabled Steer behind Settings")
+  main.widgets.send.onclick()
+  assert(sent==0 and main.data.input=="pending message")
+  view.settings_dialog:close()
+  assert(main.widgets.send.enabled and main.widgets.send.text=="Steer")
+  main.widgets.send.onclick()
+  assert(sent==1 and main.data.input=="" and main.widgets.input.focus==true)
+  view:close(); sprite:close()
+end)
+
+test("all owned auxiliary dialogs suspend sending until the last one closes",function()
+  local sprite=Sprite(1,1)
+  local sent=0
+  local view,dialogs=native_view({on_send=function() sent=sent+1; return true end,
+    on_list_threads=function(_,_,done) done({data={}}); return true end})
+  local main=dialogs[1]
+  view:set_models({{model="plain",displayName="Plain",supportedReasoningEfforts={}}},"plain",nil)
+  view:set_thread("thread","Title"); view:set_state("ready")
+  local cases={
+    {open=function() view:show_access() end,field="access_dialog"},
+    {open=function() view:show_history() end,field="history_dialog"},
+    {open=function() view:show_rename() end,field="rename_dialog"},
+    {open=function() view:request_approval({summary="Edit",code="return true"},function() end) end,
+      field="approval"}
+  }
+  for _,case in ipairs(cases) do
+    main.data.input="keep draft"
+    case.open()
+    assert(not main.widgets.send.enabled,case.field.." left Send enabled")
+    main.widgets.send.onclick()
+    assert(sent==0 and main.data.input=="keep draft",case.field.." allowed sending")
+    view:show_settings()
+    if case.field=="approval" then view:dismiss_approval() else view[case.field]:close() end
+    assert(not main.widgets.send.enabled,"closing one dialog ignored the remaining Settings window")
+    view.settings_dialog:close()
+    assert(main.widgets.send.enabled,"closing the last dialog failed to restore Send")
+  end
+  view:set_state("disconnected"); view:show_settings(); view.settings_dialog:close()
+  assert(not main.widgets.send.enabled,"closing Settings enabled a disconnected chat")
+  view:close(); sprite:close()
+end)
+
 test("UTF-8 characters remain intact when wrapping", function()
   local lines = Chat.wrap("你好世界", 2, measure)
   assert(#lines == 2 and lines[1] == "你好" and lines[2] == "世界")
