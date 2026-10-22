@@ -271,11 +271,11 @@ function Controller:_question_resolved(key,status)
   for index,entry in ipairs(self.questions) do
     if entry.request.key==key then
       if status=="Answered" and entry.answers then
-        self.view:add_message(entry.id,"Question","",false)
-        for number,question in ipairs(entry.request.questions) do
-          self.view:add_message(entry.id..":q:"..number,"Codex",question.question,false)
-          self.view:add_message(entry.id..":a:"..number,"You",table.concat(entry.answers[question.id],", "),false)
+        local groups={status}
+        for _,question in ipairs(entry.request.questions) do
+          groups[#groups+1]=question.question.."\nYou: "..table.concat(entry.answers[question.id],", ")
         end
+        self.view:add_message(entry.id,"Question",table.concat(groups,"\n\n"),false)
       else
         self.view:add_message(entry.id,"Question",status.."\n"..entry.body,false)
       end

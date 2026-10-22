@@ -184,6 +184,10 @@ Drafts retain only the selected option and free text; final answers are derived 
 
 Chat 53 and Controller 46 pass in the actual Aseprite batch runtime with controlled native Dialog adapters. Revised button and paired-record tests failed against 0.4.7 before implementation. New checks cover text being populated before show, Other/option selection, draft restoration and hidden old-option callbacks. The question protocol and provider configuration are unchanged. GUI/IME, screen bounds and visual first-frame latency remain unverified; no test GUI or real model request was launched for this revision. Plugin-authored developer instructions were disclosed and documented; their content is unchanged.
 
+## Grouped question records (0.4.9, 2026-10-22)
+
+The user clarified that a completed question set should remain one Question record. Its content now groups each question immediately with its corresponding answer, separated from the next pair by a blank line. It replaces the pending record using the same ID; no separate Codex/You message is appended per question. The native question window and protocol are unchanged. The focused Controller regression failed against 0.4.8, then all 46 Controller checks passed after this formatting change. This validation uses the controlled view adapter, not a new GUI session.
+
 ## Practical boundaries
 
 - The packaged extension manifest and menu group are checked. Updating files on disk does not reload Lua in an already running editor; a user-controlled restart is required. Native UI integration loads the same production modules through its test driver.
