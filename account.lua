@@ -62,7 +62,8 @@ end
 
 local function defaults()
   return { version = 1, mode = "default", codexHome = Account.default_home(),
-    baseUrl = "", apiKey = "", models = {} }
+    baseUrl = "", apiKey = "", models = {},
+    access = "canvas", workspace = "", reviewer = "user" }
 end
 
 local invalid = "The account file is invalid; save the account settings again."
@@ -100,7 +101,8 @@ function Account.load(path)
     end
   end
   if value.version ~= 1 or not string_field("codexHome") or not string_field("baseUrl")
-      or not string_field("apiKey") or not models_valid
+      or not string_field("apiKey") or not string_field("access")
+      or not string_field("workspace") or not string_field("reviewer") or not models_valid
       or (value.mode ~= "default" and value.mode ~= "custom") then
     return defaults(), invalid
   end
@@ -108,6 +110,9 @@ function Account.load(path)
   if value.codexHome ~= nil then account.codexHome = value.codexHome end
   if value.baseUrl ~= nil then account.baseUrl = value.baseUrl end
   if value.apiKey ~= nil then account.apiKey = value.apiKey end
+  if value.access ~= nil then account.access = value.access end
+  if value.workspace ~= nil then account.workspace = value.workspace end
+  if value.reviewer ~= nil then account.reviewer = value.reviewer end
   account.models = models
   local valid, reason = Account.validate(account)
   if not valid then return defaults(), invalid .. " " .. tostring(reason) end
@@ -135,6 +140,21 @@ function Account.validate(account)
       return false, "Invalid model list."
     end
   end
+  local access = account.access or "canvas"
+  if access ~= "canvas" and access ~= "read" and access ~= "workspace" and access ~= "full" then
+    return false, "Choose a valid access level."
+  end
+  local workspace = account.workspace or ""
+  if workspace ~= "" and not absolute(workspace) then
+    return false, "Workspace must be an absolute path."
+  end
+  if access == "workspace" and workspace == "" then
+    return false, "Workspace write requires a workspace folder."
+  end
+  local reviewer = account.reviewer or "user"
+  if reviewer ~= "user" and reviewer ~= "auto_review" then
+    return false, "Choose a valid approvals reviewer."
+  end
   return true
 end
 
@@ -151,7 +171,8 @@ function Account.save(path, account)
       codexHome = account.codexHome,
       baseUrl = account.baseUrl,
       apiKey = account.apiKey,
-      models = #account.models > 0 and account.models or json.decode("[]")
+      models = #account.models > 0 and account.models or json.decode("[]"),
+      access = account.access, workspace = account.workspace, reviewer = account.reviewer
     }
     local written, write_error = file:write(encode(record) .. "\n")
     local closed, close_error = file:close()

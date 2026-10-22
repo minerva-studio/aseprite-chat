@@ -63,6 +63,70 @@ local function failure(text)
   return {success=false, contentItems={{type="inputText", text=text}}}
 end
 
+local function clipped(text, limit)
+  text = type(text) == "string" and text or ""
+  if #text <= limit then return text end
+  return text:sub(1, (utf8.offset(text, 0, limit + 1) or 1) - 1) .. "\n…"
+end
+
+-- Codex approval requests map to one user-facing kind; the reply decision
+-- "accept"/"decline"/"cancel" is translated back to each method's response.
+local approval_methods = {
+  ["item/commandExecution/requestApproval"] = "command",
+  ["execCommandApproval"] = "command",
+  ["item/fileChange/requestApproval"] = "fileChange",
+  ["applyPatchApproval"] = "fileChange",
+  ["item/permissions/requestApproval"] = "permissions"
+}
+
+local function approval_result(method, decision, params, reason)
+  if method == "item/permissions/requestApproval" then
+    if decision == "accept" then
+      return { permissions = params.permissions or {}, scope = "turn" }
+    end
+    return { permissions = {}, scope = "turn" }
+  end
+  if method == "execCommandApproval" or method == "applyPatchApproval" then
+    if decision == "accept" then return { decision = "approved" } end
+    return { decision = { denied = { rejection = reason or "Declined by the user." } } }
+  end
+  return { decision = decision == "accept" and "accept" or decision == "cancel" and "cancel" or "decline" }
+end
+
+local function describe_changes(fileChanges)
+  if not object(fileChanges) then return nil end
+  local lines = {}
+  for path, change in pairs(fileChanges) do
+    lines[#lines + 1] = tostring(path) .. " (" .. tostring(object(change) and change.type or "?") .. ")"
+    local detail = object(change) and (change.unified_diff or change.content) or nil
+    if type(detail) == "string" and detail ~= "" then lines[#lines + 1] = clipped(detail, 4000) end
+  end
+  return #lines > 0 and table.concat(lines, "\n") or nil
+end
+
+local function describe_permissions(permissions)
+  if not object(permissions) then return nil end
+  local lines = {}
+  local fs = permissions.fileSystem
+  if object(fs) then
+    for _, access in ipairs { "read", "write" } do
+      if sequence(fs[access]) then
+        for _, path in ipairs(fs[access]) do lines[#lines + 1] = access .. ": " .. tostring(path) end
+      end
+    end
+    if sequence(fs.entries) then
+      for _, entry in ipairs(fs.entries) do
+        local path = object(entry) and entry.path or nil
+        lines[#lines + 1] = tostring(object(entry) and entry.access or "?") .. ": "
+          .. tostring(object(path) and (path.path or path.pattern) or path)
+      end
+    end
+  end
+  local network = permissions.network
+  if object(network) and network.enabled then lines[#lines + 1] = "network: enabled" end
+  return #lines > 0 and table.concat(lines, "\n") or nil
+end
+
 local function terminal(status)
   return status == "completed" or status == "interrupted" or status == "failed"
 end
@@ -80,7 +144,7 @@ end
 function Codex.new(options)
   options = options or {}
   return setmetatable({state="disconnected", _options=options, _next_id=0,
-    _generation=0, _pending={}, _tools={}, _terminal={}, _initialized=false}, Client)
+    _generation=0, _pending={}, _tools={}, _approvals={}, _terminal={}, _initialized=false}, Client)
 end
 
 function Client:_emit(name, ...)
@@ -121,6 +185,14 @@ function Client:_cancel(reason, respond)
   for _, request in pairs(tools) do
     request.valid = false
     if respond then self:_write({id=request.id, result=failure(reason)}) end
+  end
+  local approvals = self._approvals
+  self._approvals = {}
+  for _, request in pairs(approvals) do
+    request.valid = false
+    if respond then
+      self:_write({id=request.id, result=approval_result(request.method, "cancel", request.params, reason)})
+    end
   end
   self:_emit("on_cancel", reason)
 end
@@ -239,7 +311,10 @@ function Client:_match(thread_id, turn_id)
 end
 
 function Client:_resume()
-  self:_request("thread/resume", {threadId=self.thread_id, excludeTurns=true}, function(result, err)
+  local settings = self:_thread_settings()
+  self:_request("thread/resume", {threadId=self.thread_id, excludeTurns=true,
+    developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd, approvalPolicy=settings.approvalPolicy,
+    approvalsReviewer=settings.approvalsReviewer}, function(result, err)
     if err then self:_request_error(err); return end
     assert(object(result.thread) and result.thread.id == self.thread_id, "Malformed thread/resume response")
     local status = result.thread.status
@@ -323,9 +398,50 @@ function Client:_tool(message)
   end)
 end
 
+-- Per-thread sandbox/cwd/approval routing, supplied by the controller's access
+-- level. Defaults reproduce the original canvas-only behavior.
+function Client:_thread_settings()
+  local provider = self._options.thread_settings
+  local settings = provider and provider() or {}
+  return { sandbox = settings.sandbox or "read-only", cwd = settings.cwd,
+    approvalPolicy = settings.approvalPolicy or "on-request",
+    approvalsReviewer = settings.approvalsReviewer or "user" }
+end
+
+-- Approval requests follow the same liveness rules as dynamic tools: they must
+-- belong to the live thread and un-stopped turn, and replies are single-use.
+function Client:_approval(message, kind)
+  local params = message.params
+  if not object(params) then return false end
+  if (params.threadId or params.conversationId) ~= self.thread_id then return false end
+  local turn = self._turn
+  if not turn or turn.stopped then return false end
+  if type(params.turnId) == "string" and not self:_match(params.threadId, params.turnId) then return false end
+  local key = type(message.id) .. ":" .. tostring(message.id)
+  assert(not self._approvals[key], "Duplicate outstanding approval request")
+  local request = { id = message.id, valid = true, method = message.method, params = params }
+  self._approvals[key] = request
+  local generation = self._generation
+  self:_emit("on_approval", {
+    kind = kind, command = params.command, cwd = params.cwd, reason = params.reason,
+    changes = describe_changes(params.fileChanges), permissions = describe_permissions(params.permissions)
+  }, function(decision)
+    if not request.valid or self._generation ~= generation or self._turn ~= turn
+      or turn.stopped then return false end
+    request.valid = false
+    self._approvals[key] = nil
+    return self:_guard(function()
+      self:_write({ id = message.id, result = approval_result(message.method, decision, params) })
+    end)
+  end)
+  return true
+end
+
 function Client:_server_request(message)
   local method = message.method
   if method == "item/tool/call" then self:_tool(message); return end
+  local kind = approval_methods[method]
+  if kind and self._options.on_approval and self:_approval(message, kind) then return end
   local result
   local explanation = "Built-in shell, filesystem, and permission approvals are declined; use the Aseprite document tools."
   if method == "item/commandExecution/requestApproval" or method == "item/fileChange/requestApproval" then
@@ -624,9 +740,10 @@ function Client:open_thread(id, callback)
       if read_error then finish(nil, read_error.message); return end
       local ok, thread = pcall(validate_thread, read, false)
       if not ok then finish(nil, tostring(thread)); return end
+      local settings = self:_thread_settings()
       self:_request("thread/resume", {threadId=id, excludeTurns=true,
-        developerInstructions=self._options.instructions, sandbox="read-only",
-        approvalPolicy="on-request", approvalsReviewer="user"}, function(resumed, resume_error)
+        developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd,
+        approvalPolicy=settings.approvalPolicy, approvalsReviewer=settings.approvalsReviewer}, function(resumed, resume_error)
         if not live() then return end
         if resume_error then finish(nil, resume_error.message); return end
         local valid, metadata = pcall(validate_thread, resumed, true)
@@ -728,9 +845,11 @@ function Client:send(prompt, context_text, settings)
     self._turn = turn
     self:_state("working")
     if self.thread_id then self:_start_turn(turn, prompt, context_text); return end
+    local settings = self:_thread_settings()
     self:_request("thread/start", {dynamicTools=array(self._options.tools or {}), model=turn.model,
-      developerInstructions=self._options.instructions, sandbox="read-only", approvalPolicy="on-request",
-      approvalsReviewer="user", allowProviderModelFallback=false}, function(result, err)
+      developerInstructions=self._options.instructions, sandbox=settings.sandbox, cwd=settings.cwd,
+      approvalPolicy=settings.approvalPolicy, approvalsReviewer=settings.approvalsReviewer,
+      allowProviderModelFallback=false}, function(result, err)
       if self._turn ~= turn then return end
       if err then self:_request_error(err); return end
       assert(result.thread and type(result.thread.id) == "string", "Malformed thread/start response")

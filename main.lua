@@ -8,10 +8,12 @@ Use read_sprite to inspect the live unsaved document before every edit; it retur
 Use read_pixels for exact pixel values of a small region; do not spend an execute_lua approval on reads.
 The metadata's openSprites lists every open document; other sprites are read-only references.
 Use switch_sprite with a spriteId to move the editing target to another open sprite; edits apply only to the current target.
-Use execute_lua for edits. Its Lua environment provides sprite, app, Aseprite constructors/constants, and basic Lua libraries.
+Depending on the user's access setting, shell commands and view_image may also be available.
+Use them only to read references or to write exports the user asked for; never write to a file that is currently open in Aseprite.
+Use execute_lua for canvas edits. Its Lua environment provides sprite, app, Aseprite constructors/constants, and basic Lua libraries.
 Use only short, terminating scripts. Edits must target the captured sprite and be undoable.
 For pixel edits, clone a cel image, modify the clone, then assign cel.image = clone; direct drawPixel on an attached image does not create Undo.
-The plugin owns the app.transaction boundary. Do not save/open/close documents, access external files, run shell commands, or call other apps.
+The plugin owns the app.transaction boundary. Inside execute_lua, do not save/open/close documents, access external files, run shell commands, or call other apps.
 If the document or context became stale, inspect again. Never claim an edit succeeded until execute_lua returns success.
 The client controls edit approval: each execute_lua call is either approved individually or covered by the user's explicit auto-approval for this chat.
 Treat rejection as a decision, not an invitation to retry the same edit.
@@ -35,8 +37,11 @@ end
 function Controller:_cancel_pending(reason)
   local pending = self.pending
   self.pending = nil
+  local codex_approval = self.codex_approval
+  self.codex_approval = nil
   self.view:dismiss_approval()
   if pending then pending.reply(failure(reason),"Cancelled") end
+  if codex_approval then codex_approval.reply("decline") end
 end
 
 function Controller:_tool(params, reply)
@@ -169,12 +174,61 @@ function Controller:_create_client()
       if role and text then self.view:add_message("activity:" .. item.id,role,text,false) end
     end,
     on_tool = function(params, reply) self:_tool(params, reply) end,
+    on_approval = function(request, reply) self:_approval(request, reply) end,
+    thread_settings = function() return self:_thread_settings() end,
     on_cancel = function(reason)
       self:_cancel_pending(reason or "Turn cancelled.")
       self.executor:dispose()
     end,
     on_error = function(text) self:_message("Error", text) end
   }
+end
+
+-- The current account's access level becomes the per-thread sandbox and
+-- approval routing; cwd is the workspace folder or the user profile, never the
+-- extension directory.
+function Controller:_thread_settings()
+  local account = self.account or {}
+  local access = account.access or "canvas"
+  local sandbox = ({ canvas = "read-only", read = "read-only",
+    workspace = "workspace-write", full = "danger-full-access" })[access] or "read-only"
+  local cwd = access == "workspace" and account.workspace or nil
+  if not cwd or cwd == "" then cwd = os.getenv("USERPROFILE") end
+  return { sandbox = sandbox, cwd = cwd, approvalPolicy = "on-request",
+    approvalsReviewer = account.reviewer == "auto_review" and "auto_review" or "user" }
+end
+
+--- Forward a Codex boundary approval to the shared approval window. The window
+--- shows one request at a time; concurrent requests are declined immediately.
+function Controller:_approval(request, reply)
+  local titles = { command = "Approve Codex command", fileChange = "Approve file changes",
+    permissions = "Approve permissions" }
+  local title = titles[request.kind] or "Approve Codex request"
+  if self.pending or self.codex_approval then
+    self.view:add_message("approval-decline:" .. self.message_id, "Tool",
+      title .. " · Declined · another request is awaiting approval", false)
+    reply("decline")
+    return
+  end
+  local lines = {}
+  if request.command then lines[#lines + 1] = "Command:\n" .. request.command end
+  if request.cwd then lines[#lines + 1] = "Directory: " .. request.cwd end
+  if request.reason then lines[#lines + 1] = "Reason: " .. request.reason end
+  if request.changes then lines[#lines + 1] = "Changes:\n" .. request.changes end
+  if request.permissions then lines[#lines + 1] = "Permissions:\n" .. request.permissions end
+  local body = #lines > 0 and table.concat(lines, "\n\n") or "Codex requested an approval."
+  self.message_id = self.message_id + 1
+  local id = "approval:" .. self.message_id
+  self.codex_approval = { reply = reply, id = id }
+  self.view:add_message(id, "Tool", title .. " · Awaiting approval\n" .. body, false)
+  self.view:request_approval({ title = title, body = body,
+    note = "Approved requests run outside the canvas sandbox for this turn." }, function(accepted)
+      local held = self.codex_approval
+      if not held or held.id ~= id then return end
+      self.codex_approval = nil
+      self.view:add_message(id, "Tool", title .. " · " .. (accepted and "Approved" or "Declined") .. "\n" .. body, false)
+      held.reply(accepted and "accept" or "decline")
+    end)
 end
 
 --- Assemble one editor session; path is the installed extension directory.
@@ -202,6 +256,8 @@ function Main.create(options)
     on_rename = function(name,callback) return self.client:rename_thread(name,callback) end,
     on_account_get = function() return self:account_view() end,
     on_account_apply = function(draft) return self:apply_account(draft) end,
+    on_access_get = function() return self:access_view() end,
+    on_access_apply = function(draft) return self:apply_access(draft) end,
     on_close = function() self:close() end
   }, self.preferences)
   self.client = self:_create_client()
@@ -410,6 +466,44 @@ function Controller:apply_account(draft)
   self.view:clear()
   self:_message("Aseprite", "The Codex account changed; a new conversation started.")
   self:connect(self.preferences.manual_server and self.preferences.endpoint or nil)
+  return true
+end
+
+--- The sanitized access projection shown in Settings.
+function Controller:access_view()
+  local account = self.account or {}
+  return { access = account.access or "canvas",
+    workspace = account.workspace or "",
+    reviewer = account.reviewer or "user" }
+end
+
+--- Change the file-access level and reconnect so the current thread resumes
+--- under the new sandbox and approval routing, keeping the conversation.
+function Controller:apply_access(draft)
+  local offline = self.client.state == "disconnected" or self.client.state == "error"
+  if (self.client.state ~= "ready" and not offline) or self.pending or self.launcher.pending then
+    return false, "Wait until the chat is idle."
+  end
+  draft = draft or {}
+  local current = self.account or {}
+  local account = {}
+  for key, value in pairs(current) do account[key] = value end
+  account.access = draft.access or "canvas"
+  account.workspace = tostring(draft.workspace or ""):match("^%s*(.-)%s*$")
+  account.reviewer = draft.reviewer == "auto_review" and "auto_review" or "user"
+  local valid, invalid = self.Account.validate(account)
+  if not valid then return false, invalid end
+  if account.access == (current.access or "canvas")
+      and account.workspace == (current.workspace or "")
+      and account.reviewer == (current.reviewer or "user") then return true end
+  local saved, save_error = self.Account.save(self.Account.path(), account)
+  if not saved then return false, save_error or "Cannot save the account file." end
+  self.account = account
+  self:disconnect()
+  self:connect(self.preferences.manual_server and self.preferences.endpoint or nil)
+  local labels = { canvas = "canvas only", read = "file read", workspace = "workspace write", full = "full access" }
+  self:_message("Aseprite", "File access changed to " .. (labels[account.access] or account.access)
+    .. "; the conversation continues on a reconnected session.")
   return true
 end
 

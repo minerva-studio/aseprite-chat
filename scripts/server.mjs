@@ -14,11 +14,17 @@ const provider = 'aseprite_custom';
 const providerEnvKey = 'ASEPRITE_CHAT_API_KEY';
 // The canvas workflow uses only the extension's dynamic tools plus Codex's
 // request_user_input; every other bundled tool surface is disabled per child.
-const leanOverrides = [
-  ...['shell_tool', 'unified_exec', 'multi_agent', 'goals', 'view_image', 'memories',
-    'apps', 'plugins', 'image_generation', 'skill_search', 'browser_use', 'computer_use']
-    .flatMap(feature => ['-c', `features.${feature}=false`]),
-  '-c', 'web_search="disabled"'];
+// File-access levels re-enable the shell and view_image surfaces only.
+const fileTools = new Set(['shell_tool', 'unified_exec', 'view_image']);
+const leanFeatures = ['shell_tool', 'unified_exec', 'multi_agent', 'goals', 'view_image',
+  'memories', 'apps', 'plugins', 'image_generation', 'skill_search', 'browser_use', 'computer_use'];
+function leanOverrides(access) {
+  const disabled = access === 'canvas' ? leanFeatures : leanFeatures.filter(name => !fileTools.has(name));
+  return [...disabled.flatMap(feature => ['-c', `features.${feature}=false`]),
+    '-c', 'web_search="disabled"'];
+}
+const accessLevels = new Set(['canvas', 'read', 'workspace', 'full']);
+const reviewers = new Set(['user', 'auto_review']);
 
 /** Read the account file synchronously; a missing file means the default account. */
 export function readAccount(file) {
@@ -38,18 +44,42 @@ export function readAccount(file) {
     && (parsed.baseUrl === '' || /^https?:\/\//.test(parsed.baseUrl))
     && typeof parsed.apiKey === 'string'
     && Array.isArray(parsed.models) && parsed.models.every(model => typeof model === 'string');
-  if (!valid) throw Error(invalidAccount);
+  const access = parsed.access === undefined ? 'canvas' : parsed.access;
+  const workspace = parsed.workspace === undefined ? '' : parsed.workspace;
+  const reviewer = parsed.reviewer === undefined ? 'user' : parsed.reviewer;
+  const fields = valid && accessLevels.has(access)
+    && typeof workspace === 'string' && (workspace === '' || path.isAbsolute(workspace))
+    && (access !== 'workspace' || workspace !== '')
+    && reviewers.has(reviewer);
+  if (!fields) throw Error(invalidAccount);
   return { mode: parsed.mode, codexHome: parsed.codexHome, baseUrl: parsed.baseUrl,
-    apiKey: parsed.apiKey, models: parsed.models };
+    apiKey: parsed.apiKey, models: parsed.models, access, workspace, reviewer };
+}
+
+// A custom home without a [windows] sandbox setting gets the unelevated sandbox
+// so sandboxed exec_command works without Codex's interactive sandbox setup.
+function windowsSandboxOverride(codexHome) {
+  try {
+    const text = readFileSync(path.join(codexHome, 'config.toml'), 'utf8');
+    let windows = false;
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (/^\[/.test(trimmed)) windows = /^\[\s*windows\s*\]/.test(trimmed);
+      else if (windows && /^sandbox\s*=/.test(trimmed)) return [];
+    }
+  } catch {}
+  return ['-c', 'windows.sandbox="unelevated"'];
 }
 
 /** Build the Codex app-server argv and child environment for one account. */
 export function launchFor(account, baseEnv) {
   const env = { ...baseEnv, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'aseprite_chat' };
   delete env[providerEnvKey];
-  const args = ['app-server', '--stdio', ...leanOverrides];
+  const access = account && account.access || 'canvas';
+  const args = ['app-server', '--stdio', ...leanOverrides(access)];
   if (!account || account.mode !== 'custom') return { args, env };
   env.CODEX_HOME = account.codexHome;
+  if (access !== 'canvas') args.push(...windowsSandboxOverride(account.codexHome));
   const baseUrl = (account.baseUrl || '').replace(/\/+$/, '');
   const apiKey = account.apiKey || '';
   if (baseUrl === '' && apiKey === '') return { args, env };

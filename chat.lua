@@ -331,6 +331,17 @@ function Chat:set_state(state,can_steer)
       self.settings_dialog:modify { id = id, visible = custom }
     end
     self.settings_dialog:modify { id = "account_apply", enabled = idle or offline }
+    local level = self.settings_dialog.data.access_level
+    local beyond = level ~= nil and level ~= "Canvas only"
+    self.settings_dialog:modify { id = "access_workspace_label", visible = beyond }
+    self.settings_dialog:modify { id = "access_workspace", visible = beyond }
+    self.settings_dialog:modify { id = "access_reviewer_label", visible = beyond }
+    self.settings_dialog:modify { id = "access_reviewer", visible = beyond, enabled = beyond }
+    self.settings_dialog:modify { id = "access_note", text =
+      level == "Full access (danger)" and "No sandbox: Codex can read and write anywhere."
+      or beyond and "Codex may read any file on this PC; writes follow the level."
+      or "Codex uses the canvas tools only." }
+    self.settings_dialog:modify { id = "access_apply", enabled = idle or offline }
   end
   if self.history_dialog then
     local picker = self.history_dialog
@@ -610,6 +621,29 @@ function Chat:show_settings()
     dlg:modify {id="account_key", text=""}
     dlg:modify {id="account_key_clear", selected=false}
   end}
+  local access = self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
+  local access_options = {"Canvas only","Read files","Workspace write","Full access (danger)"}
+  local access_labels = {canvas="Canvas only",read="Read files",workspace="Workspace write",full="Full access (danger)"}
+  dlg:separator {text="Access"}
+  dlg:combobox {id="access_level", options=access_options,
+    option=access_labels[access.access] or "Canvas only",
+    onchange=function() self:set_state(self.state) end}
+  dlg:label {id="access_workspace_label", text="Workspace folder"}
+  dlg:entry {id="access_workspace", text=access.workspace or ""}
+  dlg:label {id="access_reviewer_label", text="Boundary approvals"}
+  dlg:combobox {id="access_reviewer", options={"Ask me","Auto-review"},
+    option=access.reviewer=="auto_review" and "Auto-review" or "Ask me"}
+  dlg:label {id="access_note", text=""}
+  dlg:button {id="access_apply", text="Apply access", onclick=function()
+    if not self.callbacks.on_access_apply then return end
+    local levels={["Canvas only"]="canvas",["Read files"]="read",["Workspace write"]="workspace",["Full access (danger)"]="full"}
+    local applied, apply_error = self.callbacks.on_access_apply({
+      access=levels[dlg.data.access_level] or "canvas",
+      workspace=dlg.data.access_workspace,
+      reviewer=dlg.data.access_reviewer=="Auto-review" and "auto_review" or "user"
+    })
+    if not applied and apply_error then self:add_message("access-error","Error",apply_error,false) end
+  end}
   dlg:button {id="done", text="Done"}
   self:set_state(self.state)
   dlg:show {wait=false}
@@ -719,7 +753,8 @@ function Chat:show()
   dlg.bounds=Rectangle(bounds.x,bounds.y,bounds.width,bounds.height+40)
 end
 
---- Show complete Lua and summary; the caller must revalidate after approval.
+--- Show the complete pending action; the caller must revalidate after approval.
+--- args: {summary,code} for Lua, or {title,body,note} for other requests.
 function Chat:request_approval(args, callback)
   self:dismiss_approval()
   local dlg, pending
@@ -731,12 +766,12 @@ function Chat:request_approval(args, callback)
     self:set_state(self.state)
     callback(accepted)
   end
-  dlg = Dialog { title = "Approve Codex Lua", resizeable = true, onclose = function() finish(false) end }
+  dlg = Dialog { title = args.title or "Approve Codex Lua", resizeable = true, onclose = function() finish(false) end }
   pending = { dialog = dlg, finish = finish }
   self.approval = pending
   add_scroll_canvas(dlg, {id="code", width=420, height=280, hexpand=true, vexpand=true}, scroll,
-    function(gc) paint(gc,args.summary .. "\n\n" .. args.code,scroll) end)
-  dlg:label { text = "Approved Lua runs immediately. Running Lua cannot be interrupted." }
+    function(gc) paint(gc,args.body or (args.summary .. "\n\n" .. args.code),scroll) end)
+  dlg:label { text = args.note or "Approved Lua runs immediately. Running Lua cannot be interrupted." }
   dlg:newrow()
   dlg:button { id = "approve", text = "Approve once", onclick = function() finish(true) end }
   dlg:button { id = "reject", text = "Reject", onclick = function() finish(false) end }

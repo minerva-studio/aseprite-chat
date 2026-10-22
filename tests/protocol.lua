@@ -818,6 +818,103 @@ test("a close reason string is surfaced as an error while plain close stays quie
   eq(#h.errors,count)
 end)
 
+test("thread settings reach thread start resume and history resume",function()
+  local h=harness({thread_settings=function()
+    return {sandbox="workspace-write",cwd="D:\\ws",approvalPolicy="on-request",approvalsReviewer="auto_review"}
+  end}); h:open(); h:start()
+  local start=h:last("thread/start")
+  eq(start.params.sandbox,"workspace-write"); eq(start.params.cwd,"D:\\ws")
+  eq(start.params.approvalsReviewer,"auto_review")
+  h.ws:event(WebSocketMessageType.CLOSE)
+  local resume=h:reopen()
+  eq(resume.params.sandbox,"workspace-write"); eq(resume.params.cwd,"D:\\ws")
+  eq(resume.params.approvalsReviewer,"auto_review")
+  h.client:open_thread("history",function() end)
+  h:history_read(); h:history_resume()
+  local resumed=h:last("thread/resume")
+  eq(resumed.params.sandbox,"workspace-write"); eq(resumed.params.cwd,"D:\\ws")
+end)
+
+test("default thread settings reproduce the canvas profile",function()
+  local h=harness(); h:open(); h:start()
+  local start=h:last("thread/start")
+  eq(start.params.sandbox,"read-only"); eq(start.params.approvalsReviewer,"user")
+  eq(start.params.cwd,nil)
+  h.ws:event(WebSocketMessageType.CLOSE)
+  local resume=h:reopen()
+  eq(resume.params.sandbox,"read-only"); eq(resume.params.approvalsReviewer,"user")
+end)
+
+local function approval_request(h,method,params,id)
+  params=params or {}
+  -- exec/applyPatch approvals carry conversationId instead of threadId/turnId.
+  if method~="execCommandApproval" and method~="applyPatchApproval" then
+    params.threadId=params.threadId or "thread"; params.turnId=params.turnId or "turn"
+  end
+  h.ws:receive({id=id or "appr-1",method=method,params=params})
+end
+local function sent_to(h,id)
+  for i=#h.ws.sent,1,-1 do if h.ws.sent[i].id==id then return h.ws.sent[i] end end
+end
+
+test("live approvals forward a description and reply with each method's shape",function()
+  local approvals={}
+  local h=harness({on_approval=function(request,reply) approvals[#approvals+1]={request=request,reply=reply} end})
+  h:open(); h:start()
+  approval_request(h,"item/commandExecution/requestApproval",{command="pwsh rm x",cwd="D:\\ws",reason="cleanup"},"a1")
+  eq(#approvals,1); eq(approvals[1].request.kind,"command"); eq(approvals[1].request.command,"pwsh rm x")
+  approvals[1].reply("accept"); local response=h:last(); eq(response.id,"a1"); eq(response.result.decision,"accept")
+  approval_request(h,"item/fileChange/requestApproval",{reason="export"},"a2")
+  eq(approvals[2].request.kind,"fileChange"); approvals[2].reply("decline")
+  eq(h:last().result.decision,"decline")
+  approval_request(h,"item/permissions/requestApproval",{cwd="D:\\ws",reason="w",
+    permissions={fileSystem={write={"D:\\out"}}}},"a3")
+  eq(approvals[3].request.kind,"permissions")
+  assert(approvals[3].request.permissions:find("D:\\out",1,true))
+  approvals[3].reply("accept")
+  eq(h:last().result.scope,"turn"); eq(h:last().result.permissions.fileSystem.write[1],"D:\\out")
+  approval_request(h,"item/permissions/requestApproval",{permissions={}},"a4")
+  approvals[4].reply("decline"); eq(h:last().result.permissions[1],nil); eq(h:last().result.scope,"turn")
+  approval_request(h,"execCommandApproval",{conversationId="thread",command="rm x",cwd="D:\\"}, "a5")
+  eq(approvals[5].request.kind,"command"); approvals[5].reply("accept")
+  eq(h:last().result.decision,"approved")
+  approval_request(h,"applyPatchApproval",{conversationId="thread",
+    fileChanges={["D:\\f.txt"]={type="update",unified_diff="@@ x"}}},"a6")
+  eq(approvals[6].request.kind,"fileChange"); assert(approvals[6].request.changes:find("f%.txt"))
+  approvals[6].reply("decline"); eq(h:last().result.decision.denied.rejection:len()>0,true)
+end)
+
+test("stale and reply-less approvals fall back to schema-shaped declines",function()
+  local calls=0
+  local h=harness({on_approval=function(_,__) calls=calls+1 end})
+  h:open(); h:start()
+  approval_request(h,"item/commandExecution/requestApproval",{threadId="other",turnId="turn"})
+  eq(calls,0); eq(h:last().result.decision,"decline")
+  approval_request(h,"execCommandApproval",{conversationId="other"},"stale")
+  eq(calls,0); eq(h:last().result.decision.denied.rejection:find("declined",1,true)~=nil,true)
+  approval_request(h,"item/permissions/requestApproval",{turnId="never"},"stale2")
+  eq(calls,0); eq(h:last().result.scope,"turn")
+end)
+
+test("approval replies are single-use and die with stop and disconnect",function()
+  local approvals={}
+  local h=harness({on_approval=function(request,reply) approvals[#approvals+1]={request=request,reply=reply} end})
+  h:open(); h:start()
+  approval_request(h,"item/commandExecution/requestApproval",{command="a"},"a1")
+  local reply=approvals[1].reply
+  h.client:stop()
+  local answered=sent_to(h,"a1"); eq(answered.result.decision,"cancel")
+  eq(reply("accept"),false)
+  approval_request(h,"execCommandApproval",{conversationId="thread"},"a2")
+  eq(#approvals,1,"request arrived after stop")
+  h:complete()
+  h:start("turn2")
+  approval_request(h,"item/fileChange/requestApproval",{turnId="turn2"},"a3")
+  eq(#approvals,2)
+  h.ws:event(WebSocketMessageType.CLOSE)
+  eq(approvals[2].reply("accept"),false)
+end)
+
 for _,case in ipairs(tests) do
   local ok,err=xpcall(case[2],debug.traceback)
   if ok then passed=passed+1; print("PASS " .. case[1])

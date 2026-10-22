@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import http from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
@@ -309,7 +309,55 @@ test('readAccount rejects unreadable, malformed and out-of-schema files', async 
   }
   await writeFile(file, JSON.stringify(base));
   assert.deepEqual(readAccount(file), { mode: 'custom', codexHome: directory,
-    baseUrl: '', apiKey: '', models: [] });
+    baseUrl: '', apiKey: '', models: [], access: 'canvas', workspace: '', reviewer: 'user' });
+});
+
+test('readAccount validates optional access fields and defaults them', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-access-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'providers.json');
+  const base = { version: 1, mode: 'default', codexHome: dir, baseUrl: '', apiKey: '', models: [] };
+  await writeFile(file, JSON.stringify(base));
+  const legacy = readAccount(file);
+  assert.equal(legacy.access, 'canvas'); assert.equal(legacy.workspace, ''); assert.equal(legacy.reviewer, 'user');
+  await writeFile(file, JSON.stringify({ ...base, access: 'workspace', workspace: dir, reviewer: 'auto_review' }));
+  const full = readAccount(file);
+  assert.equal(full.access, 'workspace'); assert.equal(full.workspace, dir); assert.equal(full.reviewer, 'auto_review');
+  for (const bad of [{ access: 'vault' }, { access: 'workspace' },
+    { access: 'workspace', workspace: 'relative' }, { workspace: 'rel' }, { reviewer: 'robot' }]) {
+    await writeFile(file, JSON.stringify({ ...base, ...bad }));
+    assert.throws(() => readAccount(file), /账户配置无效/);
+  }
+});
+
+test('launchFor re-enables file tools only beyond the canvas level', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-launch-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const disabled = args => args.filter((arg, i) => args[i - 1] === '-c' && /=false$/.test(arg));
+  const canvas = launchFor({ mode: 'custom', codexHome: dir, access: 'canvas' }, {});
+  const canvasText = canvas.args.join(' ');
+  assert.match(canvasText, /features\.shell_tool=false/);
+  assert.match(canvasText, /features\.unified_exec=false/);
+  assert.match(canvasText, /features\.view_image=false/);
+  for (const access of ['read', 'workspace', 'full']) {
+    const home = path.join(dir, access);
+    const plan = launchFor({ mode: 'custom', codexHome: home, access, workspace: home }, {});
+    const text = plan.args.join(' ');
+    assert.equal(text.includes('features.shell_tool'), false, access);
+    assert.equal(text.includes('features.unified_exec'), false, access);
+    assert.equal(text.includes('features.view_image'), false, access);
+    assert.match(text, /features\.multi_agent=false/);
+    assert.match(text, /windows\.sandbox="unelevated"/, `missing windows sandbox override for ${access}`);
+  }
+  const configured = path.join(dir, 'configured');
+  await mkdir(configured, { recursive: true });
+  await writeFile(path.join(configured, 'config.toml'), '[windows]\nsandbox = "elevated"\n');
+  const kept = launchFor({ mode: 'custom', codexHome: configured, access: 'read', workspace: configured }, {});
+  assert.equal(kept.args.join(' ').includes('windows.sandbox'), false);
+  const plan = launchFor({ mode: 'default', access: 'read' }, {});
+  assert.match(plan.args.join(' '), /features\.multi_agent=false/);
+  assert.equal(plan.args.join(' ').includes('features.shell_tool'), false);
+  assert.equal(plan.args.join(' ').includes('windows.sandbox'), false, 'default mode must not force a sandbox');
 });
 
 test('launchFor default keeps the user home, strips the key and adds lean overrides', () => {

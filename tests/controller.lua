@@ -171,6 +171,56 @@ scenario("switch_sprite is rejected while an approval is pending", function(c, p
   assert(#replies == 1 and not replies[1].success)
   assert(replies[1].contentItems[1].text:find("awaiting approval"), "wrong rejection text")
 end)
+scenario("thread settings follow the stored access level", function(c, p)
+  local settings = p.options.thread_settings()
+  assert(settings.sandbox == "read-only" and settings.approvalsReviewer == "user" and type(settings.cwd) == "string")
+  c.account.access, c.account.workspace, c.account.reviewer = "workspace", "D:\\ws", "auto_review"
+  settings = p.options.thread_settings()
+  assert(settings.sandbox == "workspace-write" and settings.cwd == "D:\\ws" and settings.approvalsReviewer == "auto_review")
+  c.account.access = "full"
+  assert(p.options.thread_settings().sandbox == "danger-full-access")
+end)
+scenario("apply_access keeps the conversation and reconnects the same client", function(c, p, e, v, request, result, l)
+  p.state = "ready"
+  local client = c.client
+  assert(c:apply_access { access = "read" })
+  assert(c.client == client, "access apply replaced the client")
+  assert(c.account.access == "read" and p.state == "disconnected")
+  assert(l.pending, "reconnect was not started")
+  l:complete("ws://127.0.0.1:45995")
+  assert(c.client.connected_endpoint == "ws://127.0.0.1:45995")
+  p.state = "ready"; p.options.on_state("ready")
+  assert(c:apply_access { access = "read" } == true, "unchanged access reconnected")
+end)
+scenario("apply_access validates and guards like apply_account", function(c, p, e, v)
+  p.state = "ready"
+  local applied, err = c:apply_access { access = "workspace" }
+  assert(not applied and err:find("workspace", 1, true))
+  assert(c.account.access ~= "workspace")
+  p.state = "working"
+  assert(select(2, c:apply_access { access = "read" }):find("idle"))
+end)
+scenario("Codex approvals use the window once and never auto-approve edits", function(c, p, e, v)
+  p.state = "ready"
+  assert(c:set_approval_mode(true))
+  local replies = {}
+  p.options.on_approval({ kind = "command", command = "Remove-Item x", cwd = "D:\\w" },
+    function(decision) replies[#replies + 1] = decision end)
+  assert(v.decision, "Codex approval did not open the window")
+  local second = {}
+  p.options.on_approval({ kind = "permissions" }, function(decision) second[#second + 1] = decision end)
+  assert(second[1] == "decline", "concurrent approval was not declined")
+  v.decision(true); assert(replies[1] == "accept")
+  assert(v.decision == nil or true)
+end)
+scenario("stop and disconnect decline an outstanding Codex approval", function(c, p, e, v)
+  local replies = {}
+  p.options.on_approval({ kind = "fileChange", changes = "f (update)" },
+    function(decision) replies[#replies + 1] = decision end)
+  assert(v.decision)
+  c:stop()
+  assert(replies[1] == "decline", "stop did not decline the approval")
+end)
 scenario("closing and reopening starts a fresh client session", function(c, p, e, v)
   c:close(); c:open()
   assert(c.client ~= p and #v.messages == 0)

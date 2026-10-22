@@ -96,4 +96,35 @@ test("catalog synthesizes picker entries only for a custom model list", function
   assert(#catalog[1].serviceTiers == 0)
 end)
 
+test("access fields default, round-trip and validate independently", function()
+  local file = app.fs.joinPath(tempdir(), "providers.json")
+  local account = { version = 1, mode = "default", codexHome = Account.default_home(),
+    baseUrl = "", apiKey = "", models = {},
+    access = "workspace", workspace = "D:\\work area", reviewer = "auto_review" }
+  assert(Account.save(file, account))
+  local loaded, err = Account.load(file)
+  assert(not err, tostring(err))
+  assert(loaded.access == "workspace" and loaded.workspace == "D:\\work area" and loaded.reviewer == "auto_review")
+  -- Files written before the fields existed still load with canvas defaults.
+  local handle = assert(io.open(file, "wb")); handle:write(
+    '{"version":1,"mode":"default","codexHome":"D:\\\\h","baseUrl":"","apiKey":"","models":[]}'); handle:close()
+  loaded, err = Account.load(file)
+  assert(not err, tostring(err))
+  assert(loaded.access == "canvas" and loaded.workspace == "" and loaded.reviewer == "user")
+  local function base(overrides)
+    local value = { version = 1, mode = "default", codexHome = "D:\\h",
+      baseUrl = "", apiKey = "", models = {} }
+    for key, item in pairs(overrides or {}) do value[key] = item end
+    return value
+  end
+  assert(Account.validate(base()))
+  assert(Account.validate(base { access = "read", reviewer = "auto_review" }))
+  assert(Account.validate(base { access = "full" }))
+  assert(Account.validate(base { access = "workspace", workspace = "D:\\w" }))
+  assert(not Account.validate(base { access = "vault" }))
+  assert(not Account.validate(base { access = "workspace" }))
+  assert(not Account.validate(base { access = "workspace", workspace = "relative\\w" }))
+  assert(not Account.validate(base { reviewer = "robot" }))
+end)
+
 print("account: " .. passed .. " passed")

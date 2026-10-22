@@ -76,6 +76,8 @@ function Timeline.item(item)
   elseif item.type=="commandExecution" then
     return "Tool","commandExecution · " .. tostring(item.status) .. "\n" .. clipped(item.command,6000)
       .. "\n" .. clipped(item.aggregatedOutput,1800)
+  elseif item.type=="imageView" then
+    return "Tool","view_image\n" .. clipped(tostring(item.path),200)
   elseif item.type=="mcpToolCall" then
     return "Tool",tostring(item.server) .. "/" .. tostring(item.tool) .. " · " .. tostring(item.status)
   elseif item.type=="fileChange" then

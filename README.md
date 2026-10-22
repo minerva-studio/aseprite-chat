@@ -19,7 +19,7 @@ The editor extension is Lua. Opening the chat automatically finds or starts a sm
 4. Choose a model, reasoning level and speed in the row above the input. The controls show their selected values without repeated category prefixes. Only supported reasoning levels and Fast tiers are listed; Standard is the initial speed. An initial model selection uses the catalog's recommended model and reasoning default. If startup fails, the message explains the next action; **Retry** searches again without entering a server address.
 5. Open a sprite and send a message. Unsaved sprites work; saving the document first is unnecessary.
 
-The bridge launches `codex app-server --stdio` for each client connection, using the existing Codex configuration and login. It sets the child process's originator to `aseprite_chat` so launch-host overrides cannot mix this extension's history with other clients. Codex's built-in tool surfaces (shell, sub-agents, web search, image tools and similar features) are disabled for every child; the canvas workflow uses only the extension's two tools plus Codex's inline question prompt. Automatic startup looks for native executables on PATH and in the standard Node/Codex desktop installation directories. It validates a per-user service-discovery hint and the conventional port 4500, reuses only an idle compatible bridge (readiness version 3), and otherwise starts its own bridge on an OS-assigned free port. It does not scan or take over arbitrary Codex processes. An automatically started bridge exits after two idle minutes; connected conversations keep it alive.
+The bridge launches `codex app-server --stdio` for each client connection, using the existing Codex configuration and login. It sets the child process's originator to `aseprite_chat` so launch-host overrides cannot mix this extension's history with other clients. Codex's built-in tool surfaces (sub-agents, web search, image generation, apps, plugins and similar features) are disabled for every child. Shell commands and `view_image` are disabled too unless **Settings... > Access** grants file access (see below). Automatic startup looks for native executables on PATH and in the standard Node/Codex desktop installation directories. It validates a per-user service-discovery hint and the conventional port 4500, reuses only an idle compatible bridge (readiness version 3), and otherwise starts its own bridge on an OS-assigned free port. It does not scan or take over arbitrary Codex processes. An automatically started bridge exits after two idle minutes; connected conversations keep it alive.
 
 **Settings... > Manual server (advanced)** is an explicit opt-in for a separately managed compatible bridge. Developer-only manual startup remains available with `npm start`, `CODEX_CLI` and `ASEPRITE_CHAT_PORT`; these are not required in the normal plugin flow.
 
@@ -34,6 +34,32 @@ Aseprite may ask permission to connect to localhost and create/read a temporary 
   - **Base URL** and **API key** are optional. With either set, the child uses a custom `model_provider` speaking the Responses API: requests go to `<Base URL>/responses` with `Authorization: Bearer <key>` (a key with an empty URL targets the official `https://api.openai.com/v1`). With both empty, the custom home's own configuration and login are used instead.
   - The API key is stored **plaintext in `providers.json` only** — never in Aseprite preferences, Codex's `config.toml`, command lines, or logs. Settings shows only a trailing hint; the key entry stays blank to keep the saved key, and **Remove saved key** clears it.
   - **Models** optionally lists model IDs (comma-separated). When non-empty it replaces the server catalog in the picker — Codex's `model/list` always returns its bundled OpenAI entries regardless of provider, which is rarely useful for a custom endpoint. Each listed model is offered with low/medium/high reasoning and Standard speed.
+
+## Canvas tools
+
+The model works through the extension's own tools:
+
+- `read_sprite` returns document metadata (open sprites, layers, frames, palette, tags, slices, cels) and PNG previews. It can select frames by list or tag with no frame limit (several sheets plus a layout when needed), isolate layers without changing the document, crop a region, and overlay a grid. Small pixel art is upscaled with nearest-neighbor.
+- `read_pixels` returns exact pixel values for up to 4096 pixels without an approval.
+- Other open sprites can be read by `spriteId` as references. Edits apply only to the current target; `switch_sprite` activates another open sprite and makes it the target.
+- `execute_lua` proposes edits through the approval flow described below.
+
+Conversations created before a tool was added keep their original tool list, because Codex fixes dynamic tools when a thread starts.
+
+## Access
+
+**Settings... > Access** maps to Codex's own sandbox for the current account. Applying it reconnects and the current conversation continues.
+
+| Level | Codex sandbox | Shell and `view_image` |
+|---|---|---|
+| **Canvas only** (default) | read-only | disabled |
+| **Read files** | read-only | enabled; writes are denied |
+| **Workspace write** | workspace-write, with the chosen workspace folder as the working directory | enabled; writes only inside the workspace (and temp) |
+| **Full access (danger)** | danger-full-access | enabled; no sandbox |
+
+On native Windows without MXC (for example Windows 10 with the `unelevated` sandbox), Codex cannot restrict reads: every level except Canvas only can read any file on the PC, and `view_image` can open any image path. Custom homes without a `[windows] sandbox` setting use `unelevated`.
+
+**Boundary approvals** chooses who decides when Codex asks to cross the sandbox (for example a command requesting escalation): **Ask me** shows an approval window in Aseprite, and **Auto-review** uses Codex's reviewer agent instead. Auto-review runs on the account's model provider; with a provider that cannot produce the reviewer's JSON verdict, requests are denied. **Auto-approve edits** only covers canvas Lua edits, never Codex commands.
 
 ## Working together
 
@@ -62,7 +88,7 @@ The executor exposes the captured `sprite`, native Aseprite `app`, constructors/
 
 Generated scripts must edit only the captured sprite using undoable APIs, without opening, closing, or saving documents. Pixel edits clone a cel image, modify the clone, then assign it back to `cel.image`; directly calling `drawPixel` on an attached image does not create Undo information. The plugin supplies the transaction. A Lua error rolls back undoable operations in that transaction. Undo does not restore arbitrary external side effects.
 
-The supported transport is an IPv4 loopback URL. The bridge accepts the matching native `ws://127.0.0.1:port` Origin (or no Origin), rejects browser origins and Fetch Metadata headers, checks Host, and accepts one client at a time. Each connection owns a separate Codex process; disconnect terminates that process, and reconnection resumes persisted thread state in a fresh process. A changed automatically assigned port preserves the conversation. Remote hosts, TLS setup, and bearer-header authentication are outside this release. Codex shell/file approval requests are declined; the canvas workflow uses the extension's two tools.
+The supported transport is an IPv4 loopback URL. The bridge accepts the matching native `ws://127.0.0.1:port` Origin (or no Origin), rejects browser origins and Fetch Metadata headers, checks Host, and accepts one client at a time. Each connection owns a separate Codex process; disconnect terminates that process, and reconnection resumes persisted thread state in a fresh process. A changed automatically assigned port preserves the conversation. Remote hosts, TLS setup, and bearer-header authentication are outside this release. With **Canvas only**, Codex shell/file approval requests are declined; other access levels route them as described under Access.
 
 ## Development and verification
 
