@@ -53,6 +53,8 @@ local function scenario(name, body, configuration)
       function executor:check(rev) return rev == self.revision, "stale revision" end
       function executor:execute() executed = executed + 1; return { success = true, contentItems = {} } end
       function executor:read() return { success = true, contentItems = {} } end
+      function executor:read_pixels() return { success = true, contentItems = {} } end
+      function executor:switch() return { success = true, contentItems = {} } end
       function executor:dispose() end
       return executor
     end },
@@ -146,6 +148,28 @@ scenario("disconnect invalidates pending approval", function(c, p, e, v, request
   request(); local decide = v.decision; c:disconnect(); decide(true)
   local count, replies = result()
   assert(count == 0 and #replies == 1 and not replies[1].success)
+end)
+scenario("read_pixels and switch_sprite answer without an approval", function(c, p, e, v)
+  local calls, replies = {}, {}
+  function e:read_pixels(args) calls[#calls + 1] = "pixels"; return { success = true, contentItems = {} } end
+  function e:switch(args) calls[#calls + 1] = "switch:" .. tostring(args.spriteId); return { success = true, contentItems = {} } end
+  p.options.on_tool({ threadId = "t", turnId = "u", callId = "c1", tool = "read_pixels",
+    arguments = { x = 0, y = 0, width = 2, height = 2 } }, function(r) replies[#replies + 1] = r end)
+  p.options.on_tool({ threadId = "t", turnId = "u", callId = "c2", tool = "switch_sprite",
+    arguments = { spriteId = 7 } }, function(r) replies[#replies + 1] = r end)
+  p.options.on_tool({ threadId = "t", turnId = "u", callId = "c3", tool = "bogus",
+    arguments = {} }, function(r) replies[#replies + 1] = r end)
+  assert(#replies == 3 and replies[1].success and replies[2].success and not replies[3].success)
+  assert(calls[1] == "pixels" and calls[2] == "switch:7")
+  assert(not v.decision, "a read or switch requested an approval")
+end)
+scenario("switch_sprite is rejected while an approval is pending", function(c, p, e, v, request, result)
+  request(); assert(v.decision, "no approval was pending")
+  local replies = {}
+  p.options.on_tool({ threadId = "t", turnId = "u", callId = "c9", tool = "switch_sprite",
+    arguments = { spriteId = 1 } }, function(r) replies[#replies + 1] = r end)
+  assert(#replies == 1 and not replies[1].success)
+  assert(replies[1].contentItems[1].text:find("awaiting approval"), "wrong rejection text")
 end)
 scenario("closing and reopening starts a fresh client session", function(c, p, e, v)
   c:close(); c:open()

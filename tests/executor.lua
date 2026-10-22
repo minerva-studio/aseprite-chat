@@ -68,14 +68,18 @@ local function preview(result)
   return metadata, image
 end
 
-test("two dynamic tools expose valid function schemas", function()
-  eq(#Executor.tools, 2)
+test("dynamic tools expose valid function schemas", function()
+  eq(#Executor.tools, 4)
   local tools = json.decode(json.encode(Executor.tools))
   eq(tools[1].type, "function"); eq(tools[1].name, "read_sprite")
   eq(tools[1].inputSchema.properties.frame.type, "integer")
-  eq(tools[2].type, "function"); eq(tools[2].name, "execute_lua")
-  eq(tools[2].inputSchema.properties.expectedRevision.type, "integer")
-  eq(#tools[2].inputSchema.required, 3)
+  eq(tools[1].inputSchema.properties.frames.type, "array")
+  eq(tools[1].inputSchema.properties.region.type, "object")
+  eq(tools[2].name, "read_pixels"); eq(#tools[2].inputSchema.required, 4)
+  eq(tools[3].name, "switch_sprite"); eq(tools[3].inputSchema.required[1], "spriteId")
+  eq(tools[4].type, "function"); eq(tools[4].name, "execute_lua")
+  eq(tools[4].inputSchema.properties.expectedRevision.type, "integer")
+  eq(#tools[4].inputSchema.required, 3)
 end)
 
 test("unsaved RGBA metadata and preview preserve live pixels and document", function()
@@ -93,7 +97,7 @@ test("unsaved RGBA metadata and preview preserve live pixels and document", func
   eq(m.layers[1].id, s.layers[1].id); eq(m.layers[1].name, "Live art")
   eq(m.layers[1].type, "image"); eq(m.layers[1].visible, true); eq(m.layers[1].locked, false)
   eq(m.activeLayer, s.layers[1].id); eq(m.selection.x, 1); eq(m.selection.width, 3)
-  eq(image:getPixel(1, 1), red); eq(m.revision, before.revision)
+  eq(image:getPixel(m.scale, m.scale), red); eq(m.revision, before.revision)
   eq(s.filename, file); eq(s.hasAssociatedFile, false); eq(s.cels[1].image:getPixel(1, 1), red)
 end)
 
@@ -365,6 +369,225 @@ test("native JSON tool arguments execute an undoable edit", function()
   eq(s.layers[1].name, "Edited")
   app.undo()
   assert(s.layers[1].name ~= "Edited")
+end)
+
+local function sheet_image(result, index)
+  local item = result.contentItems[1 + (index or 1)]
+  eq(item.type, "inputImage")
+  local bytes = decode64(assert(item.imageUrl:match("^data:image/png;base64,(.+)$")))
+  eq(bytes:sub(1, 8), "\137PNG\r\n\26\n")
+  local width, height = string.unpack(">I4I4", bytes, 17)
+  local path = app.fs.joinPath(app.fs.tempPath, "executor-test-" .. tostring(Uuid()) .. ".png")
+  local file = assert(io.open(path, "wb")); file:write(bytes); file:close()
+  local ok, image = pcall(Image, { fromFile = path })
+  os.remove(path)
+  assert(ok, image)
+  return image, width, height
+end
+
+test("frames, tag and frame selection order applies", function()
+  local s = sprite(8, 4)
+  for i = 2, 4 do s:newEmptyFrame() end
+  local image = Image(8, 4); image:drawPixel(0, 0, app.pixelColor.rgba(9, 9, 9, 255))
+  s:newCel(s.layers[1], 3, image)
+  local tag = s:newTag(2, 3); tag.name = "walk"
+  local e = bound(s)
+  local m = success(e:read { tag = "walk" })
+  eq(#m.selectedFrames, 2); eq(m.selectedFrames[1], 2); eq(m.selectedFrames[2], 3)
+  eq(#m.layout, 2); eq(m.layout[1].frame, 2); eq(m.layout[2].frame, 3)
+  eq(#m.cels, 1); eq(m.cels[1].frame, 3)
+  m = success(e:read { tag = "walk", frames = { 4 } })
+  eq(#m.selectedFrames, 1); eq(m.selectedFrames[1], 4)
+  m = success(e:read { frame = 2 })
+  eq(#m.selectedFrames, 1); eq(m.selectedFrames[1], 2)
+  assert(not e:read({ tag = "missing" }).success)
+  assert(not e:read({ frames = { 0 } }).success)
+  assert(not e:read({ frames = {} }).success)
+end)
+
+test("uncapped many-frame reads tile multiple sheets with a correct layout", function()
+  local s = sprite(60, 500)
+  for _ = 2, 16 do s:newEmptyFrame() end
+  local e = bound(s)
+  local result = e:read { frames = (function() local f = {}; for i = 1, 16 do f[i] = i end; return f end)() }
+  local m = success(result)
+  eq(#m.selectedFrames, 16); eq(#m.layout, 16)
+  local max_sheet = 0
+  for _, cell in ipairs(m.layout) do
+    max_sheet = math.max(max_sheet, cell.sheet)
+    eq(cell.width, m.layout[1].width); eq(cell.height, m.layout[1].height)
+  end
+  assert(max_sheet >= 2, "expected at least two sheets")
+  eq(#result.contentItems, 1 + max_sheet)
+  local image = sheet_image(result, max_sheet)
+  assert(image.width <= 2048 and image.height <= 2048)
+  for _, cell in ipairs(m.layout) do
+    if cell.sheet == max_sheet then
+      local pixel = image:getPixel(cell.x + cell.width - 1, cell.y + cell.height - 1)
+      assert(pixel, "layout cell outside sheet image")
+      break
+    end
+  end
+end)
+
+test("small renders upscale by an integer factor and report scale", function()
+  local s = sprite(16, 16); local e = bound(s)
+  local m = success(e:read {})
+  eq(m.scale, 64); eq(m.preview.width, 1024); eq(m.preview.height, 1024)
+end)
+
+test("region crops to the canvas and an empty region fails", function()
+  local s = sprite(8, 8)
+  s.cels[1].image:drawPixel(2, 2, app.pixelColor.rgba(255, 0, 0, 255))
+  local e = bound(s)
+  local m = success(e:read { region = { x = 2, y = 2, width = 4, height = 4 } })
+  eq(m.preview.width / m.scale, 4); eq(m.preview.height / m.scale, 4)
+  local image = sheet_image(e:read { region = { x = 2, y = 2, width = 4, height = 4 } })
+  eq(image:getPixel(0, 0), app.pixelColor.rgba(255, 0, 0, 255))
+  m = success(e:read { region = { x = 6, y = 6, width = 8, height = 8 } })
+  eq(m.preview.width / m.scale, 2)
+  assert(not e:read({ region = { x = 20, y = 20, width = 4, height = 4 } }).success)
+  assert(not e:read({ region = { x = 0, y = 0, width = 0, height = 4 } }).success)
+end)
+
+test("grid draws only when the upscale factor is at least four", function()
+  local s = sprite(16, 16)
+  s.cels[1].image:drawPixel(0, 0, app.pixelColor.rgba(255, 0, 0, 255))
+  local e = bound(s)
+  local m = success(e:read { grid = 4 })
+  eq(m.grid, 4); eq(m.scale, 64)
+  local image = sheet_image(e:read { grid = 4 })
+  assert(image:getPixel(4 * m.scale, 2) ~= image:getPixel(4 * m.scale - 1, 2), "grid line did not tint")
+  local big = sprite(512, 512); local e2 = bound(big)
+  local m2 = success(e2:read { grid = 4 })
+  eq(m2.grid, "skipped (scale < 4)"); assert(m2.scale < 4)
+end)
+
+test("layer isolation renders a hidden layer without touching the document", function()
+  local s = sprite(4, 4)
+  local hidden = s:newLayer(); hidden.isVisible = false
+  local image = Image(4, 4); image:drawPixel(0, 0, app.pixelColor.rgba(0, 255, 0, 255))
+  s:newCel(hidden, 1, image)
+  local e = bound(s)
+  local revision = e:metadata().revision
+  local m = success(e:read { layers = { hidden.id } })
+  eq(m.layers[2].visible, false)
+  assert(not hidden.isVisible, "isolation changed layer visibility")
+  eq(e:metadata().revision, revision, "isolation staled the target")
+  local rendered = sheet_image(e:read { layers = { hidden.id } })
+  eq(rendered:getPixel(0, 0), app.pixelColor.rgba(0, 255, 0, 255))
+  assert(not e:read({ layers = { 9999 } }).success)
+end)
+
+test("layer isolation converts indexed and gray cels through their palettes", function()
+  local s = sprite(4, 4, ColorMode.INDEXED)
+  s.palettes[1]:setColor(1, Color { r = 255, g = 0, b = 0, a = 255 })
+  s.palettes[1]:setColor(2, Color { r = 0, g = 255, b = 0, a = 255 })
+  s.cels[1].image:drawPixel(0, 0, 1); s.cels[1].image:drawPixel(1, 0, 2)
+  local e = bound(s)
+  local image = sheet_image(e:read { layers = { s.layers[1].id } })
+  eq(image:getPixel(0, 0), app.pixelColor.rgba(255, 0, 0, 255))
+  eq(image:getPixel(image.width // 4, 0), app.pixelColor.rgba(0, 255, 0, 255))
+  eq(app.pixelColor.rgbaA(image:getPixel(image.width // 2, 0)), 0, "transparent index did not stay transparent")
+  local pixels = success(e:read_pixels { x = 0, y = 0, width = 2, height = 1 })
+  eq(pixels.format, "rgba"); eq(pixels.rows[1][1], "#ff0000ff"); eq(pixels.rows[1][2], "#00ff00ff")
+  local g = sprite(4, 4, ColorMode.GRAY)
+  g.cels[1].image:drawPixel(0, 0, app.pixelColor.graya(200, 255))
+  e:bind(g, 1, g.layers[1])
+  local gray = sheet_image(e:read { layers = { g.layers[1].id } })
+  eq(gray:getPixel(0, 0), app.pixelColor.rgba(200, 200, 200, 255))
+end)
+
+test("read_pixels composites visible layers and reads single-layer cel pixels", function()
+  local s = sprite(8, 8)
+  s.cels[1].image:drawPixel(1, 1, app.pixelColor.rgba(10, 20, 30, 255))
+  local e = bound(s)
+  local data = success(e:read_pixels { x = 0, y = 0, width = 4, height = 4 })
+  eq(data.format, "rgba"); eq(data.rows[2][2], "#0a141eff"); eq(data.rows[1][1], "#00000000")
+  data = success(e:read_pixels { x = 1, y = 1, width = 2, height = 2, layer = s.layers[1].id })
+  eq(data.rows[1][1], "#0a141eff"); eq(data.layer, s.layers[1].id)
+  data = success(e:read_pixels { x = 6, y = 6, width = 4, height = 4 })
+  eq(data.rows[4][4], "#00000000", "out-of-canvas pixels must be transparent")
+end)
+
+test("read_pixels returns palette indices and gray channels per layer", function()
+  local s = sprite(4, 4, ColorMode.INDEXED)
+  s.cels[1].image:drawPixel(0, 0, 3)
+  local e = bound(s)
+  local data = success(e:read_pixels { x = 0, y = 0, width = 2, height = 2, layer = s.layers[1].id })
+  eq(data.format, "index"); eq(data.rows[1][1], 3); eq(data.rows[2][2], 0)
+  local g = sprite(4, 4, ColorMode.GRAY)
+  g.cels[1].image:drawPixel(0, 0, app.pixelColor.graya(200, 255))
+  e:bind(g, 1, g.layers[1])
+  data = success(e:read_pixels { x = 0, y = 0, width = 2, height = 2, layer = g.layers[1].id })
+  eq(data.format, "gray"); eq(data.rows[1][1], "#c8ff"); eq(data.rows[2][2], "#0000")
+  local composite = success(e:read_pixels { x = 0, y = 0, width = 1, height = 1 })
+  eq(composite.format, "rgba")
+end)
+
+test("read_pixels enforces the 4096 cell cap and keeps the revision", function()
+  local s = sprite(8, 8); local e = bound(s)
+  local revision = e:metadata().revision
+  assert(not e:read_pixels({ x = 0, y = 0, width = 65, height = 64 }).success)
+  assert(not e:read_pixels({ x = 0, y = 0, width = 4096, height = 2 }).success)
+  assert(e:read_pixels({ x = 0, y = 0, width = 64, height = 64 }).success)
+  eq(e:metadata().revision, revision)
+end)
+
+test("openSprites lists documents and never feeds the observation signature", function()
+  local s = sprite()
+  local e = bound(s)
+  e:metadata()
+  local other = sprite(4, 4)
+  local seen = {}
+  for _, entry in ipairs(e:metadata().openSprites) do seen[entry.spriteId] = entry end
+  assert(seen[s.id].isTarget and not seen[other.id].isTarget)
+  assert(not e.observed:find("openSprites", 1, true), "openSprites leaked into the signature")
+  local other_id = other.id
+  other:close()
+  local open = e:metadata().openSprites
+  for _, entry in ipairs(open) do assert(entry.spriteId ~= other_id, "closed sprite still listed") end
+end)
+
+test("tags and slices feed metadata and the observation signature", function()
+  local s = sprite(); local e = bound(s)
+  local m = e:metadata(); eq(#m.tags, 0); eq(#m.slices, 0)
+  local revision = m.revision
+  local tag = s:newTag(1, 1); tag.name = "walk"
+  local m2 = e:metadata()
+  assert(m2.revision > revision, "tag change did not bump the revision")
+  eq(m2.tags[1].name, "walk"); eq(m2.tags[1].fromFrame, 1); eq(m2.tags[1].toFrame, 1)
+  local slice = s:newSlice(Rectangle(1, 1, 3, 2)); slice.name = "cut"
+  local m3 = e:metadata()
+  assert(m3.revision > m2.revision, "slice change did not bump the revision")
+  eq(m3.slices[1].name, "cut"); eq(m3.slices[1].bounds.width, 3)
+  assert(e:read({}).success)
+end)
+
+test("a non-target sprite reads without a revision and defaults to frame 1", function()
+  local s = sprite(); local e = bound(s)
+  local other = sprite(4, 4); other:newEmptyFrame()
+  local other_id = other.id
+  local m = success(e:read { spriteId = other_id })
+  eq(m.target, false); eq(m.revision, nil); eq(m.frame, 1)
+  assert(m.openSprites and #m.openSprites >= 2)
+  local owned = success(e:read { spriteId = s.id })
+  eq(owned.target, true); assert(owned.revision)
+  assert(not e:read({ spriteId = 99999 }).success)
+  other:close()
+  assert(not e:read({ spriteId = other_id }).success)
+end)
+
+test("switch_sprite activates and rebinds the target with a fresh revision", function()
+  local s = sprite(); local e = bound(s)
+  local older = e:metadata().revision
+  local other = sprite(4, 4)
+  local m = success(e:switch { spriteId = other.id })
+  eq(app.sprite, other)
+  eq(m.spriteId, other.id); assert(m.revision > older)
+  eq(e.sprite, other); eq(e.frame.frameNumber, 1)
+  assert(e:check(m.revision))
+  assert(not e:switch({ spriteId = 424242 }).success)
 end)
 
 for _, item in ipairs(tests) do

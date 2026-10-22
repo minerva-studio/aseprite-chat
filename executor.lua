@@ -5,12 +5,55 @@ Executor.__index = Executor
 Executor.tools = {
   {
     type = "function", name = "read_sprite",
-    description = "Inspect the bound live, possibly unsaved Aseprite sprite and its current revision. " ..
-      "Returns JSON metadata and a rendered PNG preview capped to 1024 pixels. " ..
-      "The optional 1-based frame selects the preview only; it does not change the captured editing context.",
+    description = "Inspect a live, possibly unsaved Aseprite sprite. Returns JSON metadata " ..
+      "(openSprites, palette, tags, slices, layers, cels for the rendered frames) and rendered PNG " ..
+      "previews (one image per sheet when several frames are rendered). Reading the editing target " ..
+      "returns the current revision; another open sprite from openSprites is read-only and has no " ..
+      "revision. Options: spriteId (open sprite id), frame, frames (array of 1-based frames, no cap), " ..
+      "tag (tag name), layers (array of layer ids; group ids include their children and selected " ..
+      "layers render in isolation without changing the document), region {x,y,width,height} to crop, " ..
+      "grid (source-pixel spacing, drawn when the preview scale is 4 or more).",
     inputSchema = {
-      type = "object", properties = { frame = { type = "integer", minimum = 1 } },
+      type = "object", properties = {
+        spriteId = { type = "integer", minimum = 1 },
+        frame = { type = "integer", minimum = 1 },
+        frames = { type = "array", items = { type = "integer", minimum = 1 } },
+        tag = { type = "string", minLength = 1 },
+        layers = { type = "array", items = { type = "integer", minimum = 1 } },
+        region = { type = "object", properties = {
+          x = { type = "integer", minimum = 0 }, y = { type = "integer", minimum = 0 },
+          width = { type = "integer", minimum = 1 }, height = { type = "integer", minimum = 1 } },
+          required = { "x", "y", "width", "height" }, additionalProperties = false },
+        grid = { type = "integer", minimum = 1 }
+      },
       required = json.decode("[]"), additionalProperties = false
+    }
+  },
+  {
+    type = "function", name = "read_pixels",
+    description = "Read exact pixel values of a small region (width*height must not exceed 4096). " ..
+      "Without layer, returns the composited visible layers as #rrggbbaa hex strings. With layer " ..
+      "(a layer id), returns that layer's cel pixels in sprite coordinates, transparent outside " ..
+      "the cel: palette indices for INDEXED sprites, #vvaa for GRAY, #rrggbbaa for RGB. " ..
+      "Optional spriteId and frame; no approval or revision required.",
+    inputSchema = {
+      type = "object", properties = {
+        spriteId = { type = "integer", minimum = 1 },
+        frame = { type = "integer", minimum = 1 },
+        layer = { type = "integer", minimum = 1 },
+        x = { type = "integer", minimum = 0 }, y = { type = "integer", minimum = 0 },
+        width = { type = "integer", minimum = 1 }, height = { type = "integer", minimum = 1 }
+      }, required = { "x", "y", "width", "height" }, additionalProperties = false
+    }
+  },
+  {
+    type = "function", name = "switch_sprite",
+    description = "Move the editing target to another open sprite by its openSprites spriteId. " ..
+      "Activates it in the editor and rebinds the canvas context; returns its metadata with a new " ..
+      "revision. Later execute_lua edits and read_sprite previews apply to the new target.",
+    inputSchema = {
+      type = "object", properties = { spriteId = { type = "integer", minimum = 1 } },
+      required = { "spriteId" }, additionalProperties = false
     }
   },
   {
@@ -112,12 +155,170 @@ local function pixel_digest(image)
   return string.format("%016x", hash)
 end
 
-local function preview(sprite, frame)
+local function mode_name(colorMode)
+  return colorMode == ColorMode.RGB and "RGB" or (colorMode == ColorMode.INDEXED and "INDEXED" or "GRAY")
+end
+
+local function rgba_hex(pixel)
+  return string.format("#%02x%02x%02x%02x", app.pixelColor.rgbaR(pixel),
+    app.pixelColor.rgbaG(pixel), app.pixelColor.rgbaB(pixel), app.pixelColor.rgbaA(pixel))
+end
+
+local function open_sprite(id)
+  for _, sprite in ipairs(app.sprites) do
+    if sprite.id == id then return sprite end
+  end
+end
+
+-- The open-document list is informational only; it never feeds the revision signature.
+local function open_sprites(target)
+  local list = {}
+  for _, sprite in ipairs(app.sprites) do
+    list[#list + 1] = {
+      spriteId = sprite.id, filename = sprite.filename, width = sprite.width, height = sprite.height,
+      colorMode = mode_name(sprite.colorMode), frameCount = #sprite.frames, isTarget = sprite == target
+    }
+  end
+  return list
+end
+
+local function find_layer(layers, id)
+  for i = 1, #layers do
+    local layer = layers[i]
+    if layer.id == id then return layer end
+    if layer.isGroup then
+      local found = find_layer(layer.layers, id)
+      if found then return found end
+    end
+  end
+end
+
+-- Collect selected image layers in paint order; a selected group includes its children.
+local function selected_layers(sprite, ids)
+  local wanted, known = {}, {}
+  for _, id in ipairs(ids) do
+    assert(integer(id) and id >= 1, "layers must contain 1-based layer ids.")
+    wanted[id] = true
+  end
+  assert(next(wanted) ~= nil, "layers must not be empty.")
+  local function mark(layers)
+    for i = 1, #layers do
+      local layer = layers[i]
+      known[layer.id] = true
+      if layer.isGroup then mark(layer.layers) end
+    end
+  end
+  mark(sprite.layers)
+  for id in pairs(wanted) do assert(known[id], "Unknown layer id: " .. tostring(id)) end
+  local out = {}
+  local function collect(layers, inherited)
+    for i = 1, #layers do
+      local layer = layers[i]
+      local selected = inherited or wanted[layer.id] == true
+      if layer.isGroup then collect(layer.layers, selected)
+      elseif selected then out[#out + 1] = layer end
+    end
+  end
+  collect(sprite.layers, false)
+  for _, layer in ipairs(out) do
+    assert(not layer.isTilemap, "Tilemap layers cannot be rendered in isolation; omit layers.")
+  end
+  return out
+end
+
+local function render_frame(sprite, frame_number)
   local image = Image(sprite.width, sprite.height, ColorMode.RGB)
-  image:drawSprite(sprite, frame)
-  local scale = math.min(1, 1024 / math.max(image.width, image.height))
-  local width, height = math.max(1, math.floor(image.width * scale)), math.max(1, math.floor(image.height * scale))
-  if scale < 1 then image:resize(width, height) end
+  image:drawSprite(sprite, frame_number)
+  return image
+end
+
+-- Compose the selected layers manually; visibility and other document state never change.
+local function render_layers(sprite, frame_number, layers)
+  local image = Image(sprite.width, sprite.height, ColorMode.RGB)
+  for _, layer in ipairs(layers) do
+    local cel = layer:cel(frame_number)
+    if cel and cel.image then
+      image:drawImage(cel.image, cel.position,
+        math.floor(cel.opacity * layer.opacity / 255), layer.blendMode)
+    end
+  end
+  return image
+end
+
+local function crop(image, region, sprite)
+  local x = math.max(0, region.x)
+  local y = math.max(0, region.y)
+  local x2 = math.min(sprite.width, region.x + region.width)
+  local y2 = math.min(sprite.height, region.y + region.height)
+  assert(x2 > x and y2 > y, "Region is outside the canvas.")
+  local out = Image(x2 - x, y2 - y, ColorMode.RGB)
+  out:drawImage(image, Point(-x, -y))
+  return out
+end
+
+-- Small renders upscale by an integer factor; oversized renders downscale to the
+-- 1024 preview cap, and a row of cells must always fit one 2048 sheet width.
+local function choose_scale(w, h, n)
+  local cols = math.ceil(math.sqrt(n))
+  local scale
+  if math.max(w, h) > 1024 then
+    scale = 1024 / math.max(w, h)
+  else
+    scale = math.max(1, math.floor(1024 / math.max(w, h)))
+    while scale > 1 and cols * (w * scale + 1) - 1 > 2048 do scale = scale - 1 end
+  end
+  if cols * (math.floor(w * scale) + 1) - 1 > 2048 then
+    scale = math.min(scale, (2049 - cols) / (cols * w))
+  end
+  return scale
+end
+
+local function rescale(image, scale)
+  if scale == 1 then return end
+  image:resize(math.max(1, math.floor(image.width * scale)),
+    math.max(1, math.floor(image.height * scale)))
+end
+
+-- Tint every Nth source-pixel boundary on an upscaled render with a translucent marker.
+local function apply_grid(image, step)
+  local rgba = app.pixelColor.rgba
+  local R, G, B = app.pixelColor.rgbaR, app.pixelColor.rgbaG, app.pixelColor.rgbaB
+  local function tint(pixel)
+    return rgba((R(pixel) + 255) // 2, (G(pixel) + 64) // 2, (B(pixel) + 255) // 2, 255)
+  end
+  for x = step, image.width - 1, step do
+    for y = 0, image.height - 1 do image:drawPixel(x, y, tint(image:getPixel(x, y))) end
+  end
+  for y = step, image.height - 1, step do
+    for x = 0, image.width - 1 do image:drawPixel(x, y, tint(image:getPixel(x, y))) end
+  end
+end
+
+-- Lay out scaled frame renders in a ceil(sqrt(n))-column grid, splitting rows into
+-- additional 2048-capped sheets when one cannot hold them all.
+local function pack_sheets(renders, frames)
+  local n, cols = #renders, math.ceil(math.sqrt(#renders))
+  local cw, ch = renders[1].width, renders[1].height
+  local rows_per_sheet = math.max(1, math.floor((2048 + 1) / (ch + 1)))
+  local per_sheet = cols * rows_per_sheet
+  local sheets, layout = {}, {}
+  for i, image in ipairs(renders) do
+    local index = math.ceil(i / per_sheet)
+    local pos = i - (index - 1) * per_sheet - 1
+    if not sheets[index] then
+      local remaining = n - (index - 1) * per_sheet
+      local rows = math.min(rows_per_sheet, math.ceil(remaining / cols))
+      sheets[index] = Image(cols * cw + (cols - 1), rows * ch + (rows - 1), ColorMode.RGB)
+    end
+    local col, row = pos % cols, math.floor(pos / cols)
+    local x, y = col * (cw + 1), row * (ch + 1)
+    sheets[index]:drawImage(image, Point(x, y))
+    layout[i] = { sheet = index, frame = frames[i], x = x, y = y, width = cw, height = ch }
+  end
+  return sheets, layout
+end
+
+local function png_data_url(image)
   local path = app.fs.joinPath(app.fs.tempPath, "aseprite-chat-" .. tostring(Uuid()) .. ".png")
   local file
   local ok, encoded = pcall(function()
@@ -133,7 +334,49 @@ local function preview(sprite, frame)
   local removed, why = os.remove(path)
   if not removed and app.fs.isFile(path) then error("Cannot remove temporary preview: " .. tostring(why)) end
   if not ok then error(encoded) end
-  return "data:image/png;base64," .. encoded, { width = width, height = height }
+  return "data:image/png;base64," .. encoded
+end
+
+local function array_of(value, name)
+  local kind = type(value)
+  if kind == "userdata" then
+    local ok, encoded = pcall(json.encode, value)
+    assert(ok and encoded:sub(1, 1) == "[", name .. " must be an array.")
+  elseif kind ~= "table" then error(name .. " must be an array.", 0) end
+  local out = {}
+  for _, item in ipairs(value) do out[#out + 1] = item end
+  return out
+end
+
+-- Frame selection precedence: frames array > tag name > legacy frame > the bound frame.
+local function frames_for(args, sprite, fallback)
+  local count = #sprite.frames
+  if args.frames ~= nil then
+    local out = {}
+    for _, frame in ipairs(array_of(args.frames, "frames")) do
+      assert(integer(frame) and frame >= 1 and frame <= count,
+        "frames must contain 1-based integers within the sprite.")
+      out[#out + 1] = frame
+    end
+    assert(#out > 0, "frames must not be empty.")
+    return out
+  end
+  if args.tag ~= nil then
+    assert(type(args.tag) == "string" and args.tag ~= "", "tag must be a tag name.")
+    for _, tag in ipairs(sprite.tags) do
+      if tag.name == args.tag then
+        local out = {}
+        for frame = tag.fromFrame.frameNumber, tag.toFrame.frameNumber do out[#out + 1] = frame end
+        return out
+      end
+    end
+    error("Unknown tag: " .. args.tag)
+  end
+  local frame = args.frame
+  if frame == nil then frame = fallback end
+  assert(integer(frame) and frame >= 1 and frame <= count,
+    "Frame must be a 1-based integer within the sprite.")
+  return { frame }
 end
 
 local constructors = {
@@ -215,26 +458,49 @@ function Executor:bind(sprite, frame, layer)
   if not ok then self:dispose(); error(err) end
 end
 
---- Observe live native state and publish its revision after signature comparison. Throws for an invalid target.
-function Executor:metadata()
-  local sprite = self.sprite
-  assert(sprite and sprite.isValid, "The target is closed or unbound; inspect again.")
+-- Collect the descriptive half of the metadata. When signed is true, also return
+-- the observation signature; cels/palettes/tags/slices are document state that
+-- bumps the revision, while volatile lists such as openSprites stay outside it.
+function Executor:_observe(sprite, signed)
   local bounds = sprite.selection.bounds
+  local tags = {}
+  for _, tag in ipairs(sprite.tags) do
+    tags[#tags + 1] = { name = tag.name, fromFrame = tag.fromFrame.frameNumber,
+      toFrame = tag.toFrame.frameNumber, aniDir = tag.aniDir }
+  end
+  local slices = {}
+  for _, slice in ipairs(sprite.slices) do
+    local b = slice.bounds
+    slices[#slices + 1] = { name = slice.name,
+      bounds = { x = b.x, y = b.y, width = b.width, height = b.height } }
+  end
+  local palette, palette_size = {}, 0
+  if sprite.palettes[1] then
+    palette_size = #sprite.palettes[1]
+    for i = 0, math.min(255, palette_size - 1) do
+      local color = sprite.palettes[1]:getColor(i)
+      palette[#palette + 1] = string.format("#%02x%02x%02x%02x",
+        color.red, color.green, color.blue, color.alpha)
+    end
+  end
   local data = {
     spriteId = sprite.id, width = sprite.width, height = sprite.height,
-    colorMode = sprite.colorMode == ColorMode.RGB and "RGB" or (sprite.colorMode == ColorMode.INDEXED and "INDEXED" or "GRAY"),
+    colorMode = mode_name(sprite.colorMode),
     filename = sprite.filename, isModified = sprite.isModified, hasAssociatedFile = sprite.hasAssociatedFile,
     frameCount = #sprite.frames, frames = {}, layers = layers_metadata(sprite.layers),
-    frame = self.frame.frameNumber, activeLayer = app.sprite == sprite and app.layer and app.layer.id or nil,
-    selection = { x = bounds.x, y = bounds.y, width = bounds.width, height = bounds.height, empty = sprite.selection.isEmpty }
+    frame = self.sprite == sprite and self.frame.frameNumber or 1,
+    activeLayer = app.sprite == sprite and app.layer and app.layer.id or nil,
+    selection = { x = bounds.x, y = bounds.y, width = bounds.width, height = bounds.height, empty = sprite.selection.isEmpty },
+    palette = palette, paletteSize = palette_size, tags = tags, slices = slices
   }
-  local observation = { metadata = data, cels = {}, palettes = {} }
   -- Aseprite Frame identity is (sprite ID, frame number), not the temporary Lua userdata address.
   local frames = sprite.frames
   for i = 1, #frames do
     local frame = frames[i]
     data.frames[#data.frames + 1] = { spriteId = sprite.id, number = frame.frameNumber, duration = frame.duration }
   end
+  if not signed then return data end
+  local observation = { metadata = data, cels = {}, palettes = {}, tags = tags, slices = slices }
   local cels = sprite.cels
   for i = 1, #cels do
     local cel = cels[i]
@@ -247,35 +513,179 @@ function Executor:metadata()
   end
   local palettes = sprite.palettes
   for p = 1, #palettes do
-    local palette = palettes[p]
+    local palette_doc = palettes[p]
     local colors = {}
-    for i = 0, #palette - 1 do
-      local color = palette:getColor(i)
+    for i = 0, #palette_doc - 1 do
+      local color = palette_doc:getColor(i)
       colors[#colors + 1] = { color.red, color.green, color.blue, color.alpha }
     end
-    observation.palettes[#observation.palettes + 1] = { frame = palette.frame.frameNumber, colors = colors }
+    observation.palettes[#observation.palettes + 1] = { frame = palette_doc.frame.frameNumber, colors = colors }
   end
-  local current = signature(observation)
+  return data, signature(observation)
+end
+
+--- Observe live native state and publish its revision after signature comparison. Throws for an invalid target.
+function Executor:metadata()
+  local sprite = self.sprite
+  assert(sprite and sprite.isValid, "The target is closed or unbound; inspect again.")
+  local data, current = self:_observe(sprite, true)
   if self.observed and self.observed ~= current then self.revision = self.revision + 1 end
   self.observed = current
+  data.openSprites = open_sprites(sprite)
   data.revision = self.revision
   return data
 end
 
---- Return live metadata and an independent RGB PNG preview; never saves or flattens the source document.
+-- Resolve the inspected sprite: without spriteId the bound target is required;
+-- with it any open sprite qualifies, and only the bound target reports a revision.
+function Executor:_sprite_for(args)
+  if args.spriteId == nil then
+    local sprite = self.sprite
+    assert(sprite and sprite.isValid, "The target is closed or unbound; inspect again.")
+    return sprite, true
+  end
+  assert(integer(args.spriteId) and args.spriteId >= 1, "spriteId must be a positive integer.")
+  local sprite = open_sprite(args.spriteId)
+  assert(sprite, "Sprite is not open; use openSprites.")
+  return sprite, self.sprite ~= nil and sprite == self.sprite and sprite.isValid
+end
+
+--- Return live metadata and independent RGB PNG previews; never saves or flattens the source document.
 function Executor:read(args)
   local ok, value = pcall(function()
     assert(args == nil or arguments_object(args), "read_sprite arguments must be an object.")
-    local data = self:metadata()
-    local frame
-    if args then frame = args.frame end
-    if frame == nil then frame = self.frame.frameNumber end
-    assert(integer(frame) and frame >= 1 and frame <= data.frameCount, "Frame must be a 1-based integer within the sprite.")
-    local url, dimensions = preview(self.sprite, frame)
-    data.frame, data.preview = frame, dimensions
+    args = args or {}
+    local sprite, target = self:_sprite_for(args)
+    local data = target and self:metadata() or self:_observe(sprite, false)
+    data.target = target
+    data.openSprites = open_sprites(self.sprite)
+    local frames = frames_for(args, sprite, target and self.frame.frameNumber or 1)
+    local isolated
+    if args.layers ~= nil then isolated = selected_layers(sprite, array_of(args.layers, "layers")) end
+    local region
+    if args.region ~= nil then
+      assert(arguments_object(args.region), "region must be an object.")
+      region = { x = args.region.x, y = args.region.y, width = args.region.width, height = args.region.height }
+      assert(integer(region.x) and integer(region.y) and integer(region.width) and integer(region.height)
+        and region.width >= 1 and region.height >= 1,
+        "region requires integer x, y, width, height.")
+    end
+    if args.grid ~= nil then
+      assert(integer(args.grid) and args.grid >= 1, "grid must be a positive integer.")
+    end
+    local renders = {}
+    for i, frame in ipairs(frames) do
+      local image = isolated and render_layers(sprite, frame, isolated) or render_frame(sprite, frame)
+      if region then image = crop(image, region, sprite) end
+      renders[i] = image
+    end
+    local scale = choose_scale(renders[1].width, renders[1].height, #renders)
+    local grid_skipped = false
+    for _, image in ipairs(renders) do
+      rescale(image, scale)
+      if args.grid then
+        if scale >= 4 then apply_grid(image, args.grid * scale) else grid_skipped = true end
+      end
+    end
+    local sheets, layout = pack_sheets(renders, frames)
+    local seen = {}
+    for _, frame in ipairs(frames) do seen[frame] = true end
+    data.cels = {}
+    for _, cel in ipairs(sprite.cels) do
+      if seen[cel.frameNumber] then
+        data.cels[#data.cels + 1] = { layer = cel.layer.id, frame = cel.frameNumber,
+          x = cel.position.x, y = cel.position.y,
+          width = cel.image.width, height = cel.image.height, opacity = cel.opacity }
+      end
+    end
+    data.frame = frames[1]
+    data.selectedFrames = frames
+    data.scale = scale
+    data.layout = layout
+    if args.grid then data.grid = grid_skipped and "skipped (scale < 4)" or args.grid end
+    data.preview = { width = sheets[1].width, height = sheets[1].height }
     local response = result(true, json.encode(data))
-    response.contentItems[2] = { type = "inputImage", imageUrl = url }
+    for _, sheet in ipairs(sheets) do
+      response.contentItems[#response.contentItems + 1] = { type = "inputImage", imageUrl = png_data_url(sheet) }
+    end
     return response
+  end)
+  return ok and value or result(false, tostring(value))
+end
+
+--- Read exact pixel values without approval or revision; see Executor.tools for the contract.
+function Executor:read_pixels(args)
+  local ok, value = pcall(function()
+    assert(arguments_object(args), "read_pixels arguments must be an object.")
+    local sprite, target = self:_sprite_for(args)
+    local x, y, w, h = args.x, args.y, args.width, args.height
+    assert(integer(x) and integer(y) and integer(w) and integer(h) and w >= 1 and h >= 1
+      and w * h <= 4096, "width*height must not exceed 4096.")
+    local frame = args.frame or (target and self.frame.frameNumber or 1)
+    assert(integer(frame) and frame >= 1 and frame <= #sprite.frames,
+      "Frame must be a 1-based integer within the sprite.")
+    local format, sample
+    if args.layer ~= nil then
+      local layer = find_layer(sprite.layers, args.layer)
+      assert(layer, "Unknown layer id: " .. tostring(args.layer))
+      assert(not layer.isGroup, "layer must name a non-group layer id.")
+      local cel = layer:cel(frame)
+      local image, position = cel and cel.image, cel and cel.position or Point(0, 0)
+      local function pixel_at(sx, sy)
+        if not image then return nil end
+        local ix, iy = sx - position.x, sy - position.y
+        if ix < 0 or iy < 0 or ix >= image.width or iy >= image.height then return nil end
+        return image:getPixel(ix, iy)
+      end
+      if sprite.colorMode == ColorMode.INDEXED then
+        format = "index"
+        local transparent = sprite.transparentColor
+        sample = function(sx, sy) return pixel_at(sx, sy) or transparent end
+      elseif sprite.colorMode == ColorMode.GRAY then
+        format = "gray"
+        sample = function(sx, sy)
+          local pixel = pixel_at(sx, sy)
+          return pixel and string.format("#%02x%02x",
+            app.pixelColor.grayaV(pixel), app.pixelColor.grayaA(pixel)) or "#0000"
+        end
+      else
+        format = "rgba"
+        sample = function(sx, sy)
+          local pixel = pixel_at(sx, sy)
+          return pixel and rgba_hex(pixel) or "#00000000"
+        end
+      end
+    else
+      format = "rgba"
+      local canvas = render_frame(sprite, frame)
+      sample = function(sx, sy)
+        if sx < 0 or sy < 0 or sx >= canvas.width or sy >= canvas.height then return "#00000000" end
+        return rgba_hex(canvas:getPixel(sx, sy))
+      end
+    end
+    local rows = {}
+    for j = 0, h - 1 do
+      local row = {}
+      for i = 0, w - 1 do row[#row + 1] = sample(x + i, y + j) end
+      rows[#rows + 1] = row
+    end
+    return result(true, json.encode { spriteId = sprite.id, frame = frame, layer = args.layer,
+      x = x, y = y, width = w, height = h, format = format, rows = rows })
+  end)
+  return ok and value or result(false, tostring(value))
+end
+
+--- Activate another open sprite and rebind the executor to it, returning fresh metadata.
+function Executor:switch(args)
+  local ok, value = pcall(function()
+    assert(arguments_object(args), "switch_sprite arguments must be an object.")
+    local id = args.spriteId
+    assert(integer(id) and id >= 1, "spriteId must be a positive integer.")
+    local sprite = open_sprite(id)
+    assert(sprite, "Sprite is not open; use openSprites.")
+    if app.sprite ~= sprite then app.sprite = sprite end
+    self:bind(sprite, app.frame, app.layer)
+    return result(true, json.encode(self:metadata()))
   end)
   return ok and value or result(false, tostring(value))
 end

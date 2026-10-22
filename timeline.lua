@@ -6,6 +6,21 @@ local function clipped(text,limit)
   return text:sub(1,(utf8.offset(text,0,limit+1) or 1)-1) .. "\n…"
 end
 
+local function listed(value)
+  local items={}
+  if type(value)=="table" or type(value)=="userdata" then
+    for _,item in ipairs(value) do items[#items+1]=tostring(item) end
+  end
+  return table.concat(items,",")
+end
+
+local function rect(prefix,value)
+  if (type(value)=="table" or type(value)=="userdata") and value.x then
+    return prefix .. tostring(value.x) .. "," .. tostring(value.y)
+      .. " " .. tostring(value.width) .. "x" .. tostring(value.height)
+  end
+end
+
 --- Format one observed local or persisted tool call, omitting image payloads.
 --- This is a display projection; status never grants execution permission.
 function Timeline.tool(tool,args,status,result)
@@ -13,6 +28,19 @@ function Timeline.tool(tool,args,status,result)
   local parts={tostring(tool) .. " · " .. status}
   if type(args.summary)=="string" and args.summary~="" then parts[#parts+1]=clipped(args.summary,400) end
   if args.frame then parts[#parts+1]="Frame: " .. tostring(args.frame) end
+  local labels={}
+  if args.spriteId then labels[#labels+1]="sprite="..tostring(args.spriteId) end
+  if args.tag then labels[#labels+1]="tag="..tostring(args.tag) end
+  if args.frames then labels[#labels+1]="frames="..listed(args.frames) end
+  if args.layers then labels[#labels+1]="layers="..listed(args.layers) end
+  if args.layer then labels[#labels+1]="layer="..tostring(args.layer) end
+  if args.region then labels[#labels+1]=rect("region=",args.region) end
+  if args.grid then labels[#labels+1]="grid="..tostring(args.grid) end
+  if tool=="read_pixels" and args.width then
+    labels[#labels+1]="rect="..tostring(args.x)..","..tostring(args.y)
+      .." "..tostring(args.width).."x"..tostring(args.height)
+  end
+  if #labels>0 then parts[#parts+1]="Args: "..table.concat(labels," · ") end
   if type(args.code)=="string" then parts[#parts+1]="Lua:\n" .. clipped(args.code,6000) end
   local output={}
   for _,item in ipairs(result and result.contentItems or {}) do

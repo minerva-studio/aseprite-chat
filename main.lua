@@ -4,7 +4,10 @@ Controller.__index = Controller
 
 local instructions = [[You are an artist working inside the user's running Aseprite editor.
 Reply concisely in plain text, in the user's language. Do not use Markdown or code fences.
-Use read_sprite to inspect the live unsaved document before every edit; it returns the current revision and a rendered preview.
+Use read_sprite to inspect the live unsaved document before every edit; it returns the current revision and rendered previews (frame/frames/tag/layers/region/grid options).
+Use read_pixels for exact pixel values of a small region; do not spend an execute_lua approval on reads.
+The metadata's openSprites lists every open document; other sprites are read-only references.
+Use switch_sprite with a spriteId to move the editing target to another open sprite; edits apply only to the current target.
 Use execute_lua for edits. Its Lua environment provides sprite, app, Aseprite constructors/constants, and basic Lua libraries.
 Use only short, terminating scripts. Edits must target the captured sprite and be undoable.
 For pixel edits, clone a cel image, modify the clone, then assign cel.image = clone; direct drawPixel on an attached image does not create Undo.
@@ -50,6 +53,17 @@ function Controller:_tool(params, reply)
   self.view:add_message(id,"Tool",self.Timeline.tool(params.tool,args,"Running"),false)
   if params.tool == "read_sprite" then
     local ok, result = pcall(self.executor.read, self.executor, args)
+    respond(ok and result or failure(result))
+    return
+  end
+  if params.tool == "read_pixels" then
+    local ok, result = pcall(self.executor.read_pixels, self.executor, args)
+    respond(ok and result or failure(result))
+    return
+  end
+  if params.tool == "switch_sprite" then
+    if self.pending then respond(failure("Another Lua request is awaiting approval.")); return end
+    local ok, result = pcall(self.executor.switch, self.executor, args)
     respond(ok and result or failure(result))
     return
   end
