@@ -30,10 +30,11 @@ local function paint(gc, text, scroll)
   gc.color = Color { r = 32, g = 34, b = 40 }
   gc:fillRect(Rectangle(0, 0, gc.width, gc.height))
   local line_height = gc:measureText("Mg").height + 3
-  local lines = Chat.wrap(text, math.max(1, gc.width - 16), function(s)
+  local lines = Chat.wrap(text, math.max(1, gc.width - 24), function(s)
     return gc:measureText(s).width
   end)
   scroll.maximum = math.max(0, #lines * line_height + 12 - gc.height)
+  scroll.height = gc.height
   scroll.offset = scroll.follow and scroll.maximum or math.min(scroll.offset, scroll.maximum)
   gc.color = Color { r = 231, g = 233, b = 240 }
   for index, line in ipairs(lines) do
@@ -41,17 +42,63 @@ local function paint(gc, text, scroll)
     if y > -line_height and y < gc.height then gc:fillText(line, 8, y) end
   end
   if scroll.maximum > 0 then
-    local height = math.max(12, gc.height * gc.height / (#lines * line_height + 12))
-    local y = (gc.height - height) * scroll.offset / scroll.maximum
-    gc.color = Color { r = 115, g = 122, b = 139 }
-    gc:fillRect(Rectangle(gc.width - 4, y, 3, height))
-  end
+    local height = math.max(1, gc.height - 4)
+    local thumb_height = math.min(height, math.max(14, height * gc.height / (scroll.maximum + gc.height)))
+    local top = 2 + (height - thumb_height) * scroll.offset / scroll.maximum
+    scroll.track = {x=gc.width-12, y=2, width=10, height=height, thumb_y=top, thumb_height=thumb_height}
+    gc.color = Color {r=48, g=50, b=58}
+    gc:fillRect(Rectangle(scroll.track.x, 2, 10, height))
+    gc.color = scroll.grab and Color {r=170,g=179,b=197} or Color {r=115,g=122,b=139}
+    gc:fillRect(Rectangle(scroll.track.x+1, top, 8, thumb_height))
+  else scroll.track, scroll.grab = nil, nil end
 end
 
-function Chat:_scroll(delta)
-  self.scroll.follow = false
-  self.scroll.offset = math.max(0, math.min(self.scroll.maximum, self.scroll.offset + delta))
-  if self.dialog then self.dialog:repaint() end
+local function scroll_by(scroll, delta)
+  scroll.offset = math.max(0, math.min(scroll.maximum, scroll.offset + delta))
+  scroll.follow = scroll.offset >= scroll.maximum
+end
+
+local function scroll_input(scroll, action, event)
+  if action == "wheel" then
+    scroll_by(scroll, event.deltaY * 30)
+  elseif action == "down" then
+    local track = scroll.track
+    if event.button ~= MouseButton.LEFT or not track or event.x < track.x or event.x >= track.x+track.width
+        or event.y < track.y or event.y >= track.y+track.height then return false end
+    if event.y >= track.thumb_y and event.y < track.thumb_y+track.thumb_height then
+      scroll.grab = (event.y-track.thumb_y)/track.thumb_height
+      scroll.follow = false
+    else scroll_by(scroll, event.y < track.thumb_y and -scroll.height*0.9 or scroll.height*0.9) end
+  elseif action == "move" then
+    local track = scroll.track
+    if scroll.grab == nil or not track or track.height <= track.thumb_height then return false end
+    scroll.offset = math.max(0, math.min(scroll.maximum,
+      (event.y-track.y-scroll.grab*track.thumb_height)/(track.height-track.thumb_height)*scroll.maximum))
+    scroll.follow = false
+  elseif action == "up" then
+    if event.button ~= MouseButton.LEFT or scroll.grab == nil then return false end
+    scroll.grab = nil
+    scroll.follow = scroll.offset >= scroll.maximum
+  elseif action == "key" then
+    local delta = ({ArrowUp=-30, ArrowDown=30, PageUp=-scroll.height*0.9,
+      PageDown=scroll.height*0.9, Home=-scroll.maximum, End=scroll.maximum})[event.code]
+    if not delta then return false end
+    scroll_by(scroll, delta)
+    event:stopPropagation()
+  end
+  return true
+end
+
+-- Both text surfaces share input handling; Aseprite captures the mouse on canvas presses.
+local function add_scroll_canvas(dialog, spec, scroll, text)
+  spec.onpaint = function(ev) paint(ev.context, text(), scroll) end
+  for field, action in pairs {onwheel="wheel", onmousedown="down", onmousemove="move", onmouseup="up", onkeydown="key"} do
+    local input_action = action
+    spec[field] = function(ev)
+      if scroll_input(scroll, input_action, ev) then dialog:repaint() end
+    end
+  end
+  dialog:canvas(spec)
 end
 
 --- Append streaming output or replace it with the server's completed item text.
@@ -69,25 +116,29 @@ end
 --- Clear the local transcript when the user starts a new conversation.
 function Chat:clear()
   self.messages, self.by_id = {}, {}
-  self.scroll.offset, self.scroll.follow = 0, true
+  self.scroll.offset, self.scroll.follow, self.scroll.grab = 0, true, nil
   if self.dialog then self.dialog:repaint() end
 end
 
 --- Update controls from protocol state and the current native editor context.
 function Chat:set_state(state)
   self.state = state
-  if not self.dialog then return end
   local idle = state == "ready"
   local offline = state == "disconnected" or state == "error"
-  self.dialog:modify { id = "status", text = self.approval and "Awaiting approval" or state }
-  self.dialog:modify { id = "connect", enabled = offline }
-  self.dialog:modify { id = "disconnect", enabled = not offline }
-  self.dialog:modify { id = "endpoint", enabled = offline }
-  self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
-  self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
-  self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
-  self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
-  self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
+  if self.dialog then
+    self.dialog:modify { id = "status", text = self.approval and "Awaiting approval" or state }
+    self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
+    self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
+    self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
+    self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
+    self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
+  end
+  if self.settings_dialog then
+    self.settings_dialog:modify { id = "status", text = state }
+    self.settings_dialog:modify { id = "endpoint", enabled = offline }
+    self.settings_dialog:modify { id = "connect", enabled = offline }
+    self.settings_dialog:modify { id = "disconnect", enabled = not offline }
+  end
 end
 
 --- Project the server catalog and persisted selection into native dropdowns.
@@ -132,6 +183,23 @@ function Chat:set_models(models, model, effort)
   self:set_state(self.state)
 end
 
+--- Open connection settings independently; drafts are committed by the controller on Connect.
+function Chat:show_settings()
+  if self.settings_dialog then self.settings_dialog:show {wait=false}; return end
+  local dlg
+  dlg = Dialog {title="Aseprite Chat · Settings", onclose=function()
+    if self.settings_dialog == dlg then self.settings_dialog = nil end
+  end}
+  self.settings_dialog = dlg
+  dlg:entry {id="endpoint", label="Server", text=self.preferences.endpoint or "ws://127.0.0.1:4500"}
+  dlg:label {id="status", label="Status", text=self.state}
+  dlg:button {id="connect", text="Connect", onclick=function() self.callbacks.on_connect(dlg.data.endpoint) end}
+  dlg:button {id="disconnect", text="Disconnect", onclick=self.callbacks.on_disconnect}
+  dlg:button {id="done", text="Done"}
+  self:set_state(self.state)
+  dlg:show {wait=false, autoscrollbars=true}
+end
+
 --- Open or reveal the modeless chat dialog without blocking painting.
 function Chat:show()
   if self.dialog then self.dialog:show { wait = false }; return end
@@ -140,11 +208,13 @@ function Chat:show()
     if self.dialog == dlg then
       self.dialog = nil
       self:dismiss_approval()
+      local settings = self.settings_dialog
+      self.settings_dialog = nil
+      if settings then settings:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
   self.dialog = dlg
-  dlg:entry { id = "endpoint", label = "Server", text = self.preferences.endpoint or "ws://127.0.0.1:4500" }
   dlg:combobox { id = "model", label = "Model", options = {"Connect to load models"}, onchange = function()
     if self.updating_selectors then return end
     local entry = self.models_by_label[dlg.data.model]
@@ -157,23 +227,15 @@ function Chat:show()
     local entry = self.models_by_label[dlg.data.model]
     if entry then self.callbacks.on_settings(entry.model, self.has_efforts and dlg.data.effort or nil) end
   end }
-  dlg:button { id = "connect", text = "Connect", onclick = function()
-    self.callbacks.on_connect(dlg.data.endpoint)
-  end }
-  dlg:button { id = "disconnect", text = "Disconnect", onclick = self.callbacks.on_disconnect }
   dlg:label { id = "status", label = "Status", text = self.state }
   dlg:newrow()
-  dlg:canvas { id = "transcript", width = 360, height = 230,
-    onpaint = function(ev)
+  add_scroll_canvas(dlg, {id="transcript", width=360, height=260, hexpand=true, vexpand=true}, self.scroll,
+    function()
       local parts = {}
       for _, m in ipairs(self.messages) do parts[#parts + 1] = m.role .. ":\n" .. m.text end
-      paint(ev.context, #parts > 0 and table.concat(parts, "\n\n") or "Connect to your local Codex server, then ask about the current sprite.", self.scroll)
-    end,
-    onwheel = function(ev) self:_scroll(ev.deltaY * 30) end }
+      return #parts > 0 and table.concat(parts, "\n\n") or "Open Settings to connect, then ask about the current sprite."
+    end)
   dlg:newrow()
-  dlg:button { text = "Up", onclick = function() self:_scroll(-180) end }
-  dlg:button { text = "Down", onclick = function() self:_scroll(180) end }
-  dlg:button { text = "Latest", onclick = function() self.scroll.follow = true; dlg:repaint() end }
   dlg:entry { id = "input", label = "Message", text = "", focus = true }
   dlg:button { id = "send", text = "Send", focus = true, onclick = function()
     local text = dlg.data.input
@@ -181,6 +243,8 @@ function Chat:show()
   end }
   dlg:button { id = "stop", text = "Stop", onclick = self.callbacks.on_stop }
   dlg:button { id = "new", text = "New Chat", onclick = self.callbacks.on_new_chat }
+  dlg:button { id = "latest", text = "Latest", onclick = function() self.scroll.follow = true; dlg:repaint() end }
+  dlg:button { id = "settings", text = "Settings...", onclick = function() self:show_settings() end }
   self:set_models(self.models, self.selected_model, self.selected_effort)
   dlg:show { wait = false }
 end
@@ -200,12 +264,8 @@ function Chat:request_approval(args, callback)
   dlg = Dialog { title = "Approve Codex Lua", resizeable = true, onclose = function() finish(false) end }
   pending = { dialog = dlg, finish = finish }
   self.approval = pending
-  dlg:canvas { width = 420, height = 280,
-    onpaint = function(ev) paint(ev.context, args.summary .. "\n\n" .. args.code, scroll) end,
-    onwheel = function(ev)
-      scroll.offset = math.max(0, math.min(scroll.maximum, scroll.offset + ev.deltaY * 30))
-      dlg:repaint()
-    end }
+  add_scroll_canvas(dlg, {id="code", width=420, height=280, hexpand=true, vexpand=true}, scroll,
+    function() return args.summary .. "\n\n" .. args.code end)
   dlg:label { text = "Approved Lua runs immediately. Running Lua cannot be interrupted." }
   dlg:newrow()
   dlg:button { id = "approve", text = "Approve once", onclick = function() finish(true) end }
@@ -225,6 +285,10 @@ end
 --- Close owned native dialogs. on_close is reserved for user-initiated closing.
 function Chat:close()
   self:dismiss_approval()
+  self.scroll.grab = nil
+  local settings = self.settings_dialog
+  self.settings_dialog = nil
+  if settings then settings:close() end
   local dlg = self.dialog
   self.dialog = nil
   if dlg then dlg:close() end

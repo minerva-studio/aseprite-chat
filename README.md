@@ -22,7 +22,7 @@ The editor extension is Lua. It connects over WebSocket to a small local Node co
    npm start
    ```
 
-4. Open **View > Aseprite Chat**. Leave Server at `ws://127.0.0.1:4500` and click **Connect**. The **Model** dropdown loads the signed-in account's available models. **Reasoning** lists only the selected model's supported levels. An initial selection uses the catalog's recommended model and reasoning default.
+4. Open **View > Aseprite Chat**, then **Settings...**. Leave Server at `ws://127.0.0.1:4500` and click **Connect**; close settings with **Done**. The main window's **Model** dropdown loads the signed-in account's available models. **Reasoning** lists only the selected model's supported levels. An initial selection uses the catalog's recommended model and reasoning default.
 5. Open a sprite and send a message. Unsaved sprites work; saving the document first is unnecessary.
 
 The bridge launches `codex app-server --stdio` for each client connection, using the existing Codex configuration and login. If the Codex executable is not on Node's PATH, set `CODEX_CLI` to its absolute executable path before `npm start`. Stop any separate test server already occupying port 4500. Set `ASEPRITE_CHAT_PORT` before startup to choose another local port, and enter the matching URL in Aseprite.
@@ -40,7 +40,8 @@ Ask, for example: “Inspect the current sprite and make the highlights on the W
 - **New Chat** starts another conversation. Closing and reopening the chat window starts a fresh client session.
 - Change **Model** or **Reasoning** while idle; the choice is remembered and takes effect on the next message in the same conversation. Both selectors are locked during generation. Changing the server endpoint starts a new conversation.
 - Reconnection refreshes the catalog. If a remembered model or reasoning level is no longer available, select a valid option before sending; another model is not silently substituted. A model without reasoning support displays **Not supported**. If an old reasoning choice needs clearing, **Confirm model selection** lets you explicitly select that model again.
-- Scroll the transcript or code with the mouse wheel; the main transcript also has Up, Down, and Latest controls. Replies are plain text.
+- Scroll the transcript or Lua code with the mouse wheel, drag its right-hand scrollbar, or click the scrollbar track to page. Click the text area to use Page Up/Down, Home/End, and arrow keys. Scrolling up pauses automatic following; reaching the bottom or clicking **Latest** resumes it. Replies are plain text.
+- Server address and Connect/Disconnect live in **Settings...**; model and reasoning stay in the main window. Connection settings reflect the live status, and the address is editable only while disconnected. Closing settings keeps the chat running; closing the chat closes its settings and approval windows too.
 
 ## Editing contract
 

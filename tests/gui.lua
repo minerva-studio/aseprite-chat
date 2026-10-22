@@ -38,7 +38,6 @@ local function finish(ok, reason)
 end
 c:open()
 c.view.dialog:modify { title = "AUTOMATED TEST · Aseprite Chat (" .. mode .. ")" }
-c.view.dialog:modify { id = "endpoint", text = mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500" }
 c:connect(mode == "fixture" and "ws://127.0.0.1:4517" or "ws://127.0.0.1:4500")
 timer = Timer { interval = 0.1, ontick = function()
   local ok, err = xpcall(function()

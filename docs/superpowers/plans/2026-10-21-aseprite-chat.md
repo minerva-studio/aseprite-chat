@@ -55,7 +55,7 @@
 
 **Files:** `main.lua`, `chat.lua`, `package.json`, `tests/chat.lua`, `tests/controller.lua`.
 
-**Interfaces:** `Chat.new(callbacks,preferences)` returns a native view. Callbacks: `on_connect(endpoint)`, `on_settings(model,effort)`, `on_disconnect()`, `on_send(text)`, `on_stop()`, `on_new_chat()`, `on_close()`. Methods: `show()`, `set_state(state)`, `set_models(models,model,effort)`, `add_message(id,role,text,append)`, `request_approval(args,callback)`, `dismiss_approval()`, `close()`. UI owns its own derived transcript. Controller validates every approval again through both client and executor.
+**Interfaces:** `Chat.new(callbacks,preferences)` returns a native view. Callbacks: `on_connect(endpoint)`, `on_settings(model,effort)`, `on_disconnect()`, `on_send(text)`, `on_stop()`, `on_new_chat()`, `on_close()`. Methods: `show()`, `show_settings()`, `set_state(state)`, `set_models(models,model,effort)`, `add_message(id,role,text,append)`, `request_approval(args,callback)`, `dismiss_approval()`, `close()`. UI owns its own derived transcript and separate native settings dialog. Controller validates every approval again through both client and executor.
 
 `main.lua` defines extension `init(plugin)`/`exit(plugin)` and returns a module exposing `create({path,preferences})` for the extension and integration driver. Controller public user actions: `open`, `connect`, `send`, `stop`, `disconnect`, `new_chat`, `close`. `client`, `executor`, and `view` are owned native components, not independently writable state copies.
 
