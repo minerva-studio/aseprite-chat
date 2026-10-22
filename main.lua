@@ -544,6 +544,24 @@ function init(plugin)
       controller:open()
     end
   }
+  plugin:newCommand {
+    id="AsepriteChatSend",title="Aseprite Chat: Send / Steer",group="view_controls",
+    onenabled=function() return controller~=nil and controller.view:can_submit(true) end,
+    onclick=function() if controller then controller.view:submit(true) end end
+  }
+  -- Enter normally plays animation. Route it to chat only while that window
+  -- exists; preserve the editor action after closing chat. Transformation keeps
+  -- its more specific native key context through the non-transformation bindings.
+  plugin:newCommand {
+    id="AsepriteChatEnter",title="Aseprite Chat: Enter",
+    onclick=function()
+      if controller and controller.view.dialog then controller.view:submit(true)
+      else app.command.PlayAnimation() end
+    end
+  }
+  -- The initial menu/key import precedes Lua plugin init, so refresh only after
+  -- these command IDs exist. Refresh queues its reload on the native UI thread.
+  if app.isUIAvailable then app.command.Refresh() end
 end
 
 function exit(plugin)

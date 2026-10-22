@@ -2,7 +2,7 @@
   "name": "aseprite-chat",
   "displayName": "Aseprite Chat",
   "description": "Chat with Codex and edit the current unsaved sprite through a native Lua interface.",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "private": true,
   "engines": { "node": ">=24" },
   "scripts": {
@@ -13,6 +13,9 @@
     "Scripts"
   ],
   "contributes": {
+    "keys": [
+      { "id": "aseprite-chat-enter", "path": "./chat.aseprite-keys" }
+    ],
     "scripts": [
       {
         "path": "./main.lua"

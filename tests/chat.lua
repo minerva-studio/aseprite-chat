@@ -12,17 +12,23 @@ local function measure(text) return utf8.len(text) end
 local function native_view(callbacks, preferences)
   local dialogs = {}
   local env = setmetatable({Timer=function(spec) return {start=function() end,stop=function() end,ontick=spec.ontick} end,Dialog=function(spec)
-    local dialog = {data={},widgets={},buttons={},modifications={},spec=spec,bounds=Rectangle(0,0,500,420)}
+    local dialog = {data={},widgets={},buttons={},modifications={},rows={},row=0,spec=spec,bounds=Rectangle(0,0,500,420)}
     setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
       __index=function(_,method)
       return function(self,widget)
-        if method=="close" then rawset(self,"closed",true); if self.spec.onclose then self.spec.onclose() end
+        if method=="newrow" then rawset(self,"new_row",true)
+        elseif method=="close" then rawset(self,"closed",true); if self.spec.onclose then self.spec.onclose() end
         elseif widget and widget.id then
           local previous=self.data[widget.id]
           if method=="modify" then
             self.modifications[#self.modifications+1]=widget
             for key,value in pairs(widget) do self.widgets[widget.id][key]=value end
-          else self.widgets[widget.id]=widget; widget.kind=method end
+          else
+            if self.last_kind~=method or self.new_row then self.row=self.row+1 end
+            rawset(self,"last_kind",method); rawset(self,"new_row",false)
+            self.rows[widget.id]=self.row
+            self.widgets[widget.id]=widget; widget.kind=method
+          end
           if widget.option or widget.text then self.data[widget.id]=widget.option or widget.text end
           if widget.selected ~= nil then self.data[widget.id]=widget.selected end
           if method=="modify" and widget.option and widget.option~=previous and self.widgets[widget.id].onchange then
@@ -45,13 +51,17 @@ local function native_view(callbacks, preferences)
   function gc:fillText() end
   return view,dialogs,gc
 end
-test("model reasoning and access are native dropdowns, separate from action buttons",function()
+test("model reasoning access and approval use compact native dropdowns",function()
   local view,dialogs=native_view()
   local main=dialogs[1]
   assert(main.widgets.model.kind=="combobox" and main.widgets.effort.kind=="combobox" and main.widgets.access.kind=="combobox")
   assert(main.widgets.model.hexpand==false and main.widgets.effort.hexpand==false and main.widgets.access.hexpand==false)
+  assert(main.widgets.auto_approve.kind=="combobox" and main.widgets.auto_approve.hexpand==false)
+  assert(main.rows.model==main.rows.effort and main.rows.model==main.rows.access and main.rows.model==main.rows.auto_approve,
+    "approval is not on the same native row as the selectors")
   assert(not view.controls.model and not view.controls.effort and not view.controls.access)
-  assert(main.widgets.send.kind=="button" and main.widgets.send.focus==true)
+  assert(not view.controls.auto_approve)
+  assert(main.widgets.send.kind=="button" and main.widgets.send.focus~=true)
   view:close()
 end)
 
@@ -67,7 +77,7 @@ test("composer fits running controls and keeps native Send and guarded Stop",fun
   local rects=view.control_rects
   for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width,"running controls overlap") end
   local stop=rects[#rects]
-  assert(stop.id=="stop" and main.widgets.send.focus==true)
+  assert(stop.id=="stop" and main.widgets.send.focus~=true)
   main.data.input="hello"
   main.widgets.send.onclick()
   assert(sent==1 and main.data.input=="")
@@ -82,16 +92,16 @@ test("native Send padding follows resizing without changing other content rows",
   local main=dialogs[1]
   assert(main.widgets.chat_content.visible==false and main.widgets.send.kind=="button")
   gc.width,gc.height=440,26
-  main.widgets.composer.onpaint {context=gc}; view.layout_timer.ontick(); local narrow=main.widgets.send.label
-  gc.width=640; main.widgets.composer.onpaint {context=gc}; view.layout_timer.ontick(); assert(#main.widgets.send.label>#narrow)
-  gc.width=440; main.widgets.composer.onpaint {context=gc}; view.layout_timer.ontick(); assert(main.widgets.send.label==narrow)
+  main.widgets.transcript.onpaint {context=gc}; view.layout_timer.ontick(); local narrow=main.widgets.send.label
+  gc.width=640; main.widgets.transcript.onpaint {context=gc}; view.layout_timer.ontick(); assert(#main.widgets.send.label>#narrow)
+  gc.width=440; main.widgets.transcript.onpaint {context=gc}; view.layout_timer.ontick(); assert(main.widgets.send.label==narrow)
   assert(not main.widgets.input.label and not main.widgets.transcript.label)
   local timer=view.layout_timer
   view:close(); assert(not view.layout_timer)
   timer.ontick()
 end)
 
-test("settings block Send and Steer without consuming the pending message",function()
+test("background Settings never disable mouse sending while keyboard submission stays guarded",function()
   local sprite=Sprite(1,1)
   local sent=0
   local view,dialogs=native_view({on_send=function() sent=sent+1; return true end})
@@ -101,21 +111,25 @@ test("settings block Send and Steer without consuming the pending message",funct
   main.data.input="pending message"
   assert(main.widgets.send.enabled)
   view:show_settings()
-  assert(not main.widgets.send.enabled,"Settings left the native Enter target enabled")
-  main.widgets.send.onclick()
+  assert(main.widgets.send.enabled,"background Settings disabled mouse Send")
+  assert(not view:can_submit(true))
+  view:submit(true)
   assert(sent==0 and main.data.input=="pending message","Settings allowed the message to be sent")
-  view:set_state("working",true)
-  assert(not main.widgets.send.enabled,"a live turn re-enabled Steer behind Settings")
   main.widgets.send.onclick()
-  assert(sent==0 and main.data.input=="pending message")
+  assert(sent==1 and main.data.input=="")
+  main.data.input="pending steering"
+  view:set_state("working",true)
+  assert(main.widgets.send.enabled and not view:can_submit(true))
+  view:submit(true)
+  assert(sent==1 and main.data.input=="pending steering")
   view.settings_dialog:close()
   assert(main.widgets.send.enabled and main.widgets.send.text=="Steer")
-  main.widgets.send.onclick()
-  assert(sent==1 and main.data.input=="" and main.widgets.input.focus==true)
+  assert(view:submit(true))
+  assert(sent==2 and main.data.input=="" and main.widgets.input.focus==true)
   view:close(); sprite:close()
 end)
 
-test("all owned auxiliary dialogs suspend sending until the last one closes",function()
+test("owned auxiliary dialogs block only shortcut submission until the last one closes",function()
   local sprite=Sprite(1,1)
   local sent=0
   local view,dialogs=native_view({on_send=function() sent=sent+1; return true end,
@@ -133,14 +147,15 @@ test("all owned auxiliary dialogs suspend sending until the last one closes",fun
   for _,case in ipairs(cases) do
     main.data.input="keep draft"
     case.open()
-    assert(not main.widgets.send.enabled,case.field.." left Send enabled")
-    main.widgets.send.onclick()
+    assert(main.widgets.send.enabled,case.field.." disabled mouse Send")
+    assert(not view:can_submit(true))
+    view:submit(true)
     assert(sent==0 and main.data.input=="keep draft",case.field.." allowed sending")
     view:show_settings()
     if case.field=="approval" then view:dismiss_approval() else view[case.field]:close() end
-    assert(not main.widgets.send.enabled,"closing one dialog ignored the remaining Settings window")
+    assert(not view:can_submit(true),"closing one dialog ignored the remaining Settings window")
     view.settings_dialog:close()
-    assert(main.widgets.send.enabled,"closing the last dialog failed to restore Send")
+    assert(main.widgets.send.enabled and view:can_submit(true),"closing the last dialog failed to restore keyboard submission")
   end
   view:set_state("disconnected"); view:show_settings(); view.settings_dialog:close()
   assert(not main.widgets.send.enabled,"closing Settings enabled a disconnected chat")
@@ -268,6 +283,7 @@ test("Fast toggles the advertised tier, locks during work and disappears for uns
   models[1].serviceTiers={}
   view:set_models(models,"sol","low","priority"); view:set_state("ready")
   assert(not view.controls.speed.visible and view.selection_valid and view.selected_tier=="default")
+  assert(main.widgets.composer.visible==false,"unsupported Fast leaves an empty action row")
   view:close()
 end)
 
@@ -851,23 +867,23 @@ test("approval setting projects controller state, reverts rejection, and marks m
   view:set_state("ready")
   view:show_settings()
   local settings=dialogs[1]
-  assert(view.controls.auto_approve and view.controls.auto_approve.text=="Ask before edits" and not view.controls.auto_approve.selected,
+  assert(settings.widgets.auto_approve and settings.data.auto_approve=="Ask before edits" and not view.auto_approve,
     "automatic approval does not default off")
-  assert(not view.controls.auto_approve.label, "approval row adds form label indentation")
-  view.controls.auto_approve.onclick()
-  assert(decisions[1]==true and not view.controls.auto_approve.selected,
+  assert(not settings.widgets.auto_approve.label, "approval row adds form label indentation")
+  settings.data.auto_approve="Auto-approve edits"; settings.widgets.auto_approve.onchange()
+  assert(decisions[1]==true and settings.data.auto_approve=="Ask before edits",
     "rejected controller projection was not restored")
   view:set_approval_mode(true)
-  assert(view.controls.auto_approve.selected and view.controls.auto_approve.text=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
+  assert(settings.data.auto_approve=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
   view:set_state("working")
-  assert(not view.controls.auto_approve.enabled)
-  view.controls.auto_approve.onclick()
+  assert(not settings.widgets.auto_approve.enabled)
+  settings.data.auto_approve="Ask before edits"; settings.widgets.auto_approve.onchange()
   assert(#decisions==1, "disabled approval control still changed controller state")
   view:set_state("ready")
-  view.controls.auto_approve.onclick()
+  settings.data.auto_approve="Ask before edits"; settings.widgets.auto_approve.onchange()
   assert(decisions[2]==false)
   view:set_approval_mode(false)
-  assert(not view.controls.auto_approve.selected and view.controls.auto_approve.text=="Ask before edits")
+  assert(not view.auto_approve and settings.data.auto_approve=="Ask before edits")
   view:close()
 end)
 

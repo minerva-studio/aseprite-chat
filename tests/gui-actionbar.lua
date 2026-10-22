@@ -39,8 +39,8 @@ local ok,err=xpcall(function()
   view:show(); view:set_models(models,"ds","high","priority"); view:set_state("ready")
   assert(not view.controls.speed.visible and not view.controls.stop.visible and view.selection_valid)
   assert(widgets.model.kind=="combobox" and widgets.effort.kind=="combobox" and widgets.access.kind=="combobox")
-  view.controls.auto_approve.onclick(); assert(view.auto_approve and view.controls.auto_approve.selected)
-  view.controls.auto_approve.onclick(); assert(not view.auto_approve)
+  view.dialog:modify {id="auto_approve",option="Auto-approve edits"}; widgets.auto_approve.onchange(); assert(view.auto_approve)
+  view.dialog:modify {id="auto_approve",option="Ask before edits"}; widgets.auto_approve.onchange(); assert(not view.auto_approve)
   view:show_access(); assert(view.access_dialog)
   view.access_dialog:modify {id="access_level",option="Workspace write"}; widgets.access_level.onchange()
   widgets.access_apply.onclick(); assert(view.access_dialog and widgets.access_error.visible)
@@ -71,8 +71,8 @@ local ok,err=xpcall(function()
     view.access_dialog.bounds=Rectangle(bounds.width+20,42,panel.width,panel.height)
   end
   local rects=assert(view.control_rects)
-  assert(rects[1].id=="auto_approve" and not view.controls.send)
-  assert(widgets.send.kind=="button" and widgets.send.focus==true)
+  assert(not view.controls.auto_approve and widgets.auto_approve.kind=="combobox" and not view.controls.send)
+  assert(widgets.send.kind=="button" and widgets.send.focus~=true)
   for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width,"controls overlap") end
   report.controls=rects
   report.mainWidth,report.mainHeight=bounds.width,bounds.height

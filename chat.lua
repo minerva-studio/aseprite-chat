@@ -63,13 +63,24 @@ local function send_caption(state)
   return state=="working" and "Steer" or state=="steering" and "Steering..." or "Send"
 end
 
--- Unhandled Enter propagates across modeless windows. Both the native default
--- button and its callback must reject submission while an owned dialog is open.
-local function can_submit(view)
-  if not view.dialog or view.settings_dialog or view.access_dialog or view.history_dialog
-    or view.rename_dialog or view.approval then return false end
-  return (view.state=="working" and view.can_steer==true)
-    or (view.state=="ready" and view.selection_valid==true and app.sprite~=nil)
+--- Check submission eligibility. Shortcut invocations also reject owned child
+--- windows; a direct click in the main chat remains usable with background settings.
+function Chat:can_submit(shortcut)
+  if not self.dialog then return false end
+  if shortcut and (self.settings_dialog or self.access_dialog or self.history_dialog
+    or self.rename_dialog or self.approval) then return false end
+  return (self.state=="working" and self.can_steer==true)
+    or (self.state=="ready" and self.selection_valid==true and app.sprite~=nil)
+end
+
+--- Submit the native entry through the same path for clicks and registered commands.
+--- Preserve the draft on rejection and return focus to the entry only after acceptance.
+function Chat:submit(shortcut)
+  if not self:can_submit(shortcut) then return false end
+  local dlg=self.dialog
+  if not self.callbacks.on_send(dlg.data.input) then return false end
+  if self.dialog==dlg then dlg:modify {id="input",text="",focus=true} end
+  return true
 end
 
 -- Setting native options deletes the current popup's items. Cache the last
@@ -87,7 +98,7 @@ end
 
 local function paint_composer(gc,view)
   local controls,widths={},{}
-  for _,id in ipairs {"auto_approve","speed","retry","stop"} do
+  for _,id in ipairs {"speed","retry","stop"} do
     local control=view.controls[id]
     if control.visible~=false then
       local width=math.min(132,math.max(28,gc:measureText(control.text).width+16))
@@ -112,6 +123,9 @@ local function paint_composer(gc,view)
     end
     x=x+width+4
   end
+end
+
+local function align_send(gc,view)
   -- The headerless content tab spans the root grid's two columns. Only Send
   -- uses the root label column, so measured padding cannot indent the chat.
   -- Update before relayout to prevent paint/modify recursion on size changes.
@@ -394,21 +408,22 @@ function Chat:set_state(state,can_steer)
     self.dialog:modify {id="effort",enabled=idle and self.has_efforts==true}
     update_control(self,{ id = "speed", visible=self.fast_tier~=nil,enabled=idle and self.fast_tier~=nil,
       selected=self.fast_tier~=nil and self.selected_tier==self.fast_tier })
-    update_control(self,{ id = "auto_approve", text=self.auto_approve and "Auto-approve edits" or "Ask before edits",selected=self.auto_approve,
-      enabled=idle and self.approval==nil })
     local access=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
     local access_caption="Canvas only"
     for _,level in ipairs(access_levels) do if level.id==access.access then access_caption=level.label end end
     local updating=self.updating_selectors
     self.updating_selectors=true
     self.dialog:modify {id="access",option=access_caption,enabled=idle or offline}
+    self.dialog:modify {id="auto_approve",option=self.auto_approve and "Auto-approve edits" or "Ask before edits",
+      enabled=idle and self.approval==nil}
     self.updating_selectors=updating
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
-    self.dialog:modify { id = "send", enabled = can_submit(self),text=send_caption(state) }
+    self.dialog:modify { id = "send", enabled = self:can_submit(),text=send_caption(state) }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     local can_stop=state=="working" or state=="steering" or self.approval~=nil
     update_control(self,{ id = "stop", visible=can_stop or state=="stopping",enabled=can_stop })
     update_control(self,{ id = "retry", visible = offline, enabled = offline })
+    self.dialog:modify {id="composer",visible=self.fast_tier~=nil or can_stop or state=="stopping" or offline}
     self.dialog:repaint()
   end
   if self.rename_dialog then
@@ -828,8 +843,8 @@ function Chat:show()
   end }
   self.dialog = dlg
   self.selector_options={}
-  -- A hidden selector gives the content its own grid; Send remains native in
-  -- the outer grid for its focus-magnet Enter handling and right alignment.
+  -- A hidden selector gives the content its own grid. Send has no focus magnet;
+  -- Enter is routed by a registered command rather than a background button.
   dlg:tab {id="chat_content",text="",visible=false}
   dlg:button {id="history",text="Chats...",onclick=function() self:show_history() end}
   dlg:button {id="new",text="New chat",onclick=self.callbacks.on_new_chat}
@@ -841,7 +856,7 @@ function Chat:show()
   dlg:label {id="status",text=self.state}
   dlg:newrow()
   add_scroll_canvas(dlg,{id="transcript",width=440,height=280,hexpand=true,vexpand=true},self.scroll,
-    function(gc) paint_messages(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
+    function(gc) paint_messages(gc,self); align_send(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
   dlg:newrow()
   dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
   dlg:newrow()
@@ -879,17 +894,18 @@ function Chat:show()
     self:set_state(self.state)
     if not applied then self:add_message("access-error","Error","无法更改访问设置。"..(error_text and "\n"..error_text or ""),false) end
   end}
-  dlg:newrow()
-  self.controls={}
-  local function add(spec) self.controls[spec.id]=spec end
-  add {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
-  add {id="auto_approve",text="Ask before edits",selected=self.auto_approve,onclick=function()
-    if self.state~="ready" or self.approval then self:set_state(self.state); return end
-    local enabled=not self.auto_approve
+  dlg:combobox {id="auto_approve",hexpand=false,options={"Ask before edits","Auto-approve edits"},onchange=function()
+    if self.updating_selectors then return end
+    local enabled=dlg.data.auto_approve=="Auto-approve edits"
+    if self.state~="ready" or self.approval or enabled==self.auto_approve then self:set_state(self.state); return end
     local accepted,error_text=self.callbacks.on_approval_mode(enabled)
     if accepted then self:set_approval_mode(enabled)
     else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
   end}
+  dlg:newrow()
+  self.controls={}
+  local function add(spec) self.controls[spec.id]=spec end
+  add {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
   add {id="speed",text="Fast",visible=false,onclick=function()
     if self.state~="ready" or not self.fast_tier then self:set_state(self.state); return end
     local tier=self.selected_tier=="default" and self.fast_tier or "default"
@@ -926,8 +942,8 @@ function Chat:show()
   dlg:endtabs {selected="chat_content",vexpand=true}
   dlg:newrow()
   self.send_padding=nil
-  dlg:button {id="send",label="",text="Send",focus=true,hexpand=false,onclick=function()
-    if can_submit(self) and self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text="",focus=true} end
+  dlg:button {id="send",label="",text="Send",hexpand=false,onclick=function()
+    self:submit()
   end}
   self:set_models(self.models, self.selected_model, self.selected_effort,self.selected_tier)
   self:set_thread(self.thread_id,self.thread_name)

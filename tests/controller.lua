@@ -247,15 +247,46 @@ end)
 do
   local env = setmetatable({}, { __index = _G })
   assert(loadfile(app.fs.joinPath(root, "main.lua"), "t", env))()
-  local registered
-  env.init { newCommand = function(_, command) registered = command end }
+  local registered={}
+  env.init { newCommand = function(_, command) registered[command.id] = command end }
   local file = assert(io.open(app.fs.joinPath(app.fs.filePath(app.fs.appPath), "data", "gui.xml"), "r"))
   local xml = file:read("*a"); file:close()
   local groups = {}
   for group in xml:gmatch('group="([^"]+)"') do groups[group] = true end
-  assert(registered and registered.id == "AsepriteChat" and groups[registered.group], "chat command must use an existing native menu group")
+  assert(registered.AsepriteChat and groups[registered.AsepriteChat.group], "chat command must use an existing native menu group")
   passed = passed + 1
   print("PASS extension command targets an existing native menu group")
+end
+do
+  local refreshed,animated,sent=0,0,0
+  local fake_app=setmetatable({isUIAvailable=true,command={Refresh=function() refreshed=refreshed+1 end,
+    PlayAnimation=function() animated=animated+1 end}}, {__index=function(_,key) return app[key] end})
+  local env=setmetatable({app=fake_app},{__index=_G})
+  local Main=assert(loadfile(app.fs.joinPath(root,"main.lua"),"t",env))()
+  local allowed=true
+  local view={}
+  function view:can_submit(shortcut) assert(shortcut==true); return self.dialog~=nil and allowed end
+  function view:submit(shortcut) assert(shortcut==true); if self:can_submit(shortcut) then sent=sent+1; return true end; return false end
+  function Main.create() return {view=view,open=function() view.dialog={} end,close=function() view.dialog=nil end} end
+  local commands={}
+  env.init {newCommand=function(_,spec) commands[spec.id]=spec end}
+  assert(commands.AsepriteChatSend and commands.AsepriteChatEnter,"missing registered send/Enter commands")
+  assert(refreshed==1,"extension keys were not reloaded after registering Lua commands")
+  assert(not commands.AsepriteChatSend.onenabled())
+  commands.AsepriteChatSend.onclick(); assert(sent==0)
+  commands.AsepriteChatEnter.onclick(); assert(animated==1 and sent==0)
+  commands.AsepriteChat.onclick()
+  assert(commands.AsepriteChatSend.onenabled())
+  commands.AsepriteChatEnter.onclick(); assert(sent==1 and animated==1)
+  allowed=false
+  assert(not commands.AsepriteChatSend.onenabled())
+  commands.AsepriteChatSend.onclick(); commands.AsepriteChatEnter.onclick()
+  assert(sent==1 and animated==1,"blocked chat Enter escaped to send or animation")
+  allowed=true; commands.AsepriteChatSend.onclick(); assert(sent==2)
+  env.exit()
+  commands.AsepriteChatEnter.onclick(); assert(animated==2 and sent==2)
+  passed=passed+1
+  print("PASS registered Enter routes to guarded chat submission and preserves animation outside chat")
 end
 scenario("dropdown selections validate capabilities and change the next turn without clearing history",function(c,p,e,v)
   assert(p.sent_settings.model=="wire-a" and p.sent_settings.effort=="high")
