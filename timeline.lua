@@ -36,6 +36,11 @@ function Timeline.tool(tool,args,status,result)
   if args.layer then labels[#labels+1]="layer="..tostring(args.layer) end
   if args.region then labels[#labels+1]=rect("region=",args.region) end
   if args.grid then labels[#labels+1]="grid="..tostring(args.grid) end
+  if tool=="export_sprite" then
+    for _,name in ipairs {"format","output","scale","columns","padding","metadata"} do
+      if args[name]~=nil then labels[#labels+1]=name.."="..tostring(args[name]) end
+    end
+  end
   if tool=="read_pixels" and args.width then
     labels[#labels+1]="rect="..tostring(args.x)..","..tostring(args.y)
       .." "..tostring(args.width).."x"..tostring(args.height)

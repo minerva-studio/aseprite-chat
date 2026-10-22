@@ -38,6 +38,10 @@ test("canvas tool arguments project compactly without payload noise",function()
   assert(pixels:find("rect=3,4 16x8",1,true) and pixels:find("layer=9",1,true) and pixels:find("Frame: 2",1,true))
   local switch=Timeline.tool("switch_sprite",{spriteId=5},"Succeeded")
   assert(switch:find("sprite=5",1,true))
+  local export=Timeline.tool("export_sprite",{format="png",output="sheet",scale=2,columns=4,padding=1,metadata=true},"Running")
+  for _,label in ipairs {"format=png","output=sheet","scale=2","columns=4","padding=1","metadata=true"} do
+    assert(export:find(label,1,true),"missing export parameter "..label)
+  end
 end)
 test("history retains turn and item order without executing anything",function()
   local rows=Timeline.history({{id="one",items={{id="u",type="userMessage",content={{type="text",text="Hello"}}},{id="r",type="reasoning",summary={"Check"}},{id="t",type="dynamicToolCall",tool="read_sprite",arguments={},status="completed",success=true},{id="a",type="agentMessage",text="Done"}}}})

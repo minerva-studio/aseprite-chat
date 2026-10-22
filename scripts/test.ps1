@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
 Push-Location -LiteralPath $projectRoot
 try {
-  foreach ($suite in @('protocol', 'executor', 'chat', 'controller', 'launcher', 'timeline', 'account')) {
+  foreach ($suite in @('protocol', 'export', 'executor', 'chat', 'controller', 'launcher', 'timeline', 'account')) {
     $output = & $Aseprite --batch --script "tests/$suite.lua" 2>&1 | Out-String
     Write-Host $output.TrimEnd()
     # Aseprite can report a Lua failure with exit code zero; require the suite's final marker.

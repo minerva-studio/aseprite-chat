@@ -96,7 +96,7 @@ local function preview(result)
 end
 
 test("dynamic tools expose valid function schemas", function()
-  eq(#Executor.tools, 4)
+  eq(#Executor.tools, 5)
   local tools = json.decode(json.encode(Executor.tools))
   eq(tools[1].type, "function"); eq(tools[1].name, "read_sprite")
   eq(tools[1].inputSchema.properties.frame.type, "integer")
@@ -107,6 +107,11 @@ test("dynamic tools expose valid function schemas", function()
   eq(tools[4].type, "function"); eq(tools[4].name, "execute_lua")
   eq(tools[4].inputSchema.properties.expectedRevision.type, "integer")
   eq(#tools[4].inputSchema.required, 3)
+  eq(tools[5].name, "export_sprite")
+  eq(tools[5].inputSchema.properties.output.enum[2], "sheet")
+  eq(tools[5].inputSchema.properties.format.enum[2], "gif")
+  eq(tools[5].inputSchema.properties.scale.minimum, 1)
+  eq(tools[5].inputSchema.properties.path, nil)
 end)
 
 test("unsaved RGBA metadata and preview preserve live pixels and document", function()
@@ -617,9 +622,92 @@ test("switch_sprite activates and rebinds the target with a fresh revision", fun
   assert(not e:switch({ spriteId = 424242 }).success)
 end)
 
+test("export PNG keeps source resolution, alpha and editor state",function()
+  local s=sprite(3,2)
+  local rgba=app.pixelColor.rgba
+  s.cels[1].image:drawPixel(1,1,rgba(12,34,56,128))
+  local e=bound(s)
+  local name,dirty,steps,layer=s.filename,s.isModified,s.undoHistory.undoSteps,app.layer
+  assert(e.export,"export_sprite is not implemented")
+  local data=success(e:export {})
+  eq(data.width,3); eq(data.height,2); eq(data.scale,1)
+  eq(#data.files,1); eq(data.selectedFrames[1],1)
+  local image=Image{fromFile=data.files[1].path}
+  eq(image.width,3); eq(image.height,2); eq(image:getPixel(1,1),rgba(12,34,56,128))
+  eq(app.sprite,s); eq(app.frame.frameNumber,1); eq(app.layer,layer)
+  eq(s.filename,name); eq(s.isModified,dirty); eq(s.undoHistory.undoSteps,steps)
+  e:dispose(); assert(app.fs.isFile(data.files[1].path),"turn completion deleted export")
+  e.exports:clear(); assert(not app.fs.isFile(data.files[1].path))
+end)
+
+test("export shares frame precedence, isolated layers and clipped regions with read",function()
+  local s=sprite(4,3)
+  s:newEmptyFrame(); s:newEmptyFrame()
+  local layer=s.layers[1]
+  for frame=1,3 do
+    local image=Image(4,3,ColorMode.RGB)
+    image:clear(app.pixelColor.rgba(frame*60,0,0,255))
+    if layer:cel(frame) then layer:cel(frame).image=image else s:newCel(layer,frame,image) end
+    s.frames[frame].duration=frame/10
+  end
+  layer.isVisible=false
+  local tag=s:newTag(1,2); tag.name="walk"
+  local e=bound(s,2,layer)
+  assert(e.export,"export_sprite is not implemented")
+  local data=success(e:export {frames={3,1,3},tag="walk",frame=2,layers={layer.id},
+    region={x=2,y=1,width=9,height=8},scale=2})
+  eq(#data.files,3); eq(data.width,4); eq(data.height,4)
+  for i,frame in ipairs {3,1,3} do
+    eq(data.selectedFrames[i],frame)
+    local image=Image{fromFile=data.files[i].path}
+    eq(image:getPixel(0,0),app.pixelColor.rgba(frame*60,0,0,255))
+  end
+  assert(data.files[1].path~=data.files[3].path,"duplicate source frames collided")
+  eq(layer.isVisible,false)
+  local bytag=success(e:export {tag="walk"}); eq(#bytag.files,2)
+  local current=success(e:export {}); eq(current.selectedFrames[1],2)
+end)
+
+test("export reads another open sprite without changing the target",function()
+  local s=sprite(); local e=bound(s)
+  local other=sprite(2,3); app.sprite=s
+  assert(e.export,"export_sprite is not implemented")
+  local data=success(e:export {spriteId=other.id,output="sheet",metadata=true})
+  eq(data.spriteId,other.id); eq(data.target,false); eq(data.revision,nil)
+  eq(e.sprite,s); eq(app.sprite,s); eq(#data.files,2)
+end)
+
+test("export accepts native JSON arguments and propagates encoder errors",function()
+  local s=sprite(2,2); local e=bound(s)
+  assert(e.export,"export_sprite is not implemented")
+  local data=success(e:export(json.decode('{"frame":1,"scale":2}')))
+  eq(data.width,4); eq(data.height,4)
+  function e.exports:write() error("encoding fixture failure") end
+  local failure=e:export {}
+  assert(not failure.success and text(failure):find("encoding fixture failure",1,true))
+end)
+
+test("export rejects unsupported options and unsafe allocations before encoding",function()
+  local s=sprite(); local e=bound(s)
+  assert(e.export,"export_sprite is not implemented")
+  local calls=0
+  function e.exports:write() calls=calls+1; error("unexpected encoding") end
+  for _,args in ipairs {{scale=0},{scale=false},{scale=1.5},{scale=1000000},{format="jpeg"},{format=false},{output=false},
+      {format="gif",output="sheet"},{metadata=true},{columns=2},{padding=1},
+      {output="sheet",columns=0},{output="sheet",columns=false},{output="sheet",padding=false},
+      {output="sheet",padding=-1},{output="sheet",metadata="yes"},
+      {output="sheet",padding=1000000,frames={1,1}},
+      {output="sheet",columns=5,padding=4611686018427387904,frames={1,1,1,1,1}},
+      {frames={}},{region={x=50,y=0,width=1,height=1}},
+      {path="C:/not-allowed.png"},{grid=1}} do
+    assert(not e:export(args).success,"invalid export accepted")
+  end
+  eq(calls,0)
+end)
+
 for _, item in ipairs(tests) do
   local ok, err = xpcall(item[2], debug.traceback)
-  for _, e in ipairs(executors) do e:dispose() end
+  for _, e in ipairs(executors) do e:dispose(); if e.exports then e.exports:clear() end end
   executors = {}
   for _, s in ipairs(owned) do if s.isValid then s:close() end end
   owned = {}

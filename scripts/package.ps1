@@ -1,7 +1,7 @@
 param([string]$OutputPath)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$runtimeFiles = @('package.json', 'package-lock.json', 'main.lua', 'chat.lua', 'chat.aseprite-keys', 'codex.lua', 'executor.lua', 'launcher.lua', 'timeline.lua', 'account.lua', 'scripts/server.mjs', 'scripts/launch.ps1', 'README.md', 'docs/validation.md')
+$runtimeFiles = @('package.json', 'package-lock.json', 'main.lua', 'chat.lua', 'chat.aseprite-keys', 'codex.lua', 'executor.lua', 'export.lua', 'launcher.lua', 'timeline.lua', 'account.lua', 'scripts/server.mjs', 'scripts/launch.ps1', 'README.md', 'docs/validation.md')
 foreach ($file in $runtimeFiles) {
   if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $file) -PathType Leaf)) { throw "Missing runtime file: $file" }
 }

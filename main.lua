@@ -6,6 +6,10 @@ local instructions = [[You are an artist working inside the user's running Asepr
 Reply concisely in plain text, in the user's language. Do not use Markdown or code fences.
 Use read_sprite to inspect the live unsaved document before every edit; it returns the current revision and rendered previews (frame/frames/tag/layers/region/grid options).
 Use read_pixels for exact pixel values of a small region; do not spend an execute_lua approval on reads.
+Use export_sprite for PNG frames, animated GIF or PNG spritesheets with optional JSON; never reconstruct image files from read_pixels.
+Exports encode the live unsaved selection at native resolution (scale=1 by default) without saving or modifying the source.
+Export paths are temporary artifacts, not user destination files. Copy them using Codex shell/file tools under current Access and approvals; Canvas only cannot copy to a project destination.
+Export files survive turn completion and reconnect but are deleted when switching chats/accounts or closing the chat window. Historical paths may be gone; inspect and export again when needed.
 The metadata's openSprites lists every open document; other sprites are read-only references.
 Use switch_sprite with a spriteId to move the editing target to another open sprite; edits apply only to the current target.
 File and project work follows the current Access setting below and Codex's permission approvals.
@@ -30,6 +34,33 @@ end
 function Controller:_message(role, text)
   self.message_id = self.message_id + 1
   self.view:add_message("local-" .. self.message_id, role, tostring(text), false)
+end
+
+-- Consume the writer's cleanup result without blocking a conversation/window transition.
+-- Only the writer owns paths; this timer retries its tracked set, never a second file list.
+function Controller:_clear_exports()
+  if self.export_cleanup_timer then self.export_cleanup_timer:stop(); self.export_cleanup_timer=nil end
+  local attempts=0
+  local function attempt()
+    attempts=attempts+1
+    local ok,errors=self.executor.exports:clear(attempts>1)
+    if not ok then
+      local message="部分导出临时文件未能清理（可能被占用）：\n"..table.concat(errors,"\n")
+      if attempts==1 then message=message.."\n将自动重试；仍失败的文件会保留跟踪，在下次切换聊天或关闭时再试。" end
+      print("Aseprite Chat: "..message)
+      if not self.closed and (attempts==1 or attempts==3) then self:_message("Error",message) end
+    end
+    return ok
+  end
+  if attempt() then return end
+  local timer
+  timer=Timer{interval=1.0,ontick=function()
+    if self.export_cleanup_timer~=timer then return end
+    local done=attempt()
+    if done or attempts>=3 then timer:stop(); self.export_cleanup_timer=nil end
+  end}
+  self.export_cleanup_timer=timer
+  timer:start()
 end
 
 function Controller:_refresh_state()
@@ -74,6 +105,11 @@ function Controller:_tool(params, reply)
   end
   if params.tool == "read_pixels" then
     local ok, result = pcall(self.executor.read_pixels, self.executor, args)
+    respond(ok and result or failure(result))
+    return
+  end
+  if params.tool == "export_sprite" then
+    local ok, result = pcall(self.executor.export, self.executor, args)
     respond(ok and result or failure(result))
     return
   end
@@ -377,6 +413,7 @@ function Controller:connect(endpoint)
     self:set_approval_mode(false)
     self.client = self:_create_client()
     self.view:clear()
+    self:_clear_exports()
   else self.client:disconnect() end
   self.preferences.manual_server = manual
   self.startup_error = nil
@@ -415,6 +452,7 @@ function Controller:open_thread(id)
     self:set_approval_mode(false)
     self.executor:dispose()
     self.view:clear()
+    self:_clear_exports()
     for _,row in ipairs(self.Timeline.history(result.turns)) do self.view:add_message(row.id,row.role,row.text,false) end
     local name=result.thread.name
     if not name or name=="" then name=result.thread.id end
@@ -535,6 +573,7 @@ function Controller:apply_account(draft)
   self:set_approval_mode(false)
   self.client = self:_create_client()
   self.view:clear()
+  self:_clear_exports()
   self:_message("Aseprite", "The Codex account changed; a new conversation started.")
   self:connect(self.preferences.manual_server and self.preferences.endpoint or nil)
   return true
@@ -586,6 +625,7 @@ function Controller:new_chat()
     self:_cancel_pending("New conversation.")
     self.executor:dispose()
     self.view:clear()
+    self:_clear_exports()
   else self:_message("Error", err or "Cannot start a new chat during a turn.") end
 end
 
@@ -593,6 +633,7 @@ end
 function Controller:close()
   self:set_approval_mode(false)
   self:disconnect()
+  self:_clear_exports()
   if self.site_listener then app.events:off(self.site_listener); self.site_listener = nil end
   self.view:close()
   self.closed = true

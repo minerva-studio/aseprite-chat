@@ -47,7 +47,8 @@ local function scenario(name, body, configuration)
       return launcher
     end},
     ["executor.lua"] = { tools = {}, new = function()
-      executor = { revision = 1 }
+      executor = { revision = 1, exports = {cleared=0} }
+      function executor.exports:clear() self.cleared=self.cleared+1; return true,{} end
       function executor:bind() return self:metadata() end
       function executor:metadata() return { revision = self.revision } end
       function executor:check(rev) return rev == self.revision, "stale revision" end
@@ -85,7 +86,14 @@ local function scenario(name, body, configuration)
       return view
     end }
   }
-  local env = setmetatable({ dofile = function(path)
+  local env = setmetatable({ Timer = function(spec)
+    if not configuration.timers then return Timer(spec) end
+    local timer={ontick=spec.ontick,running=false}
+    function timer:start() self.running=true end
+    function timer:stop() self.running=false end
+    configuration.timers[#configuration.timers+1]=timer
+    return timer
+  end, dofile = function(path)
     local module = modules[app.fs.fileName(path)]
     assert(module, "unexpected dependency " .. path)
     return module
@@ -166,6 +174,86 @@ scenario("read_pixels and switch_sprite answer without an approval", function(c,
   assert(calls[1] == "pixels" and calls[2] == "switch:7")
   assert(not v.decision, "a read or switch requested an approval")
 end)
+scenario("export encodes without edit approval and refuses retired turns",function(c,p,e,v)
+  local count,replies=0,{}
+  function e:export(args)
+    count=count+1; assert(args.format=="gif")
+    return {success=true,contentItems={{type="inputText",text="native export"}}}
+  end
+  local params={callId="export",tool="export_sprite",arguments={format="gif"}}
+  p.options.on_tool(params,function(r) replies[#replies+1]=r end)
+  assert(count==1 and replies[1].success,"export was not dispatched")
+  assert(not v.decision,"read-only export requested canvas edit approval")
+  p.allowed=false
+  p.options.on_tool(params,function(r) replies[#replies+1]=r end)
+  assert(count==1 and not replies[2].success,"retired turn exported")
+end)
+scenario("export artifacts survive turns and reconnect but end with the conversation",function(c,p,e)
+  local resources=e.exports
+  p.options.on_cancel("completed"); assert(resources.cleared==0)
+  c:disconnect(); assert(resources.cleared==0)
+  p.state="ready"; c:new_chat(); assert(resources.cleared==1)
+  c:open_thread("other")
+  p.open_history_callback({thread={id="other"},turns={}})
+  assert(resources.cleared==2)
+  c:close(); assert(resources.cleared==3)
+end)
+scenario("changing server identity retires export artifacts",function(c,p,e)
+  local resources=e.exports
+  c:connect("ws://127.0.0.1:45123")
+  assert(resources.cleared==1,"old server artifacts outlived its conversation")
+end)
+local cleanup_timers={}
+scenario("locked exports warn and retry after close without reviving retired callbacks",function(c,p,e,v)
+  local Export=dofile(app.fs.joinPath(root,"export.lua"))
+  local writer=Export.new(); e.exports=writer
+  local output=writer:write({Image(1,1,ColorMode.RGB)},{1},{.1},{})
+  local path=output.files[1].path
+  local remove=os.remove
+  os.remove=function(candidate) if candidate==path then return nil,"locked fixture" end return remove(candidate) end
+  local ok,err=pcall(function()
+    p.state="ready"; c:new_chat()
+    assert(app.fs.isFile(path),"locked file was not retained")
+    assert(#v.messages>0 and v.messages[#v.messages][2]=="Error","cleanup failure was silent")
+    local old=cleanup_timers[#cleanup_timers]
+    assert(old and old.running,"cleanup retry was not scheduled")
+    c:close(); assert(not old.running and c.closed)
+    local current=cleanup_timers[#cleanup_timers]
+    assert(current~=old and current.running)
+    local messages=#v.messages
+    os.remove=remove
+    local fresh=writer:write({Image(1,1,ColorMode.RGB)},{2},{.1},{})
+    old.ontick(); assert(app.fs.isFile(path),"retired cleanup tick acted on current resources")
+    current.ontick()
+    assert(not app.fs.isFile(path) and not current.running and not c.export_cleanup_timer)
+    assert(app.fs.isFile(fresh.files[1].path),"retry deleted an export created after the boundary")
+    assert(#v.messages==messages,"cleanup tick touched a closed UI")
+  end)
+  os.remove=remove; writer:clear(); assert(ok,err)
+end,{timers=cleanup_timers})
+local bounded_timers={}
+scenario("persistent export locks stop retries and remain reachable at the next boundary",function(c,p,e,v)
+  local Export=dofile(app.fs.joinPath(root,"export.lua"))
+  local writer=Export.new(); e.exports=writer
+  local output=writer:write({Image(1,1,ColorMode.RGB)},{1},{.1},{})
+  local path=output.files[1].path
+  local remove,calls=os.remove,0
+  os.remove=function(candidate)
+    if candidate==path then calls=calls+1; return nil,"persistent fixture lock" end
+    return remove(candidate)
+  end
+  local ok,err=pcall(function()
+    p.state="ready"; c:new_chat()
+    local timer=bounded_timers[#bounded_timers]
+    assert(timer,"cleanup retry is missing")
+    timer.ontick(); timer.ontick(); timer.ontick()
+    assert(calls==3 and not timer.running and not c.export_cleanup_timer,"cleanup retries were not bounded")
+    assert(app.fs.isFile(path))
+    os.remove=remove; c:new_chat()
+    assert(not app.fs.isFile(path),"failed cleanup lost ownership at retry exhaustion")
+  end)
+  os.remove=remove; writer:clear(); assert(ok,err)
+end,{timers=bounded_timers})
 scenario("switch_sprite is rejected while an approval is pending", function(c, p, e, v, request, result)
   request(); assert(v.decision, "no approval was pending")
   local replies = {}

@@ -212,7 +212,7 @@ local function paint_messages(gc,view)
       local title=message.role
       if message.role=="Tool" then
         title=message.text:match("^[^\n]+") or "Tool"
-        title=title:gsub("^read_sprite","Read canvas"):gsub("^execute_lua","Edit canvas")
+        title=title:gsub("^read_sprite","Read canvas"):gsub("^execute_lua","Edit canvas"):gsub("^export_sprite","Export sprite")
       elseif message.role=="Summary" then title="Thoughts" end
       if folded then title=(message.expanded and "[-] " or "[+] ")..title end
       local header_height=math.max(base_header_height,gc:measureText(title).height+10)

@@ -43,8 +43,37 @@ The model works through the extension's own tools:
 - `read_pixels` returns exact pixel values for up to 4096 pixels without an approval.
 - Other open sprites can be read by `spriteId` as references. Edits apply only to the current target; `switch_sprite` activates another open sprite and makes it the target.
 - `execute_lua` proposes edits through the approval flow described below.
+- `export_sprite` encodes live selections as PNG frames, animated GIF, or a PNG spritesheet with optional JSON. It returns temporary file paths; destination copies use Codex shell/file tools under the selected Access and approvals. Export does not save or modify the source document.
 
 Conversations created before a tool was added keep their original tool list, because Codex fixes dynamic tools when a thread starts.
+
+### Export parameters
+
+`export_sprite` uses the same `spriteId`, `frame`, `frames`, `tag`, `layers` and `region` selectors as `read_sprite`. Explicit `frames` take precedence over `tag`, then `frame`; the default is the captured frame (frame 1 for another sprite). Explicit lists retain order and duplicates. Tags select their inclusive numeric frame range; playback direction and repeat counts are not expanded. Regions are clipped to the canvas. Without `layers`, visible layers are composited; selected layers render in isolation.
+
+| Parameter | Default | Behavior |
+| --- | --- | --- |
+| `format` | `"png"` | PNG or animated `"gif"` |
+| `output` | `"frames"` | One PNG per selected frame; `"sheet"` packs them into one PNG |
+| `scale` | `1` | Positive integer nearest-neighbor multiplier; no preview resizing or grid |
+| `columns` | `ceil(sqrt(frame count))` | Sheet columns, capped at the number of selected frames |
+| `padding` | `0` | Transparent space between sheet cells; no outer border |
+| `metadata` | `false` | Sheet-only JSON with ordered frame rectangles and durations in milliseconds |
+
+`columns`, `padding` and `metadata` apply only to `output:"sheet"`; GIF cannot be a sheet. Examples:
+
+```json
+{"frame":1}
+{"frames":[1,3,2],"scale":2}
+{"tag":"idle","format":"gif"}
+{"tag":"walk","output":"sheet","columns":4,"padding":1,"metadata":true}
+```
+
+Results include `spriteId`, `selectedFrames`, `scale`, output `width`/`height`, `files[].path` and ordered `frames` entries with source `frame` and source `duration` in milliseconds. PNG/GIF frame entries include their file `path`; sheet entries include `x`, `y`, `width`, `height`. PNG preserves alpha. Native GIF encoding quantizes colors to a palette, supports binary transparency, and has 10 ms timing precision, so encoded GIF durations can differ from the reported source durations. JSON uses an array of `frames`, with `sourceFrame`, `frame:{x,y,w,h}`, `duration`, `sourceSize`, `spriteSourceSize`, `rotated:false` and `trimmed:false`, plus `meta.image`, `meta.size`, `meta.format` and `meta.scale`.
+
+Exports use fresh `aseprite-chat-export-<uuid>` temporary directories. PNGs use ordinal names (`frame-0001.png`), so duplicate source frames cannot overwrite each other. GIF uses `animation.gif`; sheets use `sheet.png` and optional `sheet.json`. Copy these files before switching chats/accounts/server identity or closing the chat window. Turn completion, Stop and reconnect retain artifacts. Historical paths can expire; export again when needed. Cleanup removes only tracked files and empty owned directories. Failed deletions are reported and retried up to three times, with later attempts on a native timer; persistent failures stay tracked for the next cleanup boundary. Retries preserve exports created after that boundary. Abrupt process termination or persistent file locks can leave temporary artifacts; the plugin does not scan or delete untracked directories on startup.
+
+No destination-path argument is accepted. **Canvas only** can encode temporary artifacts but cannot copy them into a project; destination writes require the relevant Codex filesystem access/approval. Do not use `execute_lua` to bypass this. Allocation checks reject exports above 16,777,216 source-frame rendering pixels, scaled-frame pixels or sheet pixels, or above 16384 pixels per output dimension, rather than silently shrinking them. Encoding runs on Aseprite's UI thread; Stop cannot interrupt an export already encoding.
 
 ## Access
 
@@ -127,4 +156,4 @@ The authenticated integration variant is `--script-param mode=live --script test
 
 `tests/gui-steering-live.lua` accepts `--script-param endpoint=ws://127.0.0.1:<test bridge port>` and must run in a disposable editor/profile. It creates its own unsaved sprite, waits for a real edit approval, steers to a no-edit answer, checks the old approval cannot execute, and closes its own editor after writing `work/steering-live-result.json`.
 
-See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), `executor.lua` (document tools), `account.lua` (account file), and `launcher.lua` plus `scripts/launch.ps1` (automatic startup). `tests/live-account.mjs` is an opt-in live check: it drives a real Codex through a temp custom account against a local mock Responses endpoint (or, with `--default-live`, one read-mostly turn against your default home).
+See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), `executor.lua` (document tools), `export.lua` (native encoding and temporary artifacts), `account.lua` (account file), and `launcher.lua` plus `scripts/launch.ps1` (automatic startup). `tests/live-account.mjs` is an opt-in live check: it drives a real Codex through a temp custom account against a local mock Responses endpoint (or, with `--default-live`, one read-mostly turn against your default home).

@@ -1,5 +1,6 @@
 local Executor = {}
 Executor.__index = Executor
+local Export = dofile(app.fs.joinPath(app.fs.filePath(debug.getinfo(1, "S").source:sub(2)), "export.lua"))
 
 --- Dynamic app-server function tools; approval and active-turn validation belong to the controller.
 Executor.tools = {
@@ -74,6 +75,35 @@ Executor.tools = {
         code = { type = "string", minLength = 1 }, summary = { type = "string", minLength = 1 },
         expectedRevision = { type = "integer", minimum = 0 }
       }, required = { "code", "summary", "expectedRevision" }, additionalProperties = false
+    }
+  },
+  {
+    type = "function", name = "export_sprite",
+    description = "Encode native-resolution PNG frames, an animated GIF, or a PNG spritesheet from a live " ..
+      "unsaved sprite without editing or saving the source. Selection matches read_sprite: spriteId, " ..
+      "frames > tag > frame (default captured frame), layers and clipped region. Explicit frames retain " ..
+      "order and duplicates; tags select their numeric range, not playback direction. scale is an integer " ..
+      "pixel multiplier (default 1), with no preview resizing or grid. format png (default) or gif; " ..
+      "output frames (default) or sheet (PNG only). Sheet columns defaults to ceil(sqrt(frame count)), " ..
+      "padding is transparent spacing between cells (default 0), metadata=true adds JSON frame rectangles " ..
+      "and durations in milliseconds. GIF uses native palette conversion, binary transparency and 10ms timing. " ..
+      "Limits: 16,777,216 rendered/output pixels, each dimension <=16384. Returns paths in an owned temporary " ..
+      "directory, not image payloads. Copy files to the requested destination using Codex shell/file tools " ..
+      "under current Access/approvals; never reconstruct image files from read_pixels. Files survive turn " ..
+      "completion/reconnect but are removed when switching chats, accounts or closing the chat window. " ..
+      "No destination path is accepted. Inspect/export again if a historical path no longer exists.",
+    inputSchema = {
+      type = "object", properties = {
+        spriteId = {type="integer",minimum=1}, frame = {type="integer",minimum=1},
+        frames = {type="array",items={type="integer",minimum=1}}, tag = {type="string",minLength=1},
+        layers = {type="array",items={type="integer",minimum=1}},
+        region = {type="object",properties={x={type="integer",minimum=0},y={type="integer",minimum=0},
+          width={type="integer",minimum=1},height={type="integer",minimum=1}},
+          required={"x","y","width","height"},additionalProperties=false},
+        scale = {type="integer",minimum=1}, format = {type="string",enum={"png","gif"}},
+        output = {type="string",enum={"frames","sheet"}}, columns = {type="integer",minimum=1},
+        padding = {type="integer",minimum=0}, metadata = {type="boolean"}
+      }, required = json.decode("[]"), additionalProperties = false
     }
   }
 }
@@ -379,6 +409,36 @@ local function frames_for(args, sprite, fallback)
   return { frame }
 end
 
+-- Selection is shared by previews and exports; only their output scaling/packing differs.
+local function selection_for(executor, args)
+  local sprite, target = executor:_sprite_for(args)
+  local frames = frames_for(args, sprite, target and executor.frame.frameNumber or 1)
+  local isolated
+  if args.layers ~= nil then isolated = selected_layers(sprite, array_of(args.layers, "layers")) end
+  local region
+  if args.region ~= nil then
+    assert(arguments_object(args.region), "region must be an object.")
+    region = {x=args.region.x,y=args.region.y,width=args.region.width,height=args.region.height}
+    assert(integer(region.x) and integer(region.y) and integer(region.width) and integer(region.height)
+      and region.width >= 1 and region.height >= 1, "region requires integer x, y, width, height.")
+    region.width = math.min(sprite.width,region.x+region.width)-region.x
+    region.height = math.min(sprite.height,region.y+region.height)-region.y
+    assert(region.width > 0 and region.height > 0, "Region is outside the canvas.")
+  end
+  return {sprite=sprite,target=target,frames=frames,layers=isolated,region=region}
+end
+
+local function render_selection(selection)
+  local renders = {}
+  for i, frame in ipairs(selection.frames) do
+    local image = selection.layers and render_layers(selection.sprite, frame, selection.layers)
+      or render_frame(selection.sprite, frame)
+    if selection.region then image = crop(image, selection.region, selection.sprite) end
+    renders[i] = image
+  end
+  return renders
+end
+
 local constructors = {
   "Brush", "Color", "ColorSpace", "Image", "ImageSpec", "Palette", "Point", "Rectangle", "Selection", "Size", "Sprite", "Uuid", "Version"
 }
@@ -409,7 +469,7 @@ end
 
 --- Create a reusable executor. Rebinding and disposal never reset its monotonic revision.
 function Executor.new()
-  return setmetatable({ revision = 0, listeners = {} }, Executor)
+  return setmetatable({ revision = 0, listeners = {}, exports = Export.new() }, Executor)
 end
 
 --- Remove native listener handles and invalidate the binding; safe to call repeatedly.
@@ -561,30 +621,15 @@ function Executor:read(args)
   local ok, value = pcall(function()
     assert(args == nil or arguments_object(args), "read_sprite arguments must be an object.")
     args = args or {}
-    local sprite, target = self:_sprite_for(args)
+    local selection = selection_for(self,args)
+    local sprite, target, frames = selection.sprite, selection.target, selection.frames
     local data = target and self:metadata() or self:_observe(sprite, false)
     data.target = target
     data.openSprites = open_sprites(self.sprite)
-    local frames = frames_for(args, sprite, target and self.frame.frameNumber or 1)
-    local isolated
-    if args.layers ~= nil then isolated = selected_layers(sprite, array_of(args.layers, "layers")) end
-    local region
-    if args.region ~= nil then
-      assert(arguments_object(args.region), "region must be an object.")
-      region = { x = args.region.x, y = args.region.y, width = args.region.width, height = args.region.height }
-      assert(integer(region.x) and integer(region.y) and integer(region.width) and integer(region.height)
-        and region.width >= 1 and region.height >= 1,
-        "region requires integer x, y, width, height.")
-    end
     if args.grid ~= nil then
       assert(integer(args.grid) and args.grid >= 1, "grid must be a positive integer.")
     end
-    local renders = {}
-    for i, frame in ipairs(frames) do
-      local image = isolated and render_layers(sprite, frame, isolated) or render_frame(sprite, frame)
-      if region then image = crop(image, region, sprite) end
-      renders[i] = image
-    end
+    local renders = render_selection(selection)
     local scale = choose_scale(renders[1].width, renders[1].height, #renders)
     local grid_skipped = false
     for _, image in ipairs(renders) do
@@ -617,6 +662,62 @@ function Executor:read(args)
     return response
   end)
   return ok and value or result(false, tostring(value))
+end
+
+--- Encode selected live frames into owned artifacts. The controller owns conversation cleanup;
+--- dispose/bind only retire observations, so files remain readable by later turns in this chat.
+function Executor:export(args)
+  local ok, value = pcall(function()
+    assert(args == nil or arguments_object(args), "export_sprite arguments must be an object.")
+    args = args or {}
+    local allowed = {spriteId=true,frame=true,frames=true,tag=true,layers=true,region=true,
+      scale=true,format=true,output=true,columns=true,padding=true,metadata=true}
+    for key in pairs(args) do assert(allowed[key], "Unsupported export option: " .. tostring(key)) end
+    local scale = args.scale == nil and 1 or args.scale
+    local format = args.format == nil and "png" or args.format
+    local output = args.output == nil and "frames" or args.output
+    assert(integer(scale) and scale >= 1, "scale must be a positive integer.")
+    assert(format == "png" or format == "gif", "format must be png or gif.")
+    assert(output == "frames" or output == "sheet", "output must be frames or sheet.")
+    assert(format ~= "gif" or output == "frames", "GIF cannot be a spritesheet.")
+    assert(args.metadata == nil or type(args.metadata) == "boolean", "metadata must be a boolean.")
+    if output ~= "sheet" then
+      assert(args.columns == nil and args.padding == nil and args.metadata == nil,
+        "columns, padding and metadata require output=sheet.")
+    end
+    local selection = selection_for(self,args)
+    local sprite, region = selection.sprite, selection.region
+    -- Float arithmetic keeps large integer options from wrapping before the allocation checks.
+    local w = (region and region.width or sprite.width)*1.0*scale
+    local h = (region and region.height or sprite.height)*1.0*scale
+    local count = #selection.frames
+    assert(sprite.width*sprite.height*count <= 16777216 and w <= 16384 and h <= 16384
+      and w*h*count <= 16777216, "Export exceeds the 16,777,216 pixel / 16384 dimension limit.")
+    if output == "sheet" then
+      local cols = args.columns == nil and math.ceil(math.sqrt(count)) or args.columns
+      local padding = args.padding == nil and 0 or args.padding
+      assert(integer(cols) and cols >= 1, "columns must be a positive integer.")
+      assert(integer(padding), "padding must be a non-negative integer.")
+      cols = math.min(cols,count)
+      local rows = math.ceil(count/cols)
+      local sw, sh = cols*w+(cols-1)*1.0*padding, rows*h+(rows-1)*1.0*padding
+      assert(sw <= 16384 and sh <= 16384 and sw*sh <= 16777216,
+        "Spritesheet exceeds the 16,777,216 pixel / 16384 dimension limit.")
+    end
+    local renders, durations = render_selection(selection), {}
+    for i, frame in ipairs(selection.frames) do
+      rescale(renders[i],scale)
+      durations[i] = sprite.frames[frame].duration
+    end
+    local data = self.exports:write(renders,selection.frames,durations,{format=format,output=output,scale=scale,
+      columns=args.columns,padding=args.padding,metadata=args.metadata})
+    data.spriteId, data.target = sprite.id, selection.target
+    data.selectedFrames, data.scale, data.region = selection.frames, scale, region
+    if selection.target then data.revision = self:metadata().revision end
+    data.lifetime = "Until changing chats/accounts or closing the chat window. Copy using Codex file tools under current Access."
+    return result(true,json.encode(data))
+  end)
+  return ok and value or result(false,tostring(value))
 end
 
 --- Read exact pixel values without approval or revision; see Executor.tools for the contract.
