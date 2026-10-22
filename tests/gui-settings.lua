@@ -9,21 +9,21 @@ local ok,err=xpcall(function()
   view:set_state("working"); view:set_state("ready")
   local automatic=settings.bounds
   metrics[#metrics+1]="Auto: " .. automatic.width .. " x " .. automatic.height
-  assert(automatic.height<=120, "automatic settings contain excessive blank height: " .. automatic.height)
-  assert(automatic.width<=340, "automatic settings are too wide: " .. automatic.width)
+  assert(automatic.height<=180, "automatic settings contain excessive blank height: " .. automatic.height)
+  assert(automatic.width<=380, "automatic settings are too wide: " .. automatic.width)
   view:set_state("disconnected")
   settings:modify {id="manual",selected=true}
   view:set_state("disconnected")
   local manual=settings.bounds
   metrics[#metrics+1]="Manual: " .. manual.width .. " x " .. manual.height
-  assert(manual.height<=140 and manual.width<=340, "manual settings are not compact")
+  assert(manual.height<=200 and manual.width<=380, "manual settings are not compact")
   settings:modify {id="manual",selected=false}
   view:set_state("ready")
   local restored=settings.bounds
-  assert(restored.height<=120 and restored.width<=340, "return to automatic mode retained empty space")
+  assert(restored.height<=180 and restored.width<=380, "return to automatic mode retained empty space")
   settings:close(); assert(view.settings_dialog==nil)
   view:show_settings()
-  assert(view.settings_dialog.bounds.height<=120, "reopened settings retained empty space")
+  assert(view.settings_dialog.bounds.height<=180, "reopened settings retained empty space")
 end,debug.traceback)
 if view.settings_dialog then view.settings_dialog:modify {title="LAYOUT TEST · Settings (no connection)"} end
 local result=Dialog {title="AUTOMATED SETTINGS RESULT"}

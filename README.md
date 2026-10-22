@@ -7,7 +7,7 @@ The editor extension is Lua. Opening the chat automatically finds or starts a sm
 ## Requirements
 
 - Windows, Aseprite 1.3.18.6, and Codex CLI 0.163.0 are the initial verification environment. Other versions/platforms are not claimed as tested.
-- Codex must already be signed in (`codex login`). The plugin uses that login through app-server and does not store an API key.
+- Codex must already be signed in (`codex login`) for the default account. The plugin uses that login through app-server. A **Custom Codex home** account (below) can instead use an API key or a compatible Responses endpoint, in which case a Codex login is not required.
 - Node.js 24 or later is required for the local communication bridge. The plugin locates it and the Codex executable automatically; the bridge's pinned JavaScript dependency is included in the extension.
 - The installed Codex version must support the experimental dynamic-tool API. The plugin opts into the experimental protocol during initialization.
 
@@ -19,11 +19,21 @@ The editor extension is Lua. Opening the chat automatically finds or starts a sm
 4. Choose a model, reasoning level and speed in the row above the input. The controls show their selected values without repeated category prefixes. Only supported reasoning levels and Fast tiers are listed; Standard is the initial speed. An initial model selection uses the catalog's recommended model and reasoning default. If startup fails, the message explains the next action; **Retry** searches again without entering a server address.
 5. Open a sprite and send a message. Unsaved sprites work; saving the document first is unnecessary.
 
-The bridge launches `codex app-server --stdio` for each client connection, using the existing Codex configuration and login. It sets the child process's originator to `aseprite_chat` so launch-host overrides cannot mix this extension's history with other clients. Automatic startup looks for native executables on PATH and in the standard Node/Codex desktop installation directories. It validates a per-user service-discovery hint and the conventional port 4500, reuses only an idle compatible bridge (readiness version 2), and otherwise starts its own bridge on an OS-assigned free port. It does not scan or take over arbitrary Codex processes. An automatically started bridge exits after two idle minutes; connected conversations keep it alive.
+The bridge launches `codex app-server --stdio` for each client connection, using the existing Codex configuration and login. It sets the child process's originator to `aseprite_chat` so launch-host overrides cannot mix this extension's history with other clients. Codex's built-in tool surfaces (shell, sub-agents, web search, image tools and similar features) are disabled for every child; the canvas workflow uses only the extension's two tools plus Codex's inline question prompt. Automatic startup looks for native executables on PATH and in the standard Node/Codex desktop installation directories. It validates a per-user service-discovery hint and the conventional port 4500, reuses only an idle compatible bridge (readiness version 3), and otherwise starts its own bridge on an OS-assigned free port. It does not scan or take over arbitrary Codex processes. An automatically started bridge exits after two idle minutes; connected conversations keep it alive.
 
 **Settings... > Manual server (advanced)** is an explicit opt-in for a separately managed compatible bridge. Developer-only manual startup remains available with `npm start`, `CODEX_CLI` and `ASEPRITE_CHAT_PORT`; these are not required in the normal plugin flow.
 
 Aseprite may ask permission to connect to localhost and create/read a temporary PNG preview. Grant those permissions only for this installed extension. The preview is an independent render; the original sprite is not saved or flattened.
+
+## Account
+
+**Settings... > Account** chooses which Codex home and credentials the bridge uses. Applying an account saves it to `%LOCALAPPDATA%\AsepriteChat\providers.json`, starts a new conversation, and reconnects; it is only possible while the chat is idle.
+
+- **Codex default (~/.codex)** runs Codex exactly as before, with your normal Codex home (usually a ChatGPT sign-in from `codex login`).
+- **Custom Codex home** runs Codex with `CODEX_HOME` set to the chosen folder (default `%LOCALAPPDATA%\AsepriteChat\codex-home`). Codex keeps its own configuration and writes its session history inside that home, so **Chats...**, **Rename...** and conversation resume work per home — switching accounts switches history too.
+  - **Base URL** and **API key** are optional. With either set, the child uses a custom `model_provider` speaking the Responses API: requests go to `<Base URL>/responses` with `Authorization: Bearer <key>` (a key with an empty URL targets the official `https://api.openai.com/v1`). With both empty, the custom home's own configuration and login are used instead.
+  - The API key is stored **plaintext in `providers.json` only** — never in Aseprite preferences, Codex's `config.toml`, command lines, or logs. Settings shows only a trailing hint; the key entry stays blank to keep the saved key, and **Remove saved key** clears it.
+  - **Models** optionally lists model IDs (comma-separated). When non-empty it replaces the server catalog in the picker — Codex's `model/list` always returns its bundled OpenAI entries regardless of provider, which is rarely useful for a custom endpoint. Each listed model is offered with low/medium/high reasoning and Standard speed.
 
 ## Working together
 
@@ -80,4 +90,4 @@ The authenticated integration variant is `--script-param mode=live --script test
 
 `tests/gui-steering-live.lua` accepts `--script-param endpoint=ws://127.0.0.1:<test bridge port>` and must run in a disposable editor/profile. It creates its own unsaved sprite, waits for a real edit approval, steers to a no-edit answer, checks the old approval cannot execute, and closes its own editor after writing `work/steering-live-result.json`.
 
-See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), `executor.lua` (document tools), and `launcher.lua` plus `scripts/launch.ps1` (automatic startup).
+See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), `executor.lua` (document tools), `account.lua` (account file), and `launcher.lua` plus `scripts/launch.ps1` (automatic startup). `tests/live-account.mjs` is an opt-in live check: it drives a real Codex through a temp custom account against a local mock Responses endpoint (or, with `--default-live`, one read-mostly turn against your default home).

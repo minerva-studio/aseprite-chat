@@ -275,7 +275,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.3.4"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.4.0"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -476,6 +476,9 @@ function Client:connect(endpoint)
         self:_guard(function()
           if kind == WebSocketMessageType.OPEN then self:_opened()
           elseif kind == WebSocketMessageType.CLOSE then
+            -- The bridge sends its reason (for example an invalid account
+            -- file) as close data; surface it before the generic loss notice.
+            if type(data) == "string" and data ~= "" then self:_report(data) end
             self:_lost("Connection lost; pending execution cancelled")
           elseif kind == WebSocketMessageType.ERROR then
             print("Aseprite Chat transport diagnostic: " .. tostring(socket_error or data))

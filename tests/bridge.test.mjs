@@ -8,14 +8,18 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
-import { createBridge } from '../scripts/server.mjs';
+import { createBridge, launchFor, readAccount } from '../scripts/server.mjs';
 
 const fixture = fileURLToPath(new URL('./stdio-fixture.mjs', import.meta.url));
 const serverScript = fileURLToPath(new URL('../scripts/server.mjs', import.meta.url));
 const cliChildren = [];
 const cliTempDirs = [];
 async function setup(t, overrides = {}) {
-  const bridge = await createBridge({ port: 0, command: process.execPath, args: [fixture], ...overrides });
+  const bridge = await createBridge({ port: 0, command: process.execPath,
+    launch: () => {
+      const plan = launchFor({ mode: 'default' }, process.env);
+      return { args: [fixture, ...plan.args], env: plan.env };
+    }, ...overrides });
   t.after(() => bridge.close());
   return { bridge, url: `ws://127.0.0.1:${bridge.port}` };
 }
@@ -143,7 +147,7 @@ function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 test('readyz reports bridge identity, bound port, process and live busy state', async t => {
   const { bridge, url } = await setup(t);
   const idle = await getJson(`${url}/readyz`);
-  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 2, pid: process.pid, port: bridge.port, busy: false });
+  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 3, pid: process.pid, port: bridge.port, busy: false });
   const socket = await connect(t, url);
   const busy = await getJson(`${url}/readyz`);
   assert.equal(busy.value.busy, true, JSON.stringify(busy));
@@ -165,7 +169,11 @@ test('idle timeout closes bridge, but never while a client is connected', { time
 });
 
 test('manual close is idempotent and idle timer can be disabled', async t => {
-  const bridge = await createBridge({ port: 0, command: process.execPath, args: [fixture] });
+  const bridge = await createBridge({ port: 0, command: process.execPath,
+    launch: () => {
+      const plan = launchFor({ mode: 'default' }, process.env);
+      return { args: [fixture, ...plan.args], env: plan.env };
+    } });
   t.after(() => bridge.close());
   await wait(30);
   assert.equal((await getJson(`http://127.0.0.1:${bridge.port}/readyz`)).value.busy, false);
@@ -199,7 +207,7 @@ test('CLI writes readiness and atomically replaces an existing discovery hint', 
   assert.equal(ready.endpoint, metadata.endpoint);
   assert.match(ready.endpoint, /^ws:\/\/127\.0\.0\.1:\d+$/);
   assert.deepEqual(metadata, {
-    service: 'aseprite-chat', protocolVersion: 2, pid: child.pid,
+    service: 'aseprite-chat', protocolVersion: 3, pid: child.pid,
     port: Number(new URL(ready.endpoint).port), endpoint: ready.endpoint
   });
   assert.notEqual(metadata.pid, 123, 'atomic metadata replacement must replace a prior discovery hint');
@@ -276,6 +284,121 @@ test('CLI startup failure writes a human-readable Chinese readiness error', { ti
   assert.match(error.error, /无法|失败|端口/);
   await exited;
   await new Promise(resolve => blocker.close(resolve));
+});
+
+test('readAccount treats a missing file as the default account', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-account-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  assert.deepEqual(readAccount(path.join(directory, 'providers.json')), { mode: 'default' });
+});
+
+test('readAccount rejects unreadable, malformed and out-of-schema files', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-account-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'providers.json');
+  const base = { version: 1, mode: 'custom', codexHome: directory, baseUrl: '', apiKey: '', models: [] };
+  for (const content of [
+    'not json', '[]', JSON.stringify({ ...base, version: 2 }),
+    JSON.stringify({ ...base, mode: 'invented' }),
+    JSON.stringify({ ...base, codexHome: 'relative/home' }),
+    JSON.stringify({ ...base, baseUrl: 'ftp://example.com' }),
+    JSON.stringify({ ...base, apiKey: 7 }),
+    JSON.stringify({ ...base, models: 'gpt' })]) {
+    await writeFile(file, content);
+    assert.throws(() => readAccount(file), /账户配置无效/);
+  }
+  await writeFile(file, JSON.stringify(base));
+  assert.deepEqual(readAccount(file), { mode: 'custom', codexHome: directory,
+    baseUrl: '', apiKey: '', models: [] });
+});
+
+test('launchFor default keeps the user home, strips the key and adds lean overrides', () => {
+  const { args, env } = launchFor({ mode: 'default' },
+    { ASEPRITE_CHAT_API_KEY: 'inherited', CODEX_HOME: 'inherited-home', KEEP: '1' });
+  assert.equal(args[0], 'app-server');
+  assert.equal(args[1], '--stdio');
+  assert.ok(args.includes('features.shell_tool=false'));
+  assert.ok(args.includes('features.computer_use=false'));
+  assert.ok(args.includes('web_search="disabled"'));
+  assert.equal(args.filter(a => a.startsWith('model_provider')).length, 0);
+  assert.equal(env.ASEPRITE_CHAT_API_KEY, undefined);
+  assert.equal(env.CODEX_HOME, 'inherited-home');
+  assert.equal(env.KEEP, '1');
+  assert.equal(env.CODEX_INTERNAL_ORIGINATOR_OVERRIDE, 'aseprite_chat');
+});
+
+test('launchFor custom home alone sets CODEX_HOME without provider overrides', () => {
+  const { args, env } = launchFor(
+    { mode: 'custom', codexHome: 'D:\\home', baseUrl: '', apiKey: '', models: [] }, {});
+  assert.equal(env.CODEX_HOME, 'D:\\home');
+  assert.equal(args.filter(a => a.startsWith('model_provider')).length, 0);
+  assert.equal(env.ASEPRITE_CHAT_API_KEY, undefined);
+});
+
+test('launchFor custom key alone targets the official OpenAI Responses endpoint', () => {
+  const { args, env } = launchFor(
+    { mode: 'custom', codexHome: 'D:\\home', baseUrl: '', apiKey: 'sk-test', models: [] }, {});
+  const joined = args.join(' ');
+  assert.ok(joined.includes('model_provider="aseprite_custom"'));
+  assert.ok(joined.includes('base_url="https://api.openai.com/v1"'));
+  assert.ok(joined.includes('wire_api="responses"'));
+  assert.ok(joined.includes('env_key="ASEPRITE_CHAT_API_KEY"'));
+  assert.equal(env.ASEPRITE_CHAT_API_KEY, 'sk-test');
+});
+
+test('launchFor custom URL without a key drops the trailing slash and sets no env key', () => {
+  const { args, env } = launchFor(
+    { mode: 'custom', codexHome: 'D:\\home', baseUrl: 'http://127.0.0.1:8080/v1/', apiKey: '', models: [] }, {});
+  const joined = args.join(' ');
+  assert.ok(joined.includes('base_url="http://127.0.0.1:8080/v1"'));
+  assert.ok(!joined.includes('env_key'));
+  assert.equal(env.ASEPRITE_CHAT_API_KEY, undefined);
+});
+
+test('a custom account reaches the spawned process argv and environment', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-account-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const home = path.join(directory, 'codex home');
+  const file = path.join(directory, 'providers.json');
+  await writeFile(file, JSON.stringify({ version: 1, mode: 'custom', codexHome: home,
+    baseUrl: 'http://127.0.0.1:9/v1/', apiKey: 'sk-live-test', models: [] }));
+  const previous = process.env.ASEPRITE_CHAT_ACCOUNT_FILE;
+  process.env.ASEPRITE_CHAT_ACCOUNT_FILE = file;
+  t.after(() => {
+    if (previous === undefined) delete process.env.ASEPRITE_CHAT_ACCOUNT_FILE;
+    else process.env.ASEPRITE_CHAT_ACCOUNT_FILE = previous;
+  });
+  const { url } = await setup(t, { launch: () => {
+    const plan = launchFor(readAccount(file), process.env);
+    return { args: [fixture, ...plan.args], env: plan.env };
+  } });
+  const socket = await connect(t, url);
+  const reply = once(socket, 'message');
+  socket.send(JSON.stringify({ id: 'account', method: 'initialize', params: {} }));
+  const response = JSON.parse((await reply)[0].toString());
+  assert.deepEqual(response.result.argv.slice(0, 2), ['app-server', '--stdio']);
+  assert.ok(response.result.argv.includes('features.shell_tool=false'));
+  assert.ok(response.result.argv.join(' ').includes('base_url="http://127.0.0.1:9/v1"'));
+  assert.equal(response.result.codexHome, home);
+  assert.equal(response.result.apiKey, 'sk-live-test');
+  assert.equal(response.result.originator, 'aseprite_chat');
+});
+
+test('an invalid account file closes only that client with a Chinese reason', async t => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-account-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'providers.json');
+  await writeFile(file, '{ broken');
+  const { bridge, url } = await setup(t, { launch: undefined, accountFile: file });
+  const socket = new WebSocket(url); t.after(() => socket.terminate());
+  const closed = once(socket, 'close'); await once(socket, 'open');
+  const [code, reason] = await closed;
+  assert.equal(code, 1011);
+  assert.match(reason.toString('utf8'), /账户配置无效/);
+  const status = await getJson(`${url}/readyz`);
+  assert.equal(status.status, 200);
+  assert.equal(status.value.busy, false);
+  assert.equal(bridge.port, status.value.port);
 });
 
 test('reports the isolated CLI process IDs and temporary directories used by this suite', () => {

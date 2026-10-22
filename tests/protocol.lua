@@ -807,6 +807,17 @@ test("late steering acknowledgement cannot clear an unrelated turn failure or al
   eq(h.client.turn_id,"replacement"); eq(h.client.state,"working")
 end)
 
+test("a close reason string is surfaced as an error while plain close stays quiet",function()
+  local h=harness(); h:open(); h:start()
+  h.ws:event(WebSocketMessageType.CLOSE,"账户配置无效，请在 Settings 中重新保存。")
+  eq(h.client.state,"disconnected"); eq(h.client.turn_id,nil)
+  assert(h.errors[#h.errors]:find("账户配置无效",1,true))
+  local count=#h.errors
+  h.ws:event(WebSocketMessageType.CLOSE,"")
+  h.ws:event(WebSocketMessageType.CLOSE)
+  eq(#h.errors,count)
+end)
+
 for _,case in ipairs(tests) do
   local ok,err=xpcall(case[2],debug.traceback)
   if ok then passed=passed+1; print("PASS " .. case[1])

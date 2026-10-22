@@ -1,5 +1,6 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -7,13 +8,86 @@ import { pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 
 const maxBytes = 16 * 1024 * 1024;
+const invalidAccount = '账户配置无效，请在 Settings 中重新保存。';
+const protocolVersion = 3;
+const provider = 'aseprite_custom';
+const providerEnvKey = 'ASEPRITE_CHAT_API_KEY';
+// The canvas workflow uses only the extension's dynamic tools plus Codex's
+// request_user_input; every other bundled tool surface is disabled per child.
+const leanOverrides = [
+  ...['shell_tool', 'unified_exec', 'multi_agent', 'goals', 'view_image', 'memories',
+    'apps', 'plugins', 'image_generation', 'skill_search', 'browser_use', 'computer_use']
+    .flatMap(feature => ['-c', `features.${feature}=false`]),
+  '-c', 'web_search="disabled"'];
+
+/** Read the account file synchronously; a missing file means the default account. */
+export function readAccount(file) {
+  let text;
+  try { text = readFileSync(file, 'utf8'); }
+  catch (error) {
+    if (error && error.code === 'ENOENT') return { mode: 'default' };
+    throw Error(invalidAccount);
+  }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch { throw Error(invalidAccount); }
+  const valid = parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+    && parsed.version === 1
+    && (parsed.mode === 'default' || parsed.mode === 'custom')
+    && typeof parsed.codexHome === 'string' && path.isAbsolute(parsed.codexHome)
+    && typeof parsed.baseUrl === 'string'
+    && (parsed.baseUrl === '' || /^https?:\/\//.test(parsed.baseUrl))
+    && typeof parsed.apiKey === 'string'
+    && Array.isArray(parsed.models) && parsed.models.every(model => typeof model === 'string');
+  if (!valid) throw Error(invalidAccount);
+  return { mode: parsed.mode, codexHome: parsed.codexHome, baseUrl: parsed.baseUrl,
+    apiKey: parsed.apiKey, models: parsed.models };
+}
+
+/** Build the Codex app-server argv and child environment for one account. */
+export function launchFor(account, baseEnv) {
+  const env = { ...baseEnv, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'aseprite_chat' };
+  delete env[providerEnvKey];
+  const args = ['app-server', '--stdio', ...leanOverrides];
+  if (!account || account.mode !== 'custom') return { args, env };
+  env.CODEX_HOME = account.codexHome;
+  const baseUrl = (account.baseUrl || '').replace(/\/+$/, '');
+  const apiKey = account.apiKey || '';
+  if (baseUrl === '' && apiKey === '') return { args, env };
+  args.push(
+    '-c', `model_provider=${JSON.stringify(provider)}`,
+    '-c', `model_providers.${provider}.name=${JSON.stringify('Aseprite Chat Custom')}`,
+    '-c', `model_providers.${provider}.base_url=${JSON.stringify(baseUrl === '' ? 'https://api.openai.com/v1' : baseUrl)}`,
+    '-c', `model_providers.${provider}.wire_api=${JSON.stringify('responses')}`);
+  if (apiKey !== '') {
+    args.push('-c', `model_providers.${provider}.env_key=${JSON.stringify(providerEnvKey)}`);
+    env[providerEnvKey] = apiKey;
+  }
+  return { args, env };
+}
+
+/** WebSocket close reasons are limited to 123 UTF-8 bytes. */
+function closeReason(error) {
+  let message = '';
+  for (const character of String(error && error.message || error)) {
+    if (Buffer.byteLength(message + character) > 123) break;
+    message += character;
+  }
+  return message;
+}
 
 /**
  * Start a loopback-only WebSocket-to-stdio bridge. Each connection owns its Codex process.
  * When idleTimeoutMs is positive, onClose runs once after either idle or explicit shutdown.
+ * launch() synchronously returns {args, env} per connection; its errors close that client.
  */
 export async function createBridge({ port = 4500, command = process.env.CODEX_CLI || 'codex',
-  args = ['app-server', '--stdio'], idleTimeoutMs = 0, onClose = async () => {} } = {}) {
+  accountFile = process.env.ASEPRITE_CHAT_ACCOUNT_FILE || path.join(
+    process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'AsepriteChat', 'providers.json'),
+  launch = () => {
+    const account = readAccount(accountFile);
+    if (account.mode === 'custom') mkdirSync(account.codexHome, { recursive: true });
+    return launchFor(account, process.env);
+  }, idleTimeoutMs = 0, onClose = async () => {} } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) throw Error('Invalid local port');
   if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs < 0) throw Error('Invalid idle timeout');
   const server = http.createServer((request, response) => {
@@ -21,7 +95,7 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
     const isReady = allowed && request.url === '/readyz';
     response.writeHead(!allowed ? 403 : isReady ? 200 : 404, isReady ? { 'Content-Type': 'application/json; charset=utf-8' } : {});
     response.end(isReady ? JSON.stringify({
-      service: 'aseprite-chat', protocolVersion: 2, pid: process.pid,
+      service: 'aseprite-chat', protocolVersion, pid: process.pid,
       port: server.address()?.port, busy: !!active
     }) : '');
   });
@@ -76,11 +150,19 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
       session.child?.kill();
       scheduleIdleClose();
     });
+    // Resolve the per-connection launch plan synchronously: Lua sends
+    // initialize immediately on open, so no buffering race can be introduced.
+    let plan;
+    try { plan = launch(); }
+    catch (error) {
+      client.close(1011, closeReason(error));
+      return;
+    }
     let child;
     // Keep durable thread ownership independent of the editor/launcher host's
     // Codex originator override. This affects only this bridge-owned child.
-    try { child = spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'aseprite_chat' } }); }
+    try { child = spawn(command, plan.args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+      env: plan.env }); }
     catch {
       client.close(1011, 'Cannot start Codex; check CODEX_CLI and your PATH.');
       return;
@@ -161,7 +243,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       onClose: () => removeOwnedMetadata().catch(() => {})
     });
     const endpoint = `ws://127.0.0.1:${bridge.port}`;
-    const metadata = { service: 'aseprite-chat', protocolVersion: 2, pid: process.pid, port: bridge.port, endpoint };
+    const metadata = { service: 'aseprite-chat', protocolVersion, pid: process.pid, port: bridge.port, endpoint };
     await atomicWriteJson(discoveryFile, metadata);
     metadataWritten = true;
     if (readyFile) await atomicWriteJson(readyFile, { endpoint });

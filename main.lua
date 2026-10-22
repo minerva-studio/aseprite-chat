@@ -104,7 +104,7 @@ local function valid_settings(models, model, effort, tier)
 end
 
 function Controller:_load_models()
-  self.client:list_models(function(models, err)
+  local function present(models, err)
     self.models = models or {}
     if not models then self:_message("Error", err or "Cannot load model list. Reconnect to retry.") end
     if not self.preferences.model or self.preferences.model == "" then
@@ -124,7 +124,12 @@ function Controller:_load_models()
     self.view:set_models(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
     local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
     if not valid and models then self:_message("Aseprite", why) end
-  end)
+  end
+  -- A custom account's explicit model list replaces the server catalog;
+  -- model/list always reports Codex's bundled OpenAI entries anyway.
+  local catalog = self.Account.catalog(self.account)
+  if catalog then present(catalog); return end
+  self.client:list_models(present)
 end
 
 function Controller:_create_client()
@@ -164,6 +169,8 @@ function Main.create(options)
   self.Codex = dofile(app.fs.joinPath(options.path, "codex.lua"))
   self.Executor = dofile(app.fs.joinPath(options.path, "executor.lua"))
   self.Timeline = dofile(app.fs.joinPath(options.path,"timeline.lua"))
+  self.Account = dofile(app.fs.joinPath(options.path, "account.lua"))
+  self.account, self.account_error = self.Account.load(self.Account.path())
   local Launcher = dofile(app.fs.joinPath(options.path, "launcher.lua"))
   self.launcher = Launcher.new {path=options.path}
   local Chat = dofile(app.fs.joinPath(options.path, "chat.lua"))
@@ -179,6 +186,8 @@ function Main.create(options)
     on_open_thread = function(id) return self:open_thread(id) end,
     on_approval_mode = function(enabled) return self:set_approval_mode(enabled) end,
     on_rename = function(name,callback) return self.client:rename_thread(name,callback) end,
+    on_account_get = function() return self:account_view() end,
+    on_account_apply = function(draft) return self:apply_account(draft) end,
     on_close = function() self:close() end
   }, self.preferences)
   self.client = self:_create_client()
@@ -193,6 +202,10 @@ function Controller:open()
     self.closed = false
   end
   self.view:show()
+  if self.account_error then
+    self:_message("Error", self.account_error)
+    self.account_error = nil
+  end
   if not self.site_listener then
     self.site_listener = app.events:on("sitechange", function() self:_refresh_state() end)
   end
@@ -316,6 +329,74 @@ function Controller:disconnect()
   self.client:disconnect()
   self.executor:dispose()
   self:_refresh_state()
+end
+
+--- The sanitized account projection shown in Settings; the stored key itself
+--- never reaches the view, only a trailing hint.
+function Controller:account_view()
+  local account = self.account or {}
+  local key = type(account.apiKey) == "string" and account.apiKey or ""
+  return {
+    mode = account.mode == "custom" and "custom" or "default",
+    codexHome = account.codexHome or self.Account.default_home(),
+    baseUrl = account.baseUrl or "",
+    models = table.concat(account.models or {}, ", "),
+    keyHint = key ~= "" and (#key > 4 and "…" .. key:sub(-4) or "…") or nil
+  }
+end
+
+--- Replace the stored account and restart the connection on its new home.
+--- draft={mode,codexHome,baseUrl,apiKey=nonempty replacement or nil,clearKey,models=csv}.
+--- Custom fields are retained while mode is default so toggling back keeps them.
+function Controller:apply_account(draft)
+  local offline = self.client.state == "disconnected" or self.client.state == "error"
+  if (self.client.state ~= "ready" and not offline) or self.pending or self.launcher.pending then
+    return false, "Wait until the chat is idle."
+  end
+  draft = draft or {}
+  local key
+  if draft.clearKey then key = ""
+  elseif type(draft.apiKey) == "string" and draft.apiKey ~= "" then key = draft.apiKey
+  else key = self.account and self.account.apiKey or "" end
+  local models = {}
+  for name in tostring(draft.models or ""):gmatch("[^,]+") do
+    local trimmed = name:match("^%s*(.-)%s*$")
+    if trimmed ~= "" then models[#models + 1] = trimmed end
+  end
+  local account = {
+    version = 1,
+    mode = draft.mode == "custom" and "custom" or "default",
+    codexHome = tostring(draft.codexHome or ""):match("^%s*(.-)%s*$"),
+    baseUrl = tostring(draft.baseUrl or ""):match("^%s*(.-)%s*$"),
+    apiKey = key,
+    models = models
+  }
+  local valid, invalid = self.Account.validate(account)
+  if not valid then return false, invalid end
+  local current = self.account or {}
+  local current_models = current.models or {}
+  local unchanged = account.mode == (current.mode or "default")
+    and account.codexHome == (current.codexHome or "")
+    and account.baseUrl == (current.baseUrl or "")
+    and account.apiKey == (current.apiKey or "")
+    and #account.models == #current_models
+  if unchanged then
+    for index, name in ipairs(account.models) do
+      if name ~= current_models[index] then unchanged = false; break end
+    end
+  end
+  if unchanged then return true end
+  local saved, save_error = self.Account.save(self.Account.path(), account)
+  if not saved then return false, save_error or "Cannot save the account file." end
+  self.account = account
+  self.preferences.model, self.preferences.effort, self.preferences.service_tier = nil, nil, "default"
+  self:disconnect()
+  self:set_approval_mode(false)
+  self.client = self:_create_client()
+  self.view:clear()
+  self:_message("Aseprite", "The Codex account changed; a new conversation started.")
+  self:connect(self.preferences.manual_server and self.preferences.endpoint or nil)
+  return true
 end
 
 --- Start a fresh conversation while retaining connection settings.

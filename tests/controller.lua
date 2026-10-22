@@ -57,6 +57,14 @@ local function scenario(name, body, configuration)
       return executor
     end },
     ["timeline.lua"] = dofile(app.fs.joinPath(root,"timeline.lua")),
+    ["account.lua"] = (function()
+      local real = dofile(app.fs.joinPath(root,"account.lua"))
+      local module = {}
+      for key, value in pairs(real) do module[key] = value end
+      local file = app.fs.joinPath(app.fs.tempPath, "aseprite-chat-controller-" .. tostring(Uuid()) .. ".json")
+      function module.path() return file end
+      return module
+    end)(),
     ["chat.lua"] = { new = function(callbacks)
       view = { messages = {},callbacks=callbacks }
       function view:show() end
@@ -288,5 +296,73 @@ scenario("live user notifications do not duplicate the local send echo",function
   p.options.on_item({id="sent-user",type="userMessage",content={{type="text",text="edit"}}},false)
   p.options.on_item({id="sent-user",type="userMessage",content={{type="text",text="edit"}}},true)
   assert(#v.messages==count, "provider user item duplicated the local send echo")
+end)
+scenario("a custom model list replaces the server catalog without a model/list call",function(c,p,e,v)
+  c.account={version=1,mode="custom",codexHome="D:\\home",baseUrl="",apiKey="",models={"custom-a","custom-b"}}
+  c.preferences.model,c.preferences.effort=nil,nil
+  local calls=p.catalog_calls
+  p.options.on_state("initializing")
+  p.options.on_state("ready")
+  assert(p.catalog_calls==calls, "server catalog was queried despite the custom list")
+  assert(v.catalog and #v.catalog==2 and v.catalog[1].model=="custom-a" and v.catalog[1].isDefault)
+  assert(c.preferences.model=="custom-a" and c.preferences.effort=="medium")
+  p.state="ready"
+  assert(c:send("next")); assert(p.sent_settings.model=="custom-a" and p.sent_settings.effort=="medium")
+end)
+scenario("an unchanged account applies without saving or reconnecting",function(c,p,e,v)
+  p.state="ready"
+  local client=c.client; local count=#v.messages
+  assert(c:apply_account({mode="default",codexHome=c.account.codexHome,baseUrl="",models=""}))
+  assert(c.client==client and #v.messages==count, "unchanged account restarted the conversation")
+  assert(not app.fs.isFile(c.Account.path()), "unchanged account rewrote the file")
+end)
+scenario("applying a changed account saves, clears the selection and reconnects a fresh client",function(c,p,e,v,request,result,l)
+  p.state="ready"
+  c.preferences.model="wire-a"; c.preferences.effort="high"; c.preferences.service_tier="priority"
+  local file=c.Account.path()
+  assert(c:apply_account({mode="custom",codexHome="D:\\custom home",baseUrl="http://127.0.0.1:9/v1",
+    apiKey="sk-new-key",models="m1, m2"}))
+  assert(app.fs.isFile(file), "account file was not written")
+  local loaded=assert(c.Account.load(file))
+  assert(loaded.mode=="custom" and loaded.apiKey=="sk-new-key" and #loaded.models==2)
+  assert(c.account.mode=="custom" and c.client~=p, "client was not replaced")
+  assert(c.preferences.model==nil and c.preferences.effort==nil and c.preferences.service_tier=="default")
+  assert(v.messages[1] and v.messages[1][2]=="Aseprite", "transcript was not reset")
+  assert(l.pending, "automatic reconnect was not started")
+  l:complete("ws://127.0.0.1:45995")
+  local fresh=c.client
+  assert(fresh.connected_endpoint=="ws://127.0.0.1:45995")
+  fresh.options.on_state("initializing")
+  fresh.state="ready"; fresh.options.on_state("ready")
+  assert(fresh.catalog_calls==nil and v.catalog[1].model=="m1", "custom models did not drive the catalog")
+end)
+scenario("account changes are rejected while a turn or approval is pending",function(c,p,e,v,request,result)
+  p.state="working"
+  assert(select(2,c:apply_account({mode="custom",codexHome="D:\\h"})):find("idle"), "busy account apply was accepted")
+  p.state="ready"; request()
+  assert(select(2,c:apply_account({mode="custom",codexHome="D:\\h"})):find("idle"), "pending approval allowed apply")
+  v.decision(true)
+end)
+scenario("a blank key keeps the stored key and clearKey removes it",function(c,p,e,v,request,result,l)
+  p.state="ready"
+  c.account={version=1,mode="custom",codexHome="D:\\home",baseUrl="",apiKey="sk-stored-key",models={}}
+  assert(c:apply_account({mode="custom",codexHome="D:\\home",baseUrl="http://x",apiKey=nil,models=""}))
+  assert(c.account.apiKey=="sk-stored-key", "blank draft key erased the stored key")
+  l:complete("ws://127.0.0.1:45996"); c.client.state="ready"
+  assert(c:apply_account({mode="custom",codexHome="D:\\home",baseUrl="http://x",clearKey=true,models=""}))
+  assert(c.account.apiKey=="", "clearKey kept the stored key")
+  l:complete("ws://127.0.0.1:45997"); c.client.state="ready"
+  assert(select(2,c:apply_account({mode="custom",codexHome="D:\\home",baseUrl="bad scheme",models=""})):find("Base URL"))
+end)
+scenario("the account view exposes only a key hint, never the key",function(c,p,e,v)
+  c.account={version=1,mode="custom",codexHome="D:\\home",baseUrl="http://x",
+    apiKey="sk-super-secret-key",models={"m1"}}
+  local shown=c:account_view()
+  assert(shown.apiKey==nil and shown.keyHint=="…-key")
+  for _,field in pairs(shown) do
+    assert(not tostring(field):find("super%-secret"), "account view leaked the key")
+  end
+  c.account.apiKey=""
+  assert(c:account_view().keyHint==nil)
 end)
 print("controller: " .. passed .. " passed")

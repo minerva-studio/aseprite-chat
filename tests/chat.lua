@@ -193,6 +193,40 @@ test("rename waits for acknowledgement, preserves named titles and cleans up on 
   view:close()
 end)
 
+test("account rows project the saved account, toggle by mode and apply a draft",function()
+  local applied
+  local view,dialogs=native_view({
+    on_account_get=function()
+      return {mode="custom",codexHome="D:\\home",baseUrl="http://x/v1",models="m1, m2",keyHint="…wxyz"}
+    end,
+    on_account_apply=function(draft) applied=draft; return true end})
+  view:set_state("ready"); view:show_settings()
+  local settings=dialogs[2]
+  assert(settings.data.account_mode=="Custom Codex home")
+  assert(settings.data.account_home=="D:\\home" and settings.data.account_url=="http://x/v1")
+  assert(settings.widgets.account_key_status.text:find("wxyz",1,true))
+  assert(settings.widgets.account_home.visible==true and settings.widgets.account_key.visible==true)
+  assert(settings.widgets.account_apply.enabled==true)
+  settings.data.account_mode="Codex default (~/.codex)"; settings.widgets.account_mode.onchange()
+  assert(settings.widgets.account_home.visible==false and settings.widgets.account_models.visible==false)
+  settings.data.account_mode="Custom Codex home"; settings.widgets.account_mode.onchange()
+  settings.data.account_key="sk-typed"; settings.widgets.account_apply.onclick()
+  assert(applied.mode=="custom" and applied.codexHome=="D:\\home" and applied.apiKey=="sk-typed")
+  assert(applied.clearKey==false and applied.models=="m1, m2")
+  assert(settings.data.account_key=="", "key entry retained the typed key")
+  view:set_state("working")
+  assert(not settings.widgets.account_apply.enabled, "apply stayed enabled during generation")
+  view:close()
+end)
+
+test("a rejected account apply surfaces the controller error",function()
+  local view,dialogs=native_view({on_account_apply=function() return false,"Wait until the chat is idle." end})
+  view:set_state("ready"); view:show_settings()
+  dialogs[2].widgets.account_apply.onclick()
+  assert(view.messages[#view.messages].text:find("idle",1,true))
+  view:close()
+end)
+
 test("settings show only the current connection action with a short caption",function()
   local view,dialogs=native_view()
   view:set_state("ready"); view:show_settings()

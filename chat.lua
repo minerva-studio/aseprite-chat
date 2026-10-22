@@ -1,6 +1,11 @@
 local Chat = {}
 Chat.__index = Chat
 
+-- Custom-account settings rows share one visibility toggle keyed on the mode combobox.
+local account_rows = { "account_home_label", "account_home", "account_url_label", "account_url",
+  "account_url_hint", "account_key_status", "account_key", "account_key_clear",
+  "account_models_label", "account_models" }
+
 --- Wrap plain text without splitting UTF-8 code points. measure returns pixel width.
 function Chat.wrap(text, width, measure)
   local lines = {}
@@ -321,6 +326,11 @@ function Chat:set_state(state,can_steer)
     self.settings_dialog:modify { id = "endpoint", visible = manual, enabled = offline and manual }
     self.settings_dialog:modify { id = "connect", visible = offline, enabled = offline, text = manual and "Connect" or "Retry" }
     self.settings_dialog:modify { id = "disconnect", visible = not offline, enabled = not offline, text = state == "starting" and "Cancel startup" or "Disconnect" }
+    local custom = self.settings_dialog.data.account_mode == "Custom Codex home"
+    for _, id in ipairs(account_rows) do
+      self.settings_dialog:modify { id = id, visible = custom }
+    end
+    self.settings_dialog:modify { id = "account_apply", enabled = idle or offline }
   end
   if self.history_dialog then
     local picker = self.history_dialog
@@ -563,6 +573,43 @@ function Chat:show_settings()
     self.callbacks.on_connect(dlg.data.manual and dlg.data.endpoint or nil)
   end}
   dlg:button {id="disconnect", text="Disconnect", onclick=self.callbacks.on_disconnect}
+  local account = self.callbacks.on_account_get and self.callbacks.on_account_get() or {}
+  dlg:separator {text="Account"}
+  dlg:combobox {id="account_mode", options={"Codex default (~/.codex)","Custom Codex home"},
+    option=account.mode=="custom" and "Custom Codex home" or "Codex default (~/.codex)",
+    onchange=function() self:set_state(self.state) end}
+  dlg:label {id="account_home_label", text="Codex home"}
+  dlg:entry {id="account_home", text=account.codexHome or ""}
+  dlg:label {id="account_url_label", text="Base URL (empty = the home's own config/login)"}
+  dlg:entry {id="account_url", text=account.baseUrl or ""}
+  dlg:label {id="account_url_hint", text="A key with an empty URL targets OpenAI official."}
+  dlg:label {id="account_key_status",
+    text="API key: " .. (account.keyHint and "saved (" .. account.keyHint .. "), leave blank to keep" or "not set")}
+  dlg:entry {id="account_key", text=""}
+  dlg:check {id="account_key_clear", text="Remove saved key"}
+  dlg:label {id="account_models_label", text="Models (comma-separated, optional)"}
+  dlg:entry {id="account_models", text=account.models or ""}
+  dlg:button {id="account_apply", text="Apply account", onclick=function()
+    if not self.callbacks.on_account_apply then return end
+    local key = dlg.data.account_key
+    local applied, apply_error = self.callbacks.on_account_apply({
+      mode = dlg.data.account_mode == "Custom Codex home" and "custom" or "default",
+      codexHome = dlg.data.account_home,
+      baseUrl = dlg.data.account_url,
+      apiKey = type(key) == "string" and key ~= "" and key or nil,
+      clearKey = dlg.data.account_key_clear == true,
+      models = dlg.data.account_models
+    })
+    if not applied then
+      if apply_error then self:add_message("account-error", "Error", apply_error, false) end
+      return
+    end
+    local refreshed = self.callbacks.on_account_get and self.callbacks.on_account_get() or {}
+    dlg:modify {id="account_key_status",
+      text="API key: " .. (refreshed.keyHint and "saved (" .. refreshed.keyHint .. "), leave blank to keep" or "not set")}
+    dlg:modify {id="account_key", text=""}
+    dlg:modify {id="account_key_clear", selected=false}
+  end}
   dlg:button {id="done", text="Done"}
   self:set_state(self.state)
   dlg:show {wait=false}
