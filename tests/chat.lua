@@ -1002,7 +1002,7 @@ test("question window pages options and free text without selecting a default an
   assert(not dialog.widgets.choice,"options are still hidden in a dropdown")
   dialog.widgets.option_2.onclick()
   dialog.widgets.next.onclick()
-  dialog.widgets.back.onclick(); assert(dialog.widgets.option_2.selected==true,"back navigation discarded the draft")
+  dialog.widgets.back.onclick(); assert(dialog.widgets.option_2.text=="[x] 2. Gold","back navigation discarded the draft")
   dialog.widgets.next.onclick(); dialog.data.answer="Keep the outline"
   dialog.widgets.next.onclick()
   assert(received.color[1]=="Gold" and received.detail[1]=="Keep the outline")
@@ -1045,11 +1045,14 @@ test("native question choices replace Other text and submit the explicit selecti
   local dialog=dialogs[#dialogs]
   assert(dialog.widgets.question_body.kind=="label" and dialog.widgets.option_1.kind=="button")
   assert(dialog.show_snapshot.question_body.text=="Which highlight?")
-  assert(dialog.show_snapshot.option_2.text=="2. Gold" and dialog.show_snapshot.option_2.visible)
+  assert(dialog.show_snapshot.option_2.text=="[ ] 2. Gold" and dialog.show_snapshot.option_2.visible)
   assert(dialog.show_snapshot.answer.visible,"Other was hidden on first open")
   dialog.data.answer="Purple"; dialog.widgets.answer.onchange()
   dialog.widgets.option_1.onclick()
-  assert(dialog.data.answer=="" and dialog.widgets.option_1.selected and not dialog.widgets.option_2.selected)
+  -- Native ordinary buttons can clear selected when focus moves elsewhere.
+  dialog.widgets.option_1.selected=false
+  assert(dialog.data.answer=="" and dialog.widgets.option_1.text=="[x] 1. Blue"
+    and dialog.widgets.option_2.text=="[ ] 2. Gold","focus erased the visible answer selection")
   dialog.widgets.next.onclick(); assert(answer.color[1]=="Blue")
   view:close()
 end)
@@ -1064,7 +1067,7 @@ test("question paging hides old options and restores Other drafts",function()
   assert(dialog.widgets.option_1.visible==false and dialog.widgets.other_label.text=="Your answer")
   dialog.widgets.option_1.onclick()
   dialog.data.answer="Outline"; dialog.widgets.answer.onchange(); dialog.widgets.back.onclick()
-  assert(dialog.widgets.answer.visible and dialog.data.answer=="Purple" and not dialog.widgets.option_1.selected)
+  assert(dialog.widgets.answer.visible and dialog.data.answer=="Purple" and dialog.widgets.option_1.text=="[ ] 1. Blue")
   dialog.widgets.next.onclick(); assert(dialog.data.answer=="Outline")
   dialog.widgets.next.onclick(); assert(answers.color[1]=="Purple" and answers.text[1]=="Outline")
   view:close()

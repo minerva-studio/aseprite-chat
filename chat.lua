@@ -982,6 +982,16 @@ function Chat:request_question(request,callback)
     draft.text=dlg.data.answer
     pending.drafts[pending.index]=draft
   end
+  local function show_choices(question,draft)
+    for index=1,option_count do
+      local option=(question.options or {})[index]
+      -- Ordinary native buttons clear selected on focus changes; the caption
+      -- derives its persistent answer marker from the draft instead.
+      local caption=option and (draft.choice==index and "[x] " or "[ ] ")..index..". "..option.label or ""
+      dlg:modify {id="option_"..index,text=caption,visible=option~=nil}
+      dlg:modify {id="option_description_"..index,text=option and option.description or "",visible=option~=nil and option.description~=""}
+    end
+  end
   local function show_page()
     local question=request.questions[pending.index]
     local draft=pending.drafts[pending.index] or {}
@@ -989,11 +999,7 @@ function Chat:request_question(request,callback)
     pending.updating=true
     dlg:modify {id="question_page",text="Question "..pending.index.." / "..#request.questions.." · "..question.header}
     dlg:modify {id="question_body",text=question.question}
-    for index=1,option_count do
-      local option=(question.options or {})[index]
-      dlg:modify {id="option_"..index,text=option and index..". "..option.label or "",visible=option~=nil,selected=draft.choice==index}
-      dlg:modify {id="option_description_"..index,text=option and option.description or "",visible=option~=nil and option.description~=""}
-    end
+    show_choices(question,draft)
     local free_text=#(question.options or {})==0 or question.isOther==true
     dlg:modify {id="other_label",text=#(question.options or {})==0 and "Your answer" or "Other",visible=free_text}
     dlg:modify {id="answer",text=draft.text or "",visible=free_text}
@@ -1028,7 +1034,7 @@ function Chat:request_question(request,callback)
     draft.text=dlg.data.answer
     if draft.text:match("%S") then
       draft.choice=nil
-      for index=1,option_count do dlg:modify {id="option_"..index,selected=false} end
+      show_choices(request.questions[pending.index],draft)
     end
   end}
   dlg:newrow()
