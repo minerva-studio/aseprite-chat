@@ -2,7 +2,7 @@ local Chat = {}
 Chat.__index = Chat
 local access_levels={
   {id="canvas",label="Canvas only"}, {id="read",label="Read files"},
-  {id="workspace",label="Workspace write"}, {id="full",label="Full access (danger)",caption="Full access"}
+  {id="workspace",label="Workspace write"}, {id="full",label="Full access (danger)"}
 }
 
 -- Custom-account settings rows share one visibility toggle keyed on the mode combobox.
@@ -52,8 +52,8 @@ local function elide(gc,text,width)
   return table.concat(chars).."…"
 end
 
--- Composer controls are projections of controller state. A single canvas avoids
--- native Dialog's type-based row breaks and homogeneous button widths.
+-- Action toggles project controller state into a compact canvas row. Selectors
+-- remain native comboboxes, with their own native popup and keyboard handling.
 local function update_control(view,spec)
   local control=assert(view.controls[spec.id])
   for key,value in pairs(spec) do control[key]=value end
@@ -63,50 +63,27 @@ local function send_caption(state)
   return state=="working" and "Steer" or state=="steering" and "Steering..." or "Send"
 end
 
-local function show_options(view,id)
-  local control=view.controls[id]
-  if not control.enabled then return end
-  if view.options_dialog then view.options_dialog:close() end
-  local picker
-  picker=Dialog {title=id=="model" and "Model" or "Reasoning",onclose=function()
-    if view.options_dialog==picker then view.options_dialog=nil end
-  end}
-  view.options_dialog=picker
-  for _,value in ipairs(control.options) do
-    picker:button {text=value,focus=value==control.option,selected=value==control.option,onclick=function()
-      if view.options_dialog~=picker or not view.dialog then return end
-      picker:close()
-      if view.controls[id].enabled then control.onchoose(value) end
-    end}
-    picker:newrow()
+-- Setting native options deletes the current popup's items. Cache the last
+-- projected list so ordinary selection changes leave an open popup intact.
+local function project_selector(view,id,options,selected)
+  local previous=view.selector_options[id]
+  local changed=not previous or #previous~=#options
+  if not changed then
+    for index,value in ipairs(options) do if previous[index]~=value then changed=true; break end end
   end
-  picker:show {wait=false,autoscrollbars=true}
-  local parent,bounds=view.dialog.bounds,picker.bounds
-  for _,rect in ipairs(view.control_rects or {}) do
-    if rect.id==id then
-      picker.bounds=Rectangle(parent.x+6+rect.x,math.max(0,parent.y+parent.height-32-bounds.height),bounds.width,bounds.height)
-      break
-    end
-  end
+  local spec={id=id,option=selected}
+  if changed then spec.options=options; view.selector_options[id]=options end
+  view.dialog:modify(spec)
 end
 
 local function paint_composer(gc,view)
   local controls,widths={},{}
-  local total=0
-  for _,id in ipairs {"model","effort","auto_approve","access","speed","retry","stop"} do
+  for _,id in ipairs {"auto_approve","speed","retry","stop"} do
     local control=view.controls[id]
     if control.visible~=false then
-      local text=control.option or control.text
-      local width=gc:measureText(text).width+(control.options and 24 or 16)
-      width=math.min(id=="model" and 160 or 132,math.max(28,width))
+      local width=math.min(132,math.max(28,gc:measureText(control.text).width+16))
       controls[#controls+1],widths[id]=control,width
-      total=total+width+(#controls>1 and 4 or 0)
     end
-  end
-  -- Elide long labels rather than stretching every control.
-  for _,id in ipairs {"model","access","auto_approve","effort"} do
-    local reduction=math.min(math.max(0,total-gc.width),math.max(0,(widths[id] or 0)-40))
-    widths[id]=widths[id]-reduction; total=total-reduction
   end
   view.control_rects={}
   local x=0
@@ -118,10 +95,9 @@ local function paint_composer(gc,view)
     gc.color=control.selected and Color {r=48,g=77,b=96} or Color {r=38,g=41,b=49}
     gc:fillRect(Rectangle(x+1,1,width-2,gc.height-2))
     gc.color=control.enabled and Color {r=231,g=233,b=240} or Color {r=125,g=130,b=141}
-    local text=elide(gc,control.option or control.text,width-(control.options and 22 or 12))
+    local text=elide(gc,control.text,width-12)
     local size=gc:measureText(text)
     gc:fillText(text,x+6,math.floor((gc.height-size.height)/2))
-    if control.options then gc:fillText("v",x+width-12,math.floor((gc.height-gc:measureText("v").height)/2)) end
     if view.control_focus==control.id then
       gc.color=Color {r=137,g=180,b=210}; gc:fillRect(Rectangle(x+2,gc.height-3,width-4,1))
     end
@@ -151,7 +127,7 @@ end
 local function activate_control(view,id)
   local control=view.controls[id]
   if not control or not control.enabled or control.visible==false then return end
-  if control.options then show_options(view,id) else control.onclick() end
+  control.onclick()
 end
 
 -- Measure actual text in the current context: fallback fonts and their sizes
@@ -405,16 +381,19 @@ function Chat:set_state(state,can_steer)
     local status = self.approval and "Awaiting approval"
       or state == "starting" and "正在启动本地连接…" or state
     self.dialog:modify { id = "status", text = status .. " · Auto-approve: " .. (self.auto_approve and "on" or "off") }
-    update_control(self,{ id = "model", enabled = idle and self.has_models == true })
-    update_control(self,{ id = "effort", enabled = idle and self.has_efforts == true })
+    self.dialog:modify {id="model",enabled=idle and self.has_models==true}
+    self.dialog:modify {id="effort",enabled=idle and self.has_efforts==true}
     update_control(self,{ id = "speed", visible=self.fast_tier~=nil,enabled=idle and self.fast_tier~=nil,
       selected=self.fast_tier~=nil and self.selected_tier==self.fast_tier })
     update_control(self,{ id = "auto_approve", text=self.auto_approve and "Auto-approve edits" or "Ask before edits",selected=self.auto_approve,
       enabled=idle and self.approval==nil })
     local access=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
     local access_caption="Canvas only"
-    for _,level in ipairs(access_levels) do if level.id==access.access then access_caption=level.caption or level.label end end
-    update_control(self,{id="access",text=access_caption.."...",enabled=idle or offline})
+    for _,level in ipairs(access_levels) do if level.id==access.access then access_caption=level.label end end
+    local updating=self.updating_selectors
+    self.updating_selectors=true
+    self.dialog:modify {id="access",option=access_caption,enabled=idle or offline}
+    self.updating_selectors=updating
     self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
     self.dialog:modify { id = "send", enabled = (state=="working" and self.can_steer==true)
       or (idle and self.selection_valid == true and app.sprite ~= nil),text=send_caption(state) }
@@ -422,7 +401,6 @@ function Chat:set_state(state,can_steer)
     local can_stop=state=="working" or state=="steering" or self.approval~=nil
     update_control(self,{ id = "stop", visible=can_stop or state=="stopping",enabled=can_stop })
     update_control(self,{ id = "retry", visible = offline, enabled = offline })
-    if self.options_dialog and not idle then self.options_dialog:close() end
     self.dialog:repaint()
   end
   if self.rename_dialog then
@@ -623,9 +601,8 @@ function Chat:show_history()
   load_page("",nil,false)
 end
 
---- Project the server catalog and persisted selection into composer choice lists.
+--- Project the server catalog and persisted selection into native dropdowns.
 function Chat:set_models(models, model, effort, tier)
-  if self.options_dialog then self.options_dialog:close() end
   self.models, self.selected_model, self.selected_effort,self.selected_tier = models, model, effort,tier or "default"
   if not self.dialog then return end
   self.updating_selectors = true
@@ -674,8 +651,8 @@ function Chat:set_models(models, model, effort, tier)
   end
   if selected and not self.fast_tier then self.selected_tier="default" end
   self.selection_valid = selected ~= nil and valid and (self.selected_tier=="default" or self.selected_tier==self.fast_tier)
-  update_control(self,{id="model", options=labels, option=chosen})
-  update_control(self,{id="effort", options=efforts, option=chosen_effort})
+  project_selector(self,"model",labels,chosen)
+  project_selector(self,"effort",efforts,chosen_effort)
   self.updating_selectors = false
   self:set_state(self.state)
 end
@@ -740,15 +717,15 @@ function Chat:show_settings()
   dlg:show {wait=false}
 end
 
---- Edit an access draft separately from account settings; only Apply commits it.
-function Chat:show_access()
+--- Edit an access draft separately; requested_level preselects a profile without applying it.
+function Chat:show_access(requested_level)
   if self.state~="ready" and self.state~="disconnected" and self.state~="error" then return end
   if self.access_dialog then self.access_dialog:show {wait=false}; return end
   local access=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
   local access_options,chosen={},"Canvas only"
   for _,level in ipairs(access_levels) do
     access_options[#access_options+1]=level.label
-    if level.id==access.access then chosen=level.label end
+    if level.id==(requested_level or access.access) then chosen=level.label end
   end
   local dlg
   dlg=Dialog {title="Aseprite Chat · Access",autofit=Align.LEFT | Align.TOP,onclose=function()
@@ -824,12 +801,12 @@ function Chat:show()
       self.history = nil
       if history then history:close() end
       if self.rename_dialog then self.rename_dialog:close() end
-      if self.options_dialog then self.options_dialog:close() end
       if self.access_dialog then self.access_dialog:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
   self.dialog = dlg
+  self.selector_options={}
   -- A hidden selector gives the content its own grid; Send remains native in
   -- the outer grid for its focus-magnet Enter handling and right alignment.
   dlg:tab {id="chat_content",text="",visible=false}
@@ -847,23 +824,43 @@ function Chat:show()
   dlg:newrow()
   dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
   dlg:newrow()
-  self.controls={}
-  local function add(spec) self.controls[spec.id]=spec end
-  add {id="model",options={"Waiting for connection"},onchoose=function(value)
-    if self.updating_selectors then return end
-    local entry=self.models_by_label[value]
+  dlg:combobox {id="model",hexpand=false,options={"Waiting for connection"},onchange=function()
+    if self.updating_selectors or self.state~="ready" then return end
+    local entry=self.models_by_label[dlg.data.model]
     if entry then
       local tier="default"
       for _,option in ipairs(entry.serviceTiers or {}) do if option.id==self.selected_tier then tier=option.id end end
       self.callbacks.on_settings(entry.model,#entry.supportedReasoningEfforts>0 and entry.defaultReasoningEffort or nil,tier)
     end
   end}
-  add {id="effort",options={"Not supported"},onchoose=function(value)
-    if self.updating_selectors then return end
-    local entry=self.models_by_label[self.controls.model.option]
-    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[value] or nil,
+  dlg:combobox {id="effort",hexpand=false,options={"Not supported"},onchange=function()
+    if self.updating_selectors or self.state~="ready" then return end
+    local entry=self.models_by_label[dlg.data.model]
+    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[dlg.data.effort] or nil,
       self.selected_tier) end
   end}
+  local access_options={}
+  for _,level in ipairs(access_levels) do access_options[#access_options+1]=level.label end
+  access_options[#access_options+1]="Access settings..."
+  dlg:combobox {id="access",hexpand=false,options=access_options,onchange=function()
+    if self.updating_selectors then return end
+    local selected=dlg.data.access
+    self:set_state(self.state)
+    if self.state~="ready" and self.state~="disconnected" and self.state~="error" then return end
+    if selected=="Access settings..." then self:show_access(); return end
+    local profile
+    for _,level in ipairs(access_levels) do if level.label==selected then profile=level.id end end
+    if not profile then return end
+    local current=self.callbacks.on_access_get and self.callbacks.on_access_get() or {}
+    if profile=="workspace" and (current.workspace or "")=="" then self:show_access(profile); return end
+    if not self.callbacks.on_access_apply then return end
+    local applied,error_text=self.callbacks.on_access_apply {access=profile,workspace=current.workspace,reviewer=current.reviewer}
+    self:set_state(self.state)
+    if not applied then self:add_message("access-error","Error","无法更改访问设置。"..(error_text and "\n"..error_text or ""),false) end
+  end}
+  dlg:newrow()
+  self.controls={}
+  local function add(spec) self.controls[spec.id]=spec end
   add {id="stop",text="Stop",visible=false,onclick=self.callbacks.on_stop}
   add {id="auto_approve",text="Ask before edits",selected=self.auto_approve,onclick=function()
     if self.state~="ready" or self.approval then self:set_state(self.state); return end
@@ -872,7 +869,6 @@ function Chat:show()
     if accepted then self:set_approval_mode(enabled)
     else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
   end}
-  add {id="access",text="Canvas only...",onclick=function() self:show_access() end}
   add {id="speed",text="Fast",visible=false,onclick=function()
     if self.state~="ready" or not self.fast_tier then self:set_state(self.state); return end
     local tier=self.selected_tier=="default" and self.fast_tier or "default"
@@ -960,7 +956,6 @@ end
 --- Close owned native dialogs. on_close is reserved for user-initiated closing.
 function Chat:close()
   if self.layout_timer then self.layout_timer:stop(); self.layout_timer=nil end
-  if self.options_dialog then self.options_dialog:close() end
   self:dismiss_approval()
   self.scroll.grab = nil
   local settings = self.settings_dialog

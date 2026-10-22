@@ -12,17 +12,22 @@ local function measure(text) return utf8.len(text) end
 local function native_view(callbacks, preferences)
   local dialogs = {}
   local env = setmetatable({Timer=function(spec) return {start=function() end,stop=function() end,ontick=spec.ontick} end,Dialog=function(spec)
-    local dialog = {data={},widgets={},buttons={},spec=spec,bounds=Rectangle(0,0,500,420)}
+    local dialog = {data={},widgets={},buttons={},modifications={},spec=spec,bounds=Rectangle(0,0,500,420)}
     setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
       __index=function(_,method)
       return function(self,widget)
         if method=="close" then rawset(self,"closed",true); if self.spec.onclose then self.spec.onclose() end
         elseif widget and widget.id then
+          local previous=self.data[widget.id]
           if method=="modify" then
+            self.modifications[#self.modifications+1]=widget
             for key,value in pairs(widget) do self.widgets[widget.id][key]=value end
           else self.widgets[widget.id]=widget; widget.kind=method end
           if widget.option or widget.text then self.data[widget.id]=widget.option or widget.text end
           if widget.selected ~= nil then self.data[widget.id]=widget.selected end
+          if method=="modify" and widget.option and widget.option~=previous and self.widgets[widget.id].onchange then
+            self.widgets[widget.id].onchange()
+          end
         end
         if method=="button" then self.buttons[#self.buttons+1]=widget end
         return self
@@ -40,22 +45,13 @@ local function native_view(callbacks, preferences)
   function gc:fillText() end
   return view,dialogs,gc
 end
-test("composer keeps input above compact controls and a native Send below",function()
-  local view,dialogs,gc=native_view()
+test("model reasoning and access are native dropdowns, separate from action buttons",function()
+  local view,dialogs=native_view()
   local main=dialogs[1]
-  assert(main.widgets.composer and not main.widgets.model, "controls still use separate native rows")
-  view:set_models({{model="ds",displayName="DeepSeek-Flash",supportedReasoningEfforts={{reasoningEffort="high"}}}},"ds","high")
-  view:set_state("ready")
-  gc.width,gc.height=440,26
-  main.widgets.composer.onpaint {context=gc}
-  view.layout_timer.ontick()
-  local rects=view.control_rects
-  assert(rects[1].id=="model" and rects[#rects].id=="access")
-  assert(main.widgets.send.kind=="button" and main.widgets.send.focus==true and not view.controls.send)
-  assert(main.widgets.send.label:match("^ +$"))
-  assert(rects[2].width<70,"compact controls were stretched")
-  assert(rects[1].width>rects[2].width)
-  for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width) end
+  assert(main.widgets.model.kind=="combobox" and main.widgets.effort.kind=="combobox" and main.widgets.access.kind=="combobox")
+  assert(main.widgets.model.hexpand==false and main.widgets.effort.hexpand==false and main.widgets.access.hexpand==false)
+  assert(not view.controls.model and not view.controls.effort and not view.controls.access)
+  assert(main.widgets.send.kind=="button" and main.widgets.send.focus==true)
   view:close()
 end)
 
@@ -120,7 +116,8 @@ end)
 test("model and reasoning choices use catalog labels and recover stale efforts",function()
   local chosen
   local view,dialogs,gc=native_view({on_settings=function(model,effort) chosen={model,effort} end})
-  local controls=view.controls
+  local controls=dialogs[1].widgets
+  local data=dialogs[1].data
   local models={
     {model="wire-a",displayName="Same label",defaultReasoningEffort="high",supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}},
     {model="wire-b",displayName="Same label",defaultReasoningEffort="medium",supportedReasoningEfforts={{reasoningEffort="medium"}}}
@@ -128,7 +125,7 @@ test("model and reasoning choices use catalog labels and recover stale efforts",
   view:set_models(models,"wire-a","high"); view:set_state("ready")
   assert(#controls.model.options==2 and #controls.effort.options==2)
   assert(controls.model.options[1]~=controls.model.options[2])
-  controls.model.onchoose(controls.model.options[2])
+  data.model=controls.model.options[2]; controls.model.onchange()
   assert(chosen[1]=="wire-b" and chosen[2]=="medium")
   view:set_models(models,"wire-b","medium")
   assert(#controls.effort.options==1 and controls.effort.option=="medium")
@@ -137,17 +134,40 @@ test("model and reasoning choices use catalog labels and recover stale efforts",
   view:set_models(plain,"plain","high"); view:set_state("ready")
   assert(not view.selection_valid and #controls.model.options==2)
   assert(controls.model.options[2]=="Plain")
-  controls.model.onchoose("Plain"); assert(chosen[1]=="plain" and chosen[2]==nil)
+  data.model="Plain"; controls.model.onchange(); assert(chosen[1]=="plain" and chosen[2]==nil)
   view:set_models(plain,"plain",nil); assert(view.selection_valid and not controls.effort.enabled)
-  gc.width,gc.height=440,26
-  dialogs[1].widgets.composer.onpaint {context=gc}
-  local rect=view.control_rects[1]
-  dialogs[1].widgets.composer.onmousedown {button=MouseButton.LEFT,x=rect.x+2,y=5}
-  assert(view.options_dialog and #dialogs[2].buttons==1)
-  view:set_state("working"); assert(not view.options_dialog)
-  view:set_state("ready")
-  dialogs[1].widgets.composer.onmousedown {button=MouseButton.LEFT,x=rect.x+2,y=5}
-  dialogs[3].buttons[1].onclick(); assert(not view.options_dialog and chosen[1]=="plain")
+  view:set_state("working"); chosen=nil; controls.model.onchange(); assert(not chosen)
+  assert(#dialogs==1,"native selectors created an extra choice-list window")
+  view:close()
+end)
+
+test("native dropdown selection never rebuilds unchanged options under an open popup",function()
+  local view
+  local models={
+    {model="a",displayName="A",defaultReasoningEffort="low",supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="medium"},{reasoningEffort="high"}}},
+    {model="b",displayName="B",defaultReasoningEffort="low",supportedReasoningEfforts={{reasoningEffort="low"}}},
+    {model="c",displayName="C",defaultReasoningEffort="low",supportedReasoningEfforts={{reasoningEffort="low"}}}
+  }
+  local dialogs
+  view,dialogs=native_view({on_settings=function(model,effort,tier) view:set_models(models,model,effort,tier) end})
+  local main=dialogs[1]
+  view:set_models(models,"a","low"); view:set_state("ready")
+  local first=#main.modifications
+  main.data.effort="medium"; main.widgets.effort.onchange()
+  main.data.effort="high"; main.widgets.effort.onchange()
+  assert(view.selected_effort=="high")
+  for i=first+1,#main.modifications do
+    local change=main.modifications[i]
+    assert(not ((change.id=="model" or change.id=="effort") and change.options),"selection rebuilt the open popup")
+  end
+  first=#main.modifications
+  main.data.model="B"; main.widgets.model.onchange()
+  main.data.model="C"; main.widgets.model.onchange()
+  assert(view.selected_model=="c")
+  for i=first+1,#main.modifications do
+    local change=main.modifications[i]
+    assert(not (change.id=="model" and change.options),"model selection rebuilt its popup")
+  end
   view:close()
 end)
 
@@ -207,6 +227,33 @@ test("Stop only occupies the action bar while a turn or approval can be stopped"
   view:close()
 end)
 
+test("native Access dropdown applies profiles directly and preserves workspace and reviewer",function()
+  local saved={access="read",workspace="D:/sprites",reviewer="auto_review"}
+  local count,reject=0,false
+  local view,dialogs=native_view({on_access_get=function() return saved end,on_access_apply=function(draft)
+    count=count+1
+    if reject then return false,"denied" end
+    saved=draft; return true
+  end})
+  local main=dialogs[1]
+  view:set_state("ready")
+  main.data.access="Canvas only"; main.widgets.access.onchange()
+  assert(count==1 and saved.access=="canvas" and saved.workspace=="D:/sprites" and saved.reviewer=="auto_review")
+  assert(main.data.access=="Canvas only")
+  reject=true; main.data.access="Full access (danger)"; main.widgets.access.onchange()
+  assert(count==2 and main.data.access=="Canvas only" and view.messages[#view.messages].text:find("denied",1,true))
+  view:set_state("working"); main.data.access="Read files"; main.widgets.access.onchange()
+  assert(count==2 and main.data.access=="Canvas only")
+  view:set_state("ready"); saved.workspace=""
+  main.data.access="Workspace write"; main.widgets.access.onchange()
+  assert(count==2 and view.access_dialog and view.access_dialog.data.access_level=="Workspace write")
+  assert(main.data.access=="Canvas only")
+  view.access_dialog:close()
+  main.data.access="Access settings..."; main.widgets.access.onchange()
+  assert(view.access_dialog and main.data.access=="Canvas only")
+  view:close()
+end)
+
 test("access moves to the action bar and only applies a validated draft from its own window",function()
   local saved={access="read",workspace="D:\\sprites",reviewer="user"}
   local applied,accept
@@ -217,20 +264,20 @@ test("access moves to the action bar and only applies a validated draft from its
   end})
   view:set_state("ready")
   local main=dialogs[1]
-  assert(view.controls.access.text:find("Read files",1,true))
-  view.controls.access.onclick(); local panel=dialogs[2]
+  assert(main.widgets.access.option:find("Read files",1,true))
+  view:show_access(); local panel=dialogs[2]
   assert(panel.data.access_level=="Read files" and panel.data.access_workspace=="D:\\sprites")
   panel.data.access_level="Workspace write"; panel.widgets.access_level.onchange()
   panel.data.access_reviewer="Auto-review"; panel.widgets.access_apply.onclick()
   assert(applied.access=="workspace" and applied.reviewer=="auto_review")
   assert(view.access_dialog==panel and panel.widgets.access_error.text=="Invalid folder")
   view:set_state("working")
-  assert(not panel.widgets.access_apply.enabled and not panel.widgets.access_level.enabled and not view.controls.access.enabled)
+  assert(not panel.widgets.access_apply.enabled and not panel.widgets.access_level.enabled and not main.widgets.access.enabled)
   applied=nil; panel.widgets.access_apply.onclick(); assert(not applied)
   view:set_state("ready"); accept=true; panel.widgets.access_apply.onclick()
-  assert(not view.access_dialog and view.controls.access.text:find("Workspace write",1,true))
+  assert(not view.access_dialog and main.widgets.access.option:find("Workspace write",1,true))
   view:show_settings(); assert(not dialogs[3].widgets.access_level)
-  view.controls.access.onclick(); local reopened=view.access_dialog
+  view:show_access(); local reopened=view.access_dialog
   assert(reopened.data.access_level=="Workspace write")
   view:close(); assert(reopened.closed and not view.access_dialog)
 end)
@@ -241,7 +288,7 @@ test("steering availability controls the composer while Stop remains usable",fun
   view:set_state("working",false); assert(not dialogs[1].widgets.send.enabled)
   view:set_state("working",true)
   assert(dialogs[1].widgets.send.enabled and dialogs[1].widgets.send.text=="Steer")
-  assert(not view.controls.model.enabled and view.controls.stop.enabled)
+  assert(not dialogs[1].widgets.model.enabled and view.controls.stop.enabled)
   view:set_state("steering",false)
   assert(not dialogs[1].widgets.send.enabled and view.controls.stop.enabled)
   view:add_message("thought","Summary","Inspect the layers",false)

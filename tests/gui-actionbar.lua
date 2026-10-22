@@ -38,15 +38,15 @@ local report={variant=variant}
 local ok,err=xpcall(function()
   view:show(); view:set_models(models,"ds","high","priority"); view:set_state("ready")
   assert(not view.controls.speed.visible and not view.controls.stop.visible and view.selection_valid)
-  assert(widgets.composer and not widgets.model)
+  assert(widgets.model.kind=="combobox" and widgets.effort.kind=="combobox" and widgets.access.kind=="combobox")
   view.controls.auto_approve.onclick(); assert(view.auto_approve and view.controls.auto_approve.selected)
   view.controls.auto_approve.onclick(); assert(not view.auto_approve)
-  view.controls.access.onclick(); assert(view.access_dialog)
+  view:show_access(); assert(view.access_dialog)
   view.access_dialog:modify {id="access_level",option="Workspace write"}; widgets.access_level.onchange()
   widgets.access_apply.onclick(); assert(view.access_dialog and widgets.access_error.visible)
   view.access_dialog:modify {id="access_workspace",text="D:\\Fixture workspace"}
   widgets.access_apply.onclick(); assert(not view.access_dialog and access.access=="workspace")
-  view.controls.access.onclick(); assert(view.access_dialog.data.access_level=="Workspace write")
+  view:show_access(); assert(view.access_dialog.data.access_level=="Workspace write")
   view.access_dialog:close()
   view:set_models(models,"sol","low","default"); assert(view.controls.speed.visible and not view.controls.speed.selected)
   view.controls.speed.onclick(); assert(view.selected_tier=="priority" and view.controls.speed.selected)
@@ -60,7 +60,7 @@ local ok,err=xpcall(function()
   if variant=="fast" then
     view:set_approval_mode(true); view:set_state("working",true)
   else
-    view:set_models(models,"ds","high","default"); view:set_state("ready"); view.controls.access.onclick()
+    view:set_models(models,"ds","high","default"); view:set_state("ready"); view:show_access()
   end
   view.dialog:modify {title="UI TEST · " .. variant .. " action bar · no connection"}
   local bounds=view.dialog.bounds
@@ -71,7 +71,7 @@ local ok,err=xpcall(function()
     view.access_dialog.bounds=Rectangle(bounds.width+20,42,panel.width,panel.height)
   end
   local rects=assert(view.control_rects)
-  assert(rects[1].id=="model" and not view.controls.send)
+  assert(rects[1].id=="auto_approve" and not view.controls.send)
   assert(widgets.send.kind=="button" and widgets.send.focus==true)
   for i=2,#rects do assert(rects[i].x>=rects[i-1].x+rects[i-1].width,"controls overlap") end
   report.controls=rects
