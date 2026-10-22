@@ -273,7 +273,7 @@ function Controller:_question_resolved(key,status)
       if status=="Answered" and entry.answers then
         local groups={status}
         for _,question in ipairs(entry.request.questions) do
-          groups[#groups+1]=question.question.."\nYou: "..table.concat(entry.answers[question.id],", ")
+          groups[#groups+1]=question.question.."\nYou: "..table.concat(entry.answers[question.id],"\n")
         end
         self.view:add_message(entry.id,"Question",table.concat(groups,"\n\n"),false)
       else

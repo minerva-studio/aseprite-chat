@@ -95,7 +95,7 @@ socket.on('message', raw => {
   if (m.id !== undefined && m.method) {
     if (m.method === 'item/tool/requestUserInput' && questionProbe) {
       questions.push(m.params);
-      socket.send(JSON.stringify({ id: m.id, result: { answers: { color: { answers: ['Gold'] } } } }));
+      socket.send(JSON.stringify({ id: m.id, result: { answers: { color: { answers: ['Gold', 'Note: Keep the outline'] } } } }));
     } else if (m.method === 'item/tool/call') {
       socket.send(JSON.stringify({ id: m.id, result: { success: true, contentItems: [{ type: 'inputText', text: '{"live":true}' }] } }));
     } else {
@@ -167,6 +167,7 @@ try {
   if (questionProbe) {
     check('real Codex emitted a built-in question', questions.length === 1 && questions[0].questions[0].id === 'color', questions);
     check('answer reached the local mock provider', report.requests.some(r => (JSON.stringify(r.toolOutput) ?? '').includes('Gold')));
+    check('supplementary note reached the local mock provider', report.requests.some(r => (JSON.stringify(r.toolOutput) ?? '').includes('Note: Keep the outline')));
     check('server resolved the question', notifications.includes('serverRequest/resolved'));
     // Codex does not persist a resumable rollout until a thread has a turn.
     const resumed = await request('thread/resume', { threadId, excludeTurns: true,

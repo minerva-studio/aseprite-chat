@@ -339,16 +339,18 @@ local function scroll_input(scroll, action, event)
 end
 
 -- Both text surfaces share input handling; Aseprite captures the mouse on canvas presses.
-local function add_scroll_canvas(dialog, spec, scroll, render, input)
-  spec.onpaint = function(ev) render(ev.context) end
+-- live optionally guards events and post-handler repaint when input can close the dialog.
+local function add_scroll_canvas(dialog, spec, scroll, render, input, live)
+  spec.onpaint = function(ev) if not live or live() then render(ev.context) end end
   for field, action in pairs {onwheel="wheel", onmousedown="down", onmousemove="move", onmouseup="up", onkeydown="key",ondblclick="double"} do
     local input_action = action
     spec[field] = function(ev)
+      if live and not live() then return end
       local handled
       if input and (input_action=="key" or input_action=="double") then handled=input(input_action,ev) end
       if not handled then handled=scroll_input(scroll,input_action,ev) end
       if not handled and input and input_action~="key" and input_action~="double" then handled=input(input_action,ev) end
-      if handled then dialog:repaint() end
+      if handled and (not live or live()) then dialog:repaint() end
     end
   end
   dialog:canvas(spec)
@@ -961,12 +963,14 @@ function Chat:show()
   dlg.bounds=Rectangle(bounds.x,bounds.y,bounds.width,bounds.height+40)
 end
 
---- Show one model request with native option buttons and per-question drafts.
---- callback receives {[questionId]={answer}} after all pages, or nil on Skip/close.
+--- Show a canvas option picker with a native Note entry for text/IME handling.
+--- callback receives {[questionId]={answer, optional "Note: ..."}} or nil on Skip/close.
+--- Notes supplement selected options; Other/free-text answers use the note alone.
 --- Dismissing programmatically never answers a retired request.
 function Chat:request_question(request,callback)
   self:dismiss_question()
-  local pending={request=request,index=1,drafts={}}
+  local pending={request=request,index=1,drafts={},updating=true,
+    scroll={offset=0,maximum=0,follow=false,auto_follow=false}}
   local dlg
   local function finish(answers)
     if self.question~=pending then return end
@@ -975,67 +979,150 @@ function Chat:request_question(request,callback)
   end
   dlg=Dialog {title="Aseprite Chat · Question",resizeable=true,onclose=function() finish(nil) end}
   pending.dialog=dlg; self.question=pending
-  local option_count=0
-  for _,question in ipairs(request.questions) do option_count=math.max(option_count,#(question.options or {})) end
-  local function save()
-    local draft=pending.drafts[pending.index] or {}
-    draft.text=dlg.data.answer
-    pending.drafts[pending.index]=draft
+  local function choice_count(question)
+    local count=#(question.options or {})
+    return count+(count>0 and question.isOther and 1 or 0)
   end
-  local function show_choices(question,draft)
-    for index=1,option_count do
-      local option=(question.options or {})[index]
-      -- Ordinary native buttons clear selected on focus changes; the caption
-      -- derives its persistent answer marker from the draft instead.
-      local caption=option and (draft.choice==index and "[x] " or "[ ] ")..index..". "..option.label or ""
-      dlg:modify {id="option_"..index,text=caption,visible=option~=nil}
-      dlg:modify {id="option_description_"..index,text=option and option.description or "",visible=option~=nil and option.description~=""}
+  local function answer_values(question,draft)
+    local options=question.options or {}
+    local note=draft.note or ""
+    if #options==0 or (question.isOther and draft.choice==#options+1) then
+      return note:match("%S") and {note} or nil
     end
+    local selected=options[draft.choice or 0]
+    if not selected then return nil end
+    local values={selected.label}
+    if note:match("%S") then values[2]="Note: "..note end
+    return values
+  end
+  local function save()
+    pending.drafts[pending.index].note=dlg.data.note
+  end
+  local function update_controls()
+    local question=request.questions[pending.index]
+    local draft=pending.drafts[pending.index]
+    local custom=#(question.options or {})==0 or (question.isOther and draft.choice==#question.options+1)
+    dlg:modify {id="note_label",text=custom and "Your answer" or "Note (optional)"}
+    dlg:modify {id="next",enabled=answer_values(question,draft)~=nil,
+      text=pending.index==#request.questions and "Submit answer" or "Continue"}
   end
   local function show_page()
-    local question=request.questions[pending.index]
-    local draft=pending.drafts[pending.index] or {}
+    local draft=pending.drafts[pending.index] or {note=""}
     pending.drafts[pending.index]=draft
+    pending.rows,pending.rendered_index=nil,nil
+    pending.scroll.offset,pending.scroll.maximum,pending.scroll.follow=0,0,false
     pending.updating=true
-    dlg:modify {id="question_page",text="Question "..pending.index.." / "..#request.questions.." · "..question.header}
-    dlg:modify {id="question_body",text=question.question}
-    show_choices(question,draft)
-    local free_text=#(question.options or {})==0 or question.isOther==true
-    dlg:modify {id="other_label",text=#(question.options or {})==0 and "Your answer" or "Other",visible=free_text}
-    dlg:modify {id="answer",text=draft.text or "",visible=free_text}
+    dlg:modify {id="note",text=draft.note}
     dlg:modify {id="question_error",text=""}
     dlg:modify {id="back",enabled=pending.index>1}
-    dlg:modify {id="next",text=pending.index==#request.questions and "Submit answer" or "Next"}
+    update_controls()
     pending.updating=false
+    if pending.shown then dlg:repaint() end
   end
-  dlg:label {id="question_page",text=""}
-  dlg:newrow()
-  dlg:label {id="question_body",text=""}
-  for index=1,option_count do
-    local option_index=index
-    dlg:newrow()
-    dlg:button {id="option_"..index,text="",hexpand=true,onclick=function()
-      if self.question~=pending then return end
+  local function select_choice(index)
+    if self.question~=pending then return end
+    if index<1 or index>choice_count(request.questions[pending.index]) then return end
+    pending.drafts[pending.index].choice=index
+    pending.reveal=true
+    update_controls()
+    dlg:modify {id="question_error",text=""}
+  end
+  local function advance()
+    if self.question~=pending then return end
+    save()
+    if not answer_values(request.questions[pending.index],pending.drafts[pending.index]) then
       local question=request.questions[pending.index]
-      if not (question.options or {})[option_index] then return end
-      local draft=pending.drafts[pending.index]
-      draft.choice,draft.text=option_index,""
-      show_page()
-    end}
-    dlg:newrow()
-    dlg:label {id="option_description_"..index,text=""}
-  end
-  dlg:newrow()
-  dlg:label {id="other_label",text="Other"}
-  dlg:newrow()
-  dlg:entry {id="answer",text="",hexpand=true,onchange=function()
-    if self.question~=pending or pending.updating then return end
-    local draft=pending.drafts[pending.index]
-    draft.text=dlg.data.answer
-    if draft.text:match("%S") then
-      draft.choice=nil
-      show_choices(request.questions[pending.index],draft)
+      dlg:modify {id="question_error",text=#(question.options or {})==0 and "请填写回答。" or "请选择选项；自定义回答请选择 Other 并填写下方内容。"}; return
     end
+    if pending.index<#request.questions then pending.index=pending.index+1; show_page(); return end
+    local answers={}
+    for index,question in ipairs(request.questions) do answers[question.id]=answer_values(question,pending.drafts[index]) end
+    finish(answers)
+  end
+  add_scroll_canvas(dlg,{id="question_body",width=420,height=200,hexpand=true,vexpand=true},pending.scroll,function(gc)
+    if self.question~=pending then return end
+    local question=request.questions[pending.index]
+    local draft=pending.drafts[pending.index]
+    local draws,rows,y={},{},10
+    local bright=Color {r=231,g=233,b=240}
+    local muted=Color {r=159,g=172,b=193}
+    local function paragraph(text,x,color)
+      for _,line in ipairs(Chat.wrap(text,math.max(1,gc.width-x-24),function(value) return gc:measureText(value).width end)) do
+        local height=line_height(gc,line)
+        draws[#draws+1]={text=line,x=x,y=y,height=height,color=color}
+        y=y+height
+      end
+    end
+    paragraph(pending.index.." / "..#request.questions.." · "..question.header,12,muted)
+    y=y+6; paragraph(question.question,12,bright); y=y+10
+    local count=choice_count(question)
+    local text_x=12+gc:measureText(tostring(count)..". ").width+8
+    for index=1,count do
+      local option=(question.options or {})[index] or {label="Other",description="Write your own answer below."}
+      local row={index=index,top=y,label_y=y+6}
+      y=y+6
+      paragraph(option.label,text_x,bright)
+      if option.description~="" then y=y+2; paragraph(option.description,text_x,muted) end
+      y=y+6; row.height=y-row.top; rows[#rows+1]=row; y=y+4
+    end
+    surface(gc,pending.scroll,y+8)
+    if pending.reveal then
+      local selected=rows[draft.choice or 0]
+      if selected then
+        if selected.height>=gc.height or selected.top<pending.scroll.offset then pending.scroll.offset=selected.top
+        elseif selected.top+selected.height>pending.scroll.offset+gc.height then
+          pending.scroll.offset=selected.top+selected.height-gc.height
+        end
+        pending.scroll.offset=math.max(0,math.min(pending.scroll.maximum,pending.scroll.offset))
+      end
+      pending.reveal=nil
+    end
+    pending.rows,pending.rendered_index,pending.hit_width=rows,pending.index,gc.width-18
+    for _,row in ipairs(rows) do
+      local top=row.top-pending.scroll.offset
+      if draft.choice==row.index then
+        gc.color=Color {r=43,g=59,b=78}
+        gc:fillRect(Rectangle(6,top,math.max(1,gc.width-24),row.height))
+      end
+      if row.label_y-pending.scroll.offset<gc.height and row.label_y-pending.scroll.offset>=-line_height(gc) then
+        gc.color=muted
+        gc:fillText(draft.choice==row.index and ">" or tostring(row.index),12,row.label_y-pending.scroll.offset)
+      end
+    end
+    for _,line in ipairs(draws) do
+      local top=line.y-pending.scroll.offset
+      if top>-line.height and top<gc.height then gc.color=line.color; gc:fillText(line.text,line.x,top) end
+    end
+    scrollbar(gc,pending.scroll)
+  end,function(action,event)
+    if self.question~=pending then return false end
+    if action=="key" then
+      local count=choice_count(request.questions[pending.index])
+      local current=pending.drafts[pending.index].choice
+      local digit=event.code:match("^Digit([1-9])$")
+      if (event.code=="ArrowDown" or event.code=="ArrowUp") and count>0 then
+        local index=current and (current-1+(event.code=="ArrowDown" and 1 or -1))%count+1
+          or (event.code=="ArrowDown" and 1 or count)
+        select_choice(index)
+      elseif digit and tonumber(digit)<=count then select_choice(tonumber(digit))
+      elseif event.code=="Enter" then advance()
+      else return false end
+      event:stopPropagation(); return true
+    elseif action=="down" and event.button==MouseButton.LEFT and pending.rendered_index==pending.index
+      and event.x>=6 and event.x<pending.hit_width and event.y>=0 and event.y<pending.scroll.height then
+      local y=event.y+pending.scroll.offset
+      for _,row in ipairs(pending.rows or {}) do
+        if y>=row.top and y<row.top+row.height then select_choice(row.index); return true end
+      end
+    end
+    return false
+  end,function() return self.question==pending end)
+  dlg:newrow()
+  dlg:label {id="note_label",text="Note (optional)"}
+  dlg:newrow()
+  dlg:entry {id="note",text="",hexpand=true,onchange=function()
+    if self.question~=pending or pending.updating then return end
+    save(); update_controls()
   end}
   dlg:newrow()
   dlg:label {id="question_error",text=""}
@@ -1044,29 +1131,11 @@ function Chat:request_question(request,callback)
     if self.question~=pending or pending.index<=1 then return end
     save(); pending.index=pending.index-1; show_page()
   end}
-  dlg:button {id="next",text="Next",onclick=function()
-    if self.question~=pending then return end
-    save()
-    local question=request.questions[pending.index]
-    local draft=pending.drafts[pending.index]
-    local option=(question.options or {})[draft.choice or 0]
-    local answer=option and option.label or (#(question.options or {})==0 or question.isOther) and draft.text
-    if not answer or not answer:match("%S") then
-      dlg:modify {id="question_error",text="请选择一项或填写回答。"}; return
-    end
-    if pending.index<#request.questions then pending.index=pending.index+1; show_page(); return end
-    local answers={}
-    for index,item in ipairs(request.questions) do
-      local saved=pending.drafts[index]
-      local selected=(item.options or {})[saved.choice or 0]
-      answers[item.id]={selected and selected.label or saved.text}
-    end
-    finish(answers)
-  end}
+  dlg:button {id="next",text="Continue",onclick=advance}
   dlg:button {id="skip",text="Skip",onclick=function() finish(nil) end}
-  -- Native controls contain their text before the first show, avoiding a blank
-  -- canvas waiting for a later paint. Native sizing uses the installed fonts.
-  show_page(); dlg:show {wait=false,autoscrollbars=true}; self:set_state(self.state)
+  -- Repaint only after native show has initialized the canvas surface. Paint
+  -- updates derived hit regions and scrolling, never native widget geometry.
+  show_page(); dlg:show {wait=false}; pending.shown=true; dlg:repaint(); self:set_state(self.state)
 end
 
 --- Close only the currently displayed question, without manufacturing an answer.

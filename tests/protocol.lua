@@ -955,9 +955,10 @@ test("questions carry plain data and send chosen and free text answers exactly o
   h:open(); h:start(); question_request(h,"q1")
   assert(held and type(held.request.questions)=="table")
   eq(held.request.questions[1].options[2].description,"Warm highlights")
-  assert(held.reply({color={"Gold"},detail={"Keep the outline"}}))
+  assert(held.reply({color={"Gold","Note: Preserve the palette"},detail={"Keep the outline"}}))
   local result=sent_to(h,"q1").result
-  eq(result.answers.color.answers[1],"Gold"); eq(result.answers.detail.answers[1],"Keep the outline")
+  eq(result.answers.color.answers[1],"Gold"); eq(result.answers.color.answers[2],"Note: Preserve the palette")
+  eq(result.answers.detail.answers[1],"Keep the outline")
   eq(held.reply({color={"Blue"},detail={"ignored"}}),false); eq(h.client.state,"working")
 end)
 test("questions skip explicitly and never display stale or secret requests",function()

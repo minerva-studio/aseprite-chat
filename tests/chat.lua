@@ -986,7 +986,23 @@ test("Lua approval has its own wheel and draggable scrollbar",function()
   assert(view.scroll.offset==0, "approval scroll changed transcript offset")
   view:close()
 end)
-test("question window pages options and free text without selecting a default answer",function()
+local function question_canvas(dialog,gc)
+  local canvas=assert(dialog.widgets.question_body)
+  local labels={}
+  gc.width,gc.height=420,240
+  function gc:fillText(text,x,y) labels[text]={x=x,y=y} end
+  local function repaint()
+    labels={}; canvas.onpaint {context=gc}; return labels
+  end
+  local function click(label)
+    local position=assert(labels[label],"missing visible choice: "..label)
+    canvas.onmousedown {button=MouseButton.LEFT,x=position.x+1,y=position.y+1}
+    repaint()
+  end
+  repaint()
+  return click,repaint
+end
+test("question canvas pages choices and free text without selecting a default answer",function()
   local received
   local view,dialogs,gc=native_view()
   view:set_state("working",true)
@@ -997,13 +1013,12 @@ test("question window pages options and free text without selecting a default an
   local dialog=dialogs[#dialogs]
   assert(view.question and dialog.closed~=true)
   dialog.widgets.next.onclick(); assert(not received and dialog.closed~=true,"unselected answer was submitted")
-  assert(dialog.widgets.option_1.kind=="button" and dialog.widgets.option_2.kind=="button")
-  assert(dialog.widgets.question_body.kind=="label" and dialog.widgets.question_body.text=="Which highlight?")
-  assert(not dialog.widgets.choice,"options are still hidden in a dropdown")
-  dialog.widgets.option_2.onclick()
+  assert(dialog.widgets.question_body.kind=="canvas" and not dialog.widgets.option_1 and not dialog.widgets.choice)
+  local click,repaint=question_canvas(dialog,gc)
+  click("Gold")
   dialog.widgets.next.onclick()
-  dialog.widgets.back.onclick(); assert(dialog.widgets.option_2.text=="[x] 2. Gold","back navigation discarded the draft")
-  dialog.widgets.next.onclick(); dialog.data.answer="Keep the outline"
+  dialog.widgets.back.onclick(); repaint()
+  dialog.widgets.next.onclick(); dialog.data.note="Keep the outline"
   dialog.widgets.next.onclick()
   assert(received.color[1]=="Gold" and received.detail[1]=="Keep the outline")
   assert(dialog.closed and not view.question)
@@ -1015,9 +1030,11 @@ test("question custom answers descriptions and cancel remain separate from edit 
   view:request_question({questions={{id="color",header="Color",question="Which highlight?",isOther=true,
     options={{label="Blue",description="Cool highlights"}}}}},function(value) answers=value; calls=calls+1 end)
   local dialog=dialogs[#dialogs]
-  assert(dialog.widgets.option_description_1.text=="Cool highlights")
-  assert(dialog.widgets.answer.visible and dialog.widgets.other_label.text=="Other")
-  dialog.data.answer="Purple"; dialog.widgets.answer.onchange(); dialog.widgets.next.onclick()
+  local click,repaint=question_canvas(dialog,gc)
+  assert(repaint()["Cool highlights"])
+  click("Other")
+  assert(dialog.widgets.note.kind=="entry")
+  dialog.data.note="Purple"; dialog.widgets.note.onchange(); dialog.widgets.next.onclick()
   assert(answers.color[1]=="Purple" and calls==1)
   view:request_question({questions={{id="text",header="Text",question="What?"}}},function(value)
     assert(value==nil); calls=calls+1 end)
@@ -1033,43 +1050,103 @@ test("dismissed questions cannot reply later and owned question windows guard En
   view:request_question({questions={{id="text",header="Text",question="What?"}}},function() calls=calls+1 end)
   assert(not view:can_submit(true))
   local dialog=dialogs[#dialogs]; local submit=dialog.widgets.next.onclick
-  view:dismiss_question(); dialog.data.answer="late"; submit()
+  view:dismiss_question(); dialog.data.note="late"; submit()
   assert(calls==0 and dialog.closed)
   view:close(); sprite:close()
 end)
-test("native question choices replace Other text and submit the explicit selection",function()
+test("question choices preserve supplementary notes and submit both values",function()
   local answer
-  local view,dialogs=native_view()
+  local view,dialogs,gc=native_view()
   view:request_question({questions={{id="color",header="Color",question="Which highlight?",isOther=true,
     options={{label="Blue",description="Cool highlights"},{label="Gold",description="Warm highlights"}}}}},function(value) answer=value end)
   local dialog=dialogs[#dialogs]
-  assert(dialog.widgets.question_body.kind=="label" and dialog.widgets.option_1.kind=="button")
-  assert(dialog.show_snapshot.question_body.text=="Which highlight?")
-  assert(dialog.show_snapshot.option_2.text=="[ ] 2. Gold" and dialog.show_snapshot.option_2.visible)
-  assert(dialog.show_snapshot.answer.visible,"Other was hidden on first open")
-  dialog.data.answer="Purple"; dialog.widgets.answer.onchange()
-  dialog.widgets.option_1.onclick()
-  -- Native ordinary buttons can clear selected when focus moves elsewhere.
-  dialog.widgets.option_1.selected=false
-  assert(dialog.data.answer=="" and dialog.widgets.option_1.text=="[x] 1. Blue"
-    and dialog.widgets.option_2.text=="[ ] 2. Gold","focus erased the visible answer selection")
-  dialog.widgets.next.onclick(); assert(answer.color[1]=="Blue")
+  assert(dialog.show_snapshot.note.visible~=false)
+  local click=question_canvas(dialog,gc)
+  dialog.data.note="Preserve the outline"; dialog.widgets.note.onchange()
+  click("Blue"); click("Gold")
+  assert(dialog.data.note=="Preserve the outline","choosing an option cleared the note")
+  dialog.widgets.next.onclick()
+  assert(answer.color[1]=="Gold" and answer.color[2]=="Note: Preserve the outline")
   view:close()
 end)
-test("question paging hides old options and restores Other drafts",function()
+test("question paging rejects old hit regions and restores notes and Other drafts",function()
   local answers
-  local view,dialogs=native_view()
+  local view,dialogs,gc=native_view()
   view:request_question({questions={
     {id="color",header="Color",question="Which color?",isOther=true,options={{label="Blue",description="Cool"}}},
     {id="text",header="Text",question="What else?"}}},function(value) answers=value end)
   local dialog=dialogs[#dialogs]
-  dialog.data.answer="Purple"; dialog.widgets.answer.onchange(); dialog.widgets.next.onclick()
-  assert(dialog.widgets.option_1.visible==false and dialog.widgets.other_label.text=="Your answer")
-  dialog.widgets.option_1.onclick()
-  dialog.data.answer="Outline"; dialog.widgets.answer.onchange(); dialog.widgets.back.onclick()
-  assert(dialog.widgets.answer.visible and dialog.data.answer=="Purple" and dialog.widgets.option_1.text=="[ ] 1. Blue")
-  dialog.widgets.next.onclick(); assert(dialog.data.answer=="Outline")
+  local click,repaint=question_canvas(dialog,gc)
+  click("Other")
+  dialog.data.note="Purple"; dialog.widgets.note.onchange(); dialog.widgets.next.onclick()
+  assert(dialog.widgets.note_label.text=="Your answer")
+  dialog.widgets.question_body.onmousedown {button=MouseButton.LEFT,x=30,y=70}
+  dialog.data.note="Outline"; dialog.widgets.note.onchange(); dialog.widgets.back.onclick(); repaint()
+  assert(dialog.data.note=="Purple")
+  dialog.widgets.next.onclick(); assert(dialog.data.note=="Outline")
   dialog.widgets.next.onclick(); assert(answers.color[1]=="Purple" and answers.text[1]=="Outline")
+  view:close()
+end)
+test("question keyboard selection keeps notes and paint never changes native layout",function()
+  local answers
+  local view,dialogs,gc=native_view()
+  view:request_question({questions={{id="color",header="Color",question="Which?",isOther=false,
+    options={{label="Blue",description="Cool"},{label="Gold",description="Warm"}}}}},function(value) answers=value end)
+  local dialog=dialogs[#dialogs]
+  local click,repaint=question_canvas(dialog,gc)
+  local changes=#dialog.modifications
+  repaint(); assert(#dialog.modifications==changes,"paint modified native layout")
+  dialog.data.note="Keep edges"; dialog.widgets.note.onchange()
+  local stopped=false
+  dialog.widgets.question_body.onkeydown {code="ArrowDown",stopPropagation=function() stopped=true end}
+  dialog.widgets.question_body.onkeydown {code="Digit2",stopPropagation=function() end}
+  dialog.widgets.next.onclick()
+  assert(stopped and answers.color[1]=="Gold" and answers.color[2]=="Note: Keep edges")
+  view:close()
+end)
+test("question keyboard reveals a distant option and retired canvas handlers cannot reply",function()
+  local calls=0
+  local view,dialogs,gc=native_view()
+  view:request_question({questions={{id="color",header="Color",question="Which?",options={
+    {label="Blue",description=string.rep("long description ",40)},
+    {label="Gold",description=string.rep("long description ",40)},
+    {label="Green",description="Final choice"}}}}},function() calls=calls+1 end)
+  local dialog=dialogs[#dialogs]
+  local _,repaint=question_canvas(dialog,gc)
+  local canvas=dialog.widgets.question_body
+  canvas.onkeydown {code="Digit3",stopPropagation=function() end}
+  assert(repaint()["Green"],"keyboard did not reveal the selected row")
+  view:dismiss_question()
+  rawset(dialog,"repaint",function() error("retired question was repainted") end)
+  canvas.onkeydown {code="Enter",stopPropagation=function() end}
+  canvas.onkeydown {code="ArrowDown",stopPropagation=function() end}
+  canvas.onwheel {deltaY=1}
+  canvas.onmousedown {button=MouseButton.LEFT,x=30,y=50}
+  assert(calls==0)
+  view:close()
+end)
+test("question Enter completion never repaints its closed native dialog",function()
+  local answers
+  local view,dialogs,gc=native_view()
+  view:request_question({questions={{id="text",header="Text",question="What?"}}},function(value) answers=value end)
+  local dialog=dialogs[#dialogs]
+  question_canvas(dialog,gc)
+  rawset(dialog,"repaint",function(self) assert(self.closed~=true,"closed question was repainted") end)
+  dialog.data.note="Keep edges"; dialog.widgets.note.onchange()
+  dialog.widgets.question_body.onkeydown {code="Enter",stopPropagation=function() end}
+  assert(answers.text[1]=="Keep edges" and dialog.closed==true)
+  view:close()
+end)
+test("question layout contains tall fallback glyphs without overlapping following rows",function()
+  local view,dialogs,gc=native_view()
+  view:request_question({questions={{id="color",header="Color",question="高光界",options={
+    {label="界",description="Cool highlights"},{label="Gold",description="Warm highlights"}}}}},function() end)
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("界",1,true) and 30 or 10} end
+  local _,repaint=question_canvas(dialogs[#dialogs],gc)
+  gc.height=420
+  local positions=repaint()
+  assert(positions["Cool highlights"].y>=positions["界"].y+34,"description overlaps a tall option label")
+  assert(positions.Gold.y>=positions["Cool highlights"].y+14,"following option overlaps its predecessor")
   view:close()
 end)
 print("chat: " .. passed .. " passed")

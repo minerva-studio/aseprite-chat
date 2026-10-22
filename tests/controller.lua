@@ -516,7 +516,7 @@ scenario("completed questions replace the pending record with paired questions a
   p.options.on_question(request,function(answers) p.options.on_question_resolved("pair","Answered"); return true end)
   local start=#v.messages
   local pending_id=v.messages[start][1]
-  v.question_reply({color={"Gold"},layer={"Wings"}})
+  v.question_reply({color={"Gold","Note: Keep the outline"},layer={"Wings"}})
   local rows={}
   for index=start+1,#v.messages do
     local entry=v.messages[index]
@@ -525,7 +525,7 @@ scenario("completed questions replace the pending record with paired questions a
   assert(#rows==1,"question set was split into multiple conversation messages")
   assert(v.messages[start+1][1]==pending_id,"pending question record was not replaced")
   assert(rows[1].role=="Question")
-  assert(rows[1].text=="Answered\n\nWhich color?\nYou: Gold\n\nWhich layer?\nYou: Wings",
+  assert(rows[1].text=="Answered\n\nWhich color?\nYou: Gold\nNote: Keep the outline\n\nWhich layer?\nYou: Wings",
     "each answer must directly follow its corresponding question")
 end)
 print("controller: " .. passed .. " passed")
