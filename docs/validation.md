@@ -65,6 +65,14 @@ Independent review first found a Restricted-policy direct-file invocation failur
 
 The first disposable GUI attempt exposed an unreadably long native command-permission dialog and a reentrant test error handler. That run failed and is not counted as a successful GUI connection. The command now runs from short unique temporary cmd/source paths with fixed cmd line length; the launcher and GUI driver guard permission/result processing against timer reentry. The second disposable editor displayed a readable native file-write prompt (ignored work/auto-gui-short-411880.png) and was closed without granting permissions or changing trust. First-use file/process/network approval and reaching ready after those approvals remain a manual GUI acceptance step. Both test editors were stopped by their recorded owned PIDs; existing user editors were not operated.
 
+## Installation repair in 0.2.1
+
+The user's actual profile still contained 0.1.2 without launcher.lua, while ws 8.22.0 appeared as a separate extension. The 0.2.0 ZIP sorted node_modules/ws/package.json before the root manifest. Aseprite v1.3.18 Extensions::getCompressedExtensionInfo selects the first archive entry whose basename is package.json, then uses its parent as the extraction prefix. Thus the earlier extracted-package smoke established runtime behavior but did not establish native installability.
+
+Packaging now puts the root package.json first and sorts the remaining entries. tests/package.ps1 first reproduced the wrong ws identity, then passed with aseprite-chat 0.2.1 while retaining the complete nested runtime/license. The interpretation is checked against the official v1.3.18 source at https://github.com/aseprite/aseprite/blob/v1.3.18/src/app/extensions.cpp#L1145.
+
+The actual profile installation was backed up and replaced with 0.2.1, preserving __pref.lua byte-for-byte and updating the installed-file inventory. The accidentally installed ws directory was moved into that same backup only after matching its identity and every runtime file against the bundled dependency. No editor process or document was closed. Actual Aseprite Lua loaded launcher.lua from the profile's installed extension directory, started/reused the bridge, and a real account/catalog/turn probe reported chatgpt, seven models and startup-ok on thread 01a1611d-cbbe-7ff1-9f89-abaa4b65b8a8. Existing editors still need a user-controlled restart to replace already loaded old Lua; first-use GUI permission decisions remain native prompts.
+
 ## Practical boundaries
 
 - The packaged extension manifest and menu group are checked; installation into the user's existing Aseprite profile is a separate user step. Native UI integration loads the same production modules through its test driver.

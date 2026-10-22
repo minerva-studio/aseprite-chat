@@ -56,6 +56,7 @@ Run the focused suites with an installed Aseprite executable:
 powershell.exe -NoProfile -File tests/launch.ps1
 npm test
 ./scripts/package.ps1
+./tests/package.ps1
 ```
 
 The test runner checks printed pass markers as well as exit codes because Aseprite can print a Lua error while returning zero.

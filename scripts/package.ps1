@@ -15,7 +15,9 @@ $wsFiles = @(Get-ChildItem -LiteralPath $wsRoot -File -Recurse | ForEach-Object 
   $relative = $_.FullName.Substring($projectRoot.Length).TrimStart([char[]]@(92, 47)).Replace([char]92, '/')
   if ($relative -notmatch '^node_modules/ws/(node_modules|prebuilds)/' -and $relative -notmatch '\.(node|dll|so|dylib)$') { $relative }
 })
-$packageEntries = @($runtimeFiles + $wsFiles | Sort-Object -Unique)
+# Aseprite selects the first package.json anywhere in the archive. Its own
+# manifest must precede dependency manifests so installation targets this root.
+$packageEntries = @('package.json') + @($runtimeFiles + $wsFiles | Where-Object { $_ -ne 'package.json' } | Sort-Object -Unique)
 Add-Type -AssemblyName System.IO.Compression
 $outputPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
   Join-Path (Join-Path $projectRoot 'dist') 'aseprite-chat.aseprite-extension'
