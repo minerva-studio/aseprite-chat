@@ -43,9 +43,10 @@ local function elide(gc,text,width)
   return table.concat(chars).."…"
 end
 
--- Fallback glyphs can be taller than Latin text in Aseprite's native font.
+-- Ink bounds omit font bearings and vary per string. A shared mixed-script
+-- sample plus leading keeps layout stable across Latin and CJK message text.
 local function line_height(gc)
-  return math.max(gc:measureText("Mg").height,gc:measureText("汉字").height)+3
+  return math.max(gc:measureText("Mg").height,gc:measureText("汉字国魔Agjpqy_09").height)+4
 end
 
 local function surface(gc,scroll,height)
@@ -86,27 +87,30 @@ end
 -- Cards retain one text source; expansion is presentation state on that item.
 local function paint_messages(gc,view)
   local scroll=view.scroll
-  local width=math.max(1,gc.width-42)
+  local full_width=math.max(1,gc.width-26)
+  local body_line_height=line_height(gc)
+  local base_header_height=gc:measureText("Mg").height+10
   local cards,top={},8
   for _,message in ipairs(view.messages) do
     if message.text~="" then
       local folded=message.role=="Tool" or message.role=="Summary"
+      local card_width=message.role=="You" and math.max(24,math.floor(full_width*0.86)) or full_width
+      local width=math.max(1,card_width-16)
       local title=message.role
       if message.role=="Tool" then
         title=message.text:match("^[^\n]+") or "Tool"
         title=title:gsub("^read_sprite","Read canvas"):gsub("^execute_lua","Edit canvas")
       elseif message.role=="Summary" then title="Reasoning summary" end
       if folded then title=(message.expanded and "[-] " or "[+] ")..title end
+      local header_height=math.max(base_header_height,gc:measureText(title).height+10)
       local lines={}
       if not folded or message.expanded then
         lines=Chat.wrap(message.text,width,function(text) return gc:measureText(text).width end)
       end
-      local header_height=gc:measureText(title).height+10
-      local body_line_height=gc:measureText("Mg").height+3
-      for _,line in ipairs(lines) do body_line_height=math.max(body_line_height,gc:measureText(line).height+3) end
-      local height=header_height+#lines*body_line_height
+      local height=header_height+#lines*body_line_height+(#lines>0 and 4 or 0)
       cards[#cards+1]={message=message,top=top,height=height,title=title,lines=lines,folded=folded,
-        header_height=header_height,line_height=body_line_height}
+        header_height=header_height,line_height=body_line_height,width=card_width,
+        x=message.role=="You" and gc.width-18-card_width or 8}
       top=top+height+(folded and not message.expanded and 4 or 8)
     end
   end
@@ -125,27 +129,44 @@ local function paint_messages(gc,view)
     if y+card.height>0 and y<gc.height then
       local role=card.message.role
       gc.color=role=="You" and Color {r=39,g=54,b=70} or Color {r=39,g=42,b=50}
-      gc:fillRect(Rectangle(8,y,gc.width-26,card.height))
+      gc:fillRect(Rectangle(card.x,y,card.width,card.height))
       gc.color=role=="You" and Color {r=140,g=185,b=229} or role=="Codex" and Color {r=142,g=204,b=174}
         or role=="Error" and Color {r=246,g=145,b=145} or Color {r=180,g=184,b=203}
       if card.message.text:find(" · Failed",1,true) or card.message.text:find(" · Rejected",1,true) then gc.color=Color {r=246,g=163,b=145} end
-      if y+5>=0 and y+5<gc.height-gc:measureText(card.title).height then gc:fillText(elide(gc,card.title,width),16,y+5) end
+      local title=elide(gc,card.title,math.max(1,card.width-16))
+      local title_x=role=="You" and card.x+card.width-8-gc:measureText(title).width or card.x+8
+      if y+5>=0 and y+5<gc.height-gc:measureText(title).height then gc:fillText(title,title_x,y+5) end
       gc.color=Color {r=231,g=233,b=240}
       for index,line in ipairs(card.lines) do
         local line_y=y+card.header_height+(index-1)*card.line_height
-        if line_y>=0 and line_y<gc.height-gc:measureText(line).height then gc:fillText(line,16,line_y) end
+        if line_y>=0 and line_y<gc.height-gc:measureText(line).height then gc:fillText(line,card.x+8,line_y) end
       end
     end
   end
   scrollbar(gc,scroll)
+  scroll.latest=nil
+  if scroll.offset<scroll.maximum then
+    local label="Jump to latest"
+    local width=gc:measureText(label).width+20
+    local height=base_header_height+2
+    local x,y=math.max(8,gc.width-width-22),gc.height-height-8
+    scroll.latest={x=x,y=y,width=width,height=height}
+    gc.color=Color {r=66,g=84,b=108}; gc:fillRect(Rectangle(x,y,width,height))
+    gc.color=Color {r=239,g=242,b=249}; gc:fillText(label,x+10,y+5)
+  end
 end
 
 local function transcript_input(view,action,event)
   local message
   if action=="down" and event.button==MouseButton.LEFT then
+    local latest=view.scroll.latest
+    if latest and event.x>=latest.x and event.x<latest.x+latest.width and event.y>=latest.y and event.y<latest.y+latest.height then
+      view.scroll.follow,view.scroll.anchor,view.focused_message=true,nil,nil
+      return true
+    end
     for _,card in ipairs(view.scroll.cards or {}) do
       local y=event.y+view.scroll.offset
-      if event.x>=8 and event.x<(view.scroll.track and view.scroll.track.x or math.huge)
+      if event.x>=card.x and event.x<card.x+card.width
           and y>=card.top and y<card.top+card.header_height then
         view.focused_message=card.message.id
         if card.folded then message=card.message end
@@ -256,7 +277,7 @@ end
 function Chat:clear()
   self.messages, self.by_id = {}, {}
   self.focused_message=nil
-  self.scroll.cards,self.scroll.anchor=nil,nil
+  self.scroll.cards,self.scroll.anchor,self.scroll.latest=nil,nil,nil
   self.scroll.offset, self.scroll.follow, self.scroll.grab = 0, true, nil
   if self.dialog then self.dialog:modify {id="conversation",text="New chat"}; self.dialog:repaint() end
 end
@@ -278,7 +299,6 @@ function Chat:set_state(state)
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
     self.dialog:modify { id = "retry", visible = offline, enabled = offline }
-    self.dialog:modify { id = "latest", visible = not offline }
   end
   if self.settings_dialog then
     local manual = self.settings_dialog.data.manual == true
@@ -315,11 +335,7 @@ end
 local function paint_history(gc,history)
   local scroll=history.scroll
   local line_height=line_height(gc)
-  for _,thread in ipairs(history.entries) do
-    line_height=math.max(line_height,gc:measureText(preview_text(thread.name)).height+3,
-      gc:measureText(preview_text(thread.preview)).height+3)
-  end
-  local row_height=line_height*2+6
+  local row_height=line_height*2+12
   -- Pages only append entries, so the visible row index and relative Y remain
   -- stable even when newly loaded fallback glyphs increase the shared row height.
   if history.row_height and history.row_height~=row_height then
@@ -338,7 +354,7 @@ local function paint_history(gc,history)
     local y=8+(index-1)*history.row_height-scroll.offset
     if y+history.row_height>0 and y<gc.height then
       gc.color=index==history.selected and Color {r=51,g=70,b=91} or Color {r=38,g=41,b=49}
-      gc:fillRect(Rectangle(6,y,gc.width-24,history.row_height-6))
+      gc:fillRect(Rectangle(6,y,gc.width-24,history.row_height-4))
       local preview=preview_text(thread.preview)
       local title=thread.name and thread.name~="" and thread.name or preview~="" and preview or "Untitled conversation"
       local date=type(thread.updatedAt)=="number" and os.date("%m-%d %H:%M",thread.updatedAt) or ""
@@ -470,7 +486,7 @@ function Chat:set_models(models, model, effort)
   for _,entry in ipairs(models or {}) do names[entry.displayName]=(names[entry.displayName] or 0)+1 end
   self.models_by_label = {}
   for _, entry in ipairs(models or {}) do
-    local label = names[entry.displayName]>1 and entry.displayName .. " (" .. entry.model .. ")" or entry.displayName
+    local label = "Model: "..(names[entry.displayName]>1 and entry.displayName .. " (" .. entry.model .. ")" or entry.displayName)
     labels[#labels+1], self.models_by_label[label] = label, entry
     if entry.model == model then chosen, selected = label, entry end
   end
@@ -480,22 +496,26 @@ function Chat:set_models(models, model, effort)
   if not chosen then
     chosen = confirm_model and "Confirm model selection" or not models and "Waiting for connection"
       or model and ("Unavailable: " .. model) or "Select a model"
+    chosen="Model: "..chosen
     table.insert(labels, 1, chosen)
   end
   local efforts, valid = {}, false
+  self.efforts_by_label={}
   if selected then
     for _, option in ipairs(selected.supportedReasoningEfforts) do
-      efforts[#efforts+1] = option.reasoningEffort
+      local label="Reasoning: "..option.reasoningEffort
+      efforts[#efforts+1] = label
+      self.efforts_by_label[label]=option.reasoningEffort
       if option.reasoningEffort == effort then valid = true end
     end
   end
   self.has_efforts = #efforts > 0
-  local chosen_effort = effort
+  local chosen_effort = effort and "Reasoning: "..effort
   if #efforts == 0 then
-    chosen_effort = "Not supported"; efforts[1] = chosen_effort
+    chosen_effort = "Reasoning: Not supported"; efforts[1] = chosen_effort
     valid = selected ~= nil and effort == nil
   elseif not valid then
-    chosen_effort = "Select reasoning level"; table.insert(efforts, 1, chosen_effort)
+    chosen_effort = "Reasoning: Select level"; table.insert(efforts, 1, chosen_effort)
   end
   self.selection_valid = selected ~= nil and valid
   self.dialog:modify {id="model", options=labels, option=chosen}
@@ -547,7 +567,7 @@ end
 function Chat:show()
   if self.dialog then self.dialog:show { wait = false }; return end
   local dlg
-  dlg = Dialog { title = "Aseprite Chat · Codex", resizeable = true, onclose = function()
+  dlg = Dialog { title = "Aseprite Chat · Codex", resizeable = true, autofit=0, onclose = function()
     if self.dialog == dlg then
       self.dialog = nil
       self:dismiss_approval()
@@ -575,31 +595,32 @@ function Chat:show()
   add_scroll_canvas(dlg,{id="transcript",width=440,height=280,hexpand=true,vexpand=true},self.scroll,
     function(gc) paint_messages(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
   dlg:newrow()
-  dlg:entry {id="input",text="",focus=true}
-  dlg:newrow()
-  dlg:label {text="Model / reasoning"}
-  dlg:newrow()
-  dlg:combobox {id="model",options={"Waiting for connection"},onchange=function()
+  dlg:combobox {id="model",options={"Model: Waiting for connection"},onchange=function()
     if self.updating_selectors then return end
     local entry=self.models_by_label[dlg.data.model]
     if entry then self.callbacks.on_settings(entry.model,#entry.supportedReasoningEfforts>0 and entry.defaultReasoningEffort or nil) end
   end}
-  dlg:combobox {id="effort",options={"Not supported"},onchange=function()
+  dlg:combobox {id="effort",options={"Reasoning: Not supported"},onchange=function()
     if self.updating_selectors then return end
     local entry=self.models_by_label[dlg.data.model]
-    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and dlg.data.effort or nil) end
+    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[dlg.data.effort] or nil) end
   end}
+  dlg:newrow()
+  dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
   dlg:newrow()
   dlg:button {id="send",text="Send",focus=true,onclick=function()
     if self.callbacks.on_send(dlg.data.input) then dlg:modify {id="input",text=""} end
   end}
   dlg:button {id="stop",text="Stop",onclick=self.callbacks.on_stop}
-  dlg:button {id="latest",text="Jump to latest",onclick=function() self.scroll.follow=true; dlg:repaint() end}
   dlg:button {id="retry",text="Retry",onclick=function()
     self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
   end}
   self:set_models(self.models, self.selected_model, self.selected_effort)
   dlg:show { wait = false }
+  -- Retain the native entry's text/IME handling, giving it and the transcript
+  -- extra vertical room without changing their minimum native widget sizes.
+  local bounds=dlg.bounds
+  dlg.bounds=Rectangle(bounds.x,bounds.y,bounds.width,bounds.height+40)
 end
 
 --- Show complete Lua and summary; the caller must revalidate after approval.

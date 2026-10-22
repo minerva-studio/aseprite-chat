@@ -21,7 +21,7 @@ view=Chat.new({
   on_list_threads=function(_,_,callback)
     local entries={}
     for i=1,30 do entries[i]={id="native-"..i,name=i==1 and "魔法书 · 调整封面高光" or "Canvas conversation "..i,
-      preview="Inspect layers and refine the current sprite.",updatedAt=os.time()-i*3600,status=i==2 and "active" or "idle"} end
+      preview=i==1 and "Remember the word opal. Use read_sprite to inspect this unsaved 8x8 canvas." or "Inspect layers and refine the current sprite.",updatedAt=os.time()-i*3600,status=i==2 and "active" or "idle"} end
     callback({data=entries}); return true
   end,
   on_open_thread=function(id) opened=id; return true end,
@@ -37,7 +37,9 @@ view:add_message("user","You","检查这张画布，帮我调整封面的高光�
 view:add_message("tool","Tool",'read_sprite · Succeeded\nResult:\n{"width":32,"height":32,"layers":10,"revision":42}',false)
 view:add_message("summary","Summary","先检查图层和当前像素，再决定修改范围。",false)
 view:add_message("edit","Tool","execute_lua · Succeeded\nLua:\nlocal image = sprite.cels[1].image:clone()\n-- Fixture display only; never executed",false)
-view:add_message("answer","Codex","已检查画布。封面高光集中在右上方，可以沿边框收窄亮部，并保留文字的对比度。\n\n工具详情已折叠，点击 [+] 可以查看。",false)
+view:add_message("answer","Codex","opal。已将 (1,1) 设为不透明绿色，克隆图像并赋回成功；未保存或打开文档。置信度 100%。",false)
+view:add_message("user2","You","What word did I ask you to remember? Call read_sprite to inspect the current sprite without editing it, then reply with that word only.",false)
+view:add_message("answer2","Codex","我会先检查画布，再克隆首个 cel 的图像，将 (1,1) 设为不透明绿色并赋回；不会保存或打开文档。",false)
 local phase,began,timer,finished,running=1,os.time()
 local function finish(ok,err)
   finished=true; timer:stop()
@@ -59,13 +61,18 @@ timer=Timer {interval=0.1,ontick=function()
     assert(os.time()-began<15,"native paint did not complete")
     if phase==1 then
       if not view.scroll.cards then return end
-      assert(#view.scroll.cards==5 and #view.scroll.cards[2].lines==0)
+      assert(#view.scroll.cards==7 and #view.scroll.cards[2].lines==0)
       surfaces.transcript.onmousedown {button=MouseButton.LEFT,x=20,y=view.scroll.cards[2].top-view.scroll.offset+8}
       phase=2
     elseif phase==2 then
       assert(view.by_id.tool.expanded)
       surfaces.transcript.onkeydown {code="Enter",stopPropagation=function() end}
       assert(not view.by_id.tool.expanded)
+      assert(view.scroll.latest,"no transcript jump overlay")
+      local jump=view.scroll.latest
+      surfaces.transcript.onmousedown {button=MouseButton.LEFT,x=jump.x+2,y=jump.y+2}
+      assert(view.scroll.follow)
+      surfaces.transcript.onkeydown {code="Home",stopPropagation=function() end}
       view:show_history(); phase=3
     elseif phase==3 then
       if not view.history.row_height then return end

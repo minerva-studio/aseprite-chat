@@ -12,7 +12,7 @@ local function measure(text) return utf8.len(text) end
 local function native_view(callbacks, preferences)
   local dialogs = {}
   local env = setmetatable({Dialog=function(spec)
-    local dialog = {data={},widgets={},buttons={},spec=spec}
+    local dialog = {data={},widgets={},buttons={},spec=spec,bounds=Rectangle(0,0,500,420)}
     setmetatable(dialog,{__newindex=function(_,key) error("Native Dialog cannot own custom field: " .. key) end,
       __index=function(_,method)
       return function(self,widget)
@@ -64,7 +64,7 @@ test("stream completion replaces deltas without duplication", function()
 end)
 test("model and reasoning widgets are actual dropdowns populated from catalog values", function()
   local widgets, data = {}, {}
-  local dialog = setmetatable({data=data}, {__index=function(_,method)
+  local dialog = setmetatable({data=data,bounds=Rectangle(0,0,500,420)}, {__index=function(_,method)
     return function(self,spec)
       if spec and spec.id then
         if method == "modify" then
@@ -97,13 +97,13 @@ test("model and reasoning widgets are actual dropdowns populated from catalog va
   data.model=widgets.model.options[2]; widgets.model.onchange()
   assert(chosen[1]=="wire-b" and chosen[2]=="medium")
   view:set_models(models,"wire-b","medium")
-  assert(#widgets.effort.options==1 and data.effort=="medium")
+  assert(#widgets.effort.options==1 and data.effort=="Reasoning: medium")
   view:set_state("working"); assert(not widgets.model.enabled and not widgets.effort.enabled)
   local plain={{model="plain",displayName="Plain",supportedReasoningEfforts={}}}
   view:set_models(plain,"plain","high"); view:set_state("ready")
   assert(not view.selection_valid and #widgets.model.options==2, "stale effort cannot be explicitly repaired")
-  assert(widgets.model.options[2]=="Plain", "unique display name repeats its technical model ID")
-  data.model="Plain"; widgets.model.onchange()
+  assert(widgets.model.options[2]=="Model: Plain", "unique display name repeats its technical model ID")
+  data.model="Model: Plain"; widgets.model.onchange()
   assert(chosen[1]=="plain" and chosen[2]==nil)
   view:set_models(plain,"plain",nil)
   assert(view.selection_valid and not widgets.effort.enabled)
@@ -151,6 +151,70 @@ test("settings show only the current connection action with a short caption",fun
   view:close()
 end)
 
+test("message rows use stable mixed-script spacing and retain bottom padding",function()
+  local view,dialogs,gc=native_view()
+  gc.height=500
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=(text:find("汉",1,true) or text:find("魔",1,true)) and 20 or 10} end
+  local drawn={}; function gc:fillText(text,x,y) drawn[#drawn+1]={text=text,x=x,y=y,height=self:measureText(text).height} end
+  view:add_message("a","Codex","English line",false)
+  view:add_message("b","Codex","魔法书",false)
+  dialogs[1].widgets.transcript.onpaint {context=gc}
+  assert(view.scroll.cards[1].height==view.scroll.cards[2].height, "one-line card height depends on its text")
+  for _,card in ipairs(view.scroll.cards) do
+    for _,line in ipairs(drawn) do if line.text==card.message.text then
+      assert(line.y+line.height+8<=card.top+card.height, "body glyphs have no bottom bearing/padding allowance")
+    end end
+  end
+  view:close()
+end)
+
+test("user bubbles and You labels align right while body text remains left aligned",function()
+  local view,dialogs,gc=native_view(); gc.height=500
+  local drawn={}; function gc:fillText(text,x,y) drawn[#drawn+1]={text=text,x=x,y=y} end
+  view:add_message("a","Codex","Assistant",false)
+  view:add_message("u","You","My question",false)
+  dialogs[1].widgets.transcript.onpaint {context=gc}
+  local card=view.scroll.cards[2]
+  assert(card.x and card.x>view.scroll.cards[1].x and card.width<view.scroll.cards[1].width, "user bubble stays on the left")
+  for _,line in ipairs(drawn) do
+    if line.text=="You" then assert(line.x+gc:measureText("You").width==card.x+card.width-8)
+    elseif line.text=="My question" then assert(line.x==card.x+8) end
+  end
+  view:close()
+end)
+
+test("history background contains the full preview and bottom font-bearing allowance",function()
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="one",name="Remember opal",preview="Tail pgy_",updatedAt=1700000000}}}); return true
+  end})
+  local background,preview
+  gc.height=300
+  function gc:fillRect(rect) if rect.x==6 and rect.width==self.width-24 then background=rect end end
+  function gc:fillText(text,_,y) if text=="Tail pgy_" then preview={y=y,height=self:measureText(text).height} end end
+  view:set_state("ready"); view:show_history(); dialogs[2].widgets.threads.onpaint {context=gc}
+  assert(background and preview and preview.y+preview.height+8<=background.y+background.height, "preview extends below its entry background")
+  view:close()
+end)
+
+test("CJK activity titles fit folded cards and do not overlap expanded details",function()
+  local view,dialogs,gc=native_view(); gc.height=500; gc.width=500
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("魔",1,true) and 22 or 10} end
+  local title,body
+  function gc:fillText(text,_,y)
+    if text:match("^%[[+-]%]") and text:find("魔",1,true) then title={y=y,height=self:measureText(text).height}
+    elseif text=="魔法工具 · Succeeded" then body={y=y} end
+  end
+  view:add_message("t","Tool","魔法工具 · Succeeded\nDetails",false)
+  local canvas=dialogs[1].widgets.transcript; canvas.onpaint {context=gc}
+  local card=view.scroll.cards[1]
+  assert(title and title.y+title.height+5<=card.top+card.height, "tall title extends below folded card")
+  canvas.onmousedown {button=MouseButton.LEFT,x=20,y=card.top+6}
+  title,body=nil,nil
+  canvas.onpaint {context=gc}
+  assert(title and body and body.y>=title.y+title.height+5, "expanded details overlap the title")
+  view:close()
+end)
+
 test("tool and summary cards collapse details, preserve expansion on updates and support keyboard",function()
   local view,dialogs,gc=native_view()
   gc.height=600
@@ -192,8 +256,12 @@ test("conversation navigation jumps between user prompts and Latest resumes foll
   assert(view.scroll.offset<earlier)
   dialogs[1].widgets.next_prompt.onclick(); canvas.onpaint {context=gc}
   assert(view.scroll.offset>0)
-  dialogs[1].widgets.latest.onclick(); canvas.onpaint {context=gc}
+  assert(not dialogs[1].widgets.latest, "latest still occupies the composer toolbar")
+  assert(view.scroll.latest, "no in-transcript jump control while reading history")
+  local jump=view.scroll.latest
+  canvas.onmousedown {button=MouseButton.LEFT,x=jump.x+2,y=jump.y+2}; canvas.onpaint {context=gc}
   assert(view.scroll.follow and view.scroll.offset==view.scroll.maximum)
+  assert(not view.scroll.latest, "jump control remains visible at the bottom")
   view:close()
 end)
 
@@ -381,7 +449,7 @@ test("collapsed tools use one compact line and history uses two dense nonoverlap
   view:set_state("ready"); view:show_history()
   local positions={}; function gc:fillText(text,_,y) positions[#positions+1]={text=text,y=y,height=self:measureText(text).height} end
   dialogs[2].widgets.threads.onpaint {context=gc}
-  assert(view.history.row_height<=2*25+8, "history still has three tall rows")
+  assert(view.history.row_height<=2*26+12, "history still has three tall rows")
   local title,preview
   for _,line in ipairs(positions) do if line.text:find("魔",1,true) then title=line elseif line.text=="Preview" then preview=line end end
   assert(title and preview and preview.y>=title.y+title.height, "compact title overlaps its preview")
