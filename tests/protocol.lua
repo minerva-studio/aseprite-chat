@@ -1001,6 +1001,73 @@ test("duplicate question IDs fail safely and a missing UI returns an empty answe
   eq(h2.client.state,"error")
 end)
 
+local function context_usage(h,thread,turn,used,limit)
+  local last={inputTokens=used,outputTokens=0,cachedInputTokens=0,reasoningOutputTokens=0,totalTokens=used}
+  h:notify("thread/tokenUsage/updated",{threadId=thread,turnId=turn,
+    tokenUsage={last=last,total={inputTokens=999999,outputTokens=1,cachedInputTokens=0,
+      reasoningOutputTokens=0,totalTokens=1000000},modelContextWindow=limit}})
+end
+test("context usage reports last request rather than cumulative billing and rejects unrelated turns",function()
+  local latest
+  local h=harness({on_context=function(value) latest=value end}); h:open(); h:start()
+  context_usage(h,"thread","turn",32000,128000)
+  assert(latest,"missing context usage callback")
+  eq(latest.used,32000); eq(latest.limit,128000); eq(h.client.context,latest)
+  context_usage(h,"foreign","turn",1,2); eq(latest.used,32000)
+  context_usage(h,"thread","other-turn",2,4); eq(latest.used,32000)
+  context_usage(h,"thread","turn",34000); eq(latest.used,34000); eq(latest.limit,nil)
+  h:complete(); context_usage(h,"thread","turn",35000,128000); eq(latest.used,35000)
+  local old=h.ws; h.client:disconnect()
+  old:receive({method="thread/tokenUsage/updated",params={threadId="thread",turnId="turn",
+    tokenUsage={last={totalTokens=9},modelContextWindow=10}}})
+  eq(latest.used,35000)
+end)
+test("compaction indicator follows live item lifecycle and cancellation without inventing completion",function()
+  local h=harness(); h:open(); h:start()
+  context_usage(h,"thread","turn",32000,128000)
+  local function item(method,id)
+    h:notify(method,{threadId="thread",turnId=h.client.turn_id,item={id=id,type="contextCompaction"}})
+  end
+  item("item/started","compact"); eq(h.client.context.compacting,true)
+  item("item/completed","compact"); eq(h.client.context.compacting,false); eq(h.client.context.compacted,true)
+  eq(h.client.context.used,32000)
+  item("item/started","compact"); eq(h.client.context.compacting,false)
+  item("item/started","again"); h.client:stop()
+  eq(h.client.context.compacting,false); eq(h.client.context.compacted,false)
+  h:complete(); assert(h.client:new_chat()); eq(h.client.context.used,nil); eq(h.client.context.compacted,nil)
+end)
+test("restored usage is buffered transactionally until history opens successfully",function()
+  local h=harness(); h:open(); h:start(); h:complete()
+  context_usage(h,"thread","turn",100,1000)
+  assert(h.client:open_thread("history",function() end)); h:history_read(); h:history_resume()
+  context_usage(h,"history","historical-turn",600,2000)
+  eq(h.client.context.used,100)
+  h:respond(h:last("thread/turns/list"),{data={}})
+  eq(h.client.thread_id,"history"); eq(h.client.context.used,600); eq(h.client.context.limit,2000)
+  assert(h.client:open_thread("failed",function() end)); h:history_read("failed"); h:history_resume("failed")
+  context_usage(h,"failed","old",900,3000)
+  h:respond(h:last("thread/turns/list"),nil,{message="Cannot read history"})
+  eq(h.client.thread_id,"history"); eq(h.client.context.used,600)
+end)
+test("invalid usage cannot render negative counts or a fabricated capacity",function()
+  for _,value in ipairs({-1,0.5,"many"}) do
+    local h=harness(); h:open(); h:start()
+    context_usage(h,"thread","turn",value,128000)
+    eq(h.client.state,"error")
+  end
+end)
+test("context observers see committed thread identity and cannot execute during cancellation",function()
+  local h,reply,attempt,observed
+  h=harness({on_context=function(context)
+    if not observed then observed=h.client.thread_id or "none" end
+    if reply and context.compacting==false then attempt=reply({success=true,contentItems={}}) end
+  end})
+  h:open(); h:start(); eq(observed,"thread")
+  h:tool(); reply=h.calls[1].reply
+  h:notify("item/started",{threadId="thread",turnId="turn",item={id="c",type="contextCompaction"}})
+  h.client:stop(); eq(attempt,false)
+end)
+
 for _,case in ipairs(tests) do
   local ok,err=xpcall(case[2],debug.traceback)
   if ok then passed=passed+1; print("PASS " .. case[1])

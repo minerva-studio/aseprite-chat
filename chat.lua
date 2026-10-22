@@ -397,6 +397,28 @@ function Chat:set_thread(id,name)
   self.dialog:modify {id="rename",enabled=self.state=="ready" and id~=nil}
 end
 
+--- Project the client's latest reported context snapshot without estimating an
+--- unknown provider limit. This native information picker shares the selector row.
+function Chat:set_context(context)
+  self.context=context
+  if not self.dialog then return end
+  context=context or {}
+  local function tokens(value)
+    if value>=1000000 then return string.format("%.1f",value/1000000):gsub("%.0$","").."M" end
+    if value>=1000 then return string.format("%.1f",value/1000):gsub("%.0$","").."k" end
+    return tostring(value)
+  end
+  local options={"Context unknown"}
+  if context.used then
+    options=context.limit and {string.format("Context %.0f%%",context.used/context.limit*100),
+      tokens(context.used).." / "..tokens(context.limit).." tokens"}
+      or {"Context "..tokens(context.used),"Limit unknown"}
+  end
+  if context.compacting then table.insert(options,1,"Compacting...")
+  elseif context.compacted then options[#options+1]="Compacted" end
+  project_selector(self,"context",options,options[1])
+end
+
 --- Clear the local transcript when the user starts a new conversation.
 function Chat:clear()
   self.messages, self.by_id = {}, {}
@@ -916,6 +938,7 @@ function Chat:show()
     if accepted then self:set_approval_mode(enabled)
     else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
   end}
+  dlg:combobox {id="context",hexpand=false,options={"Context unknown"}}
   dlg:newrow()
   self.controls={}
   local function add(spec) self.controls[spec.id]=spec end
@@ -956,6 +979,7 @@ function Chat:show()
     end}
   self:set_models(self.models, self.selected_model, self.selected_effort,self.selected_tier)
   self:set_thread(self.thread_id,self.thread_name)
+  self:set_context(self.context)
   dlg:show { wait = false }
   -- Retain the native entry's text/IME handling, giving it and the transcript
   -- extra vertical room without changing their minimum native widget sizes.

@@ -33,6 +33,7 @@ end
 
 function Controller:_refresh_state()
   self.view:set_thread(self.client.thread_id,self.client.thread_name)
+  self.view:set_context(self.client.context)
   self.view:set_state(self.startup_error and "error" or self.launcher.pending and "starting" or self.client.state,self.client:can_steer())
 end
 
@@ -181,6 +182,7 @@ function Controller:_create_client()
     end,
     on_message = function(id, text, delta) self.view:add_message(id, "Codex", text, delta) end,
     on_thread = function(id,name) self.view:set_thread(id,name) end,
+    on_context = function(context) self.view:set_context(context) end,
     on_item = function(item,completed)
       -- Local tool results are authoritative; notifications must not overwrite
       -- cancellation/rejection with a generic completed dynamic-tool status.

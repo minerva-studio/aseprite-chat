@@ -2,6 +2,7 @@
 //   node tests/live-account.mjs                custom account -> local mock Responses provider
 //   node tests/live-account.mjs --reasoning    also verify readable reasoning events/history (mock only)
 //   node tests/live-account.mjs --questions    verify built-in questions/answers (mock only)
+//   node tests/live-account.mjs --context      verify server-reported context usage (mock only)
 //   node tests/live-account.mjs --default-live one real turn against the user's default Codex home
 import http from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -14,7 +15,8 @@ import { createBridge } from '../scripts/server.mjs';
 const defaultLive = process.argv.includes('--default-live');
 const reasoningProbe = process.argv.includes('--reasoning');
 const questionProbe = process.argv.includes('--questions');
-if (defaultLive && (reasoningProbe || questionProbe)) throw Error('Protocol probes use only the local mock provider');
+const contextProbe = process.argv.includes('--context');
+if (defaultLive && (reasoningProbe || questionProbe || contextProbe)) throw Error('Protocol probes use only the local mock provider');
 const codex = process.env.CODEX_CLI || path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe');
 const fakeKey = 'sk-live-account-' + Math.random().toString(36).slice(2);
 const report = { mode: defaultLive ? 'default' : 'custom', requests: [], rpc: [], failures: [] };
@@ -90,8 +92,10 @@ const questions = [];
 const pending = new Map();
 const notifications = [];
 const reasoningDeltas = [], reasoningItems = [];
+const contextUpdates = [];
 socket.on('message', raw => {
   const m = JSON.parse(raw.toString());
+  if (m.method === 'thread/tokenUsage/updated') contextUpdates.push(m.params);
   if (m.id !== undefined && m.method) {
     if (m.method === 'item/tool/requestUserInput' && questionProbe) {
       questions.push(m.params);
@@ -164,6 +168,14 @@ try {
   check('turn completed', finished?.status === 'completed', finished?.status ?? finished);
   check('agent message arrived', agentText.length > 0 || notifications.includes('item/completed'),
     agentText);
+  if (contextProbe) {
+    const usage = contextUpdates.at(-1);
+    check('real Codex emitted usage for this thread', usage?.threadId === threadId, contextUpdates);
+    check('latest request tokens stay separate from cumulative usage', usage?.tokenUsage?.last?.totalTokens === 2
+      && usage?.tokenUsage?.total?.totalTokens >= 4, usage?.tokenUsage);
+    check('reported context window is positive or unknown', usage?.tokenUsage?.modelContextWindow == null
+      || usage.tokenUsage.modelContextWindow > 0, usage?.tokenUsage?.modelContextWindow);
+  }
   if (questionProbe) {
     check('real Codex emitted a built-in question', questions.length === 1 && questions[0].questions[0].id === 'color', questions);
     check('answer reached the local mock provider', report.requests.some(r => (JSON.stringify(r.toolOutput) ?? '').includes('Gold')));

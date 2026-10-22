@@ -1240,4 +1240,23 @@ test("resizing rewraps the fixed prompt outside paint without overriding manual 
   for _,timer in ipairs(timers) do timer.ontick() end
   view:close()
 end)
+test("context information sits beside native selectors and reports unknown limits and compaction",function()
+  local view,dialogs=native_view()
+  local dialog=dialogs[1]
+  assert(dialog.widgets.context and dialog.rows.context==dialog.rows.auto_approve,"context is not beside four selectors")
+  assert(dialog.widgets.context.option=="Context unknown")
+  view:set_context {used=32000,limit=128000}
+  assert(dialog.widgets.context.option=="Context 25%")
+  assert(dialog.widgets.context.options[2]=="32k / 128k tokens")
+  view:set_context {used=32000}
+  assert(dialog.widgets.context.option=="Context 32k" and dialog.widgets.context.options[2]=="Limit unknown")
+  view:set_context {used=32000,limit=128000,compacting=true}
+  assert(dialog.widgets.context.option=="Compacting...")
+  view:set_context {used=8000,limit=128000,compacted=true}
+  assert(dialog.widgets.context.option=="Context 6%")
+  assert(dialog.widgets.context.options[3]=="Compacted")
+  view:set_context {}
+  assert(dialog.widgets.context.option=="Context unknown")
+  view:close()
+end)
 print("chat: " .. passed .. " passed")

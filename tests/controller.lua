@@ -81,6 +81,7 @@ local function scenario(name, body, configuration)
       function view:set_models(models,model,effort) self.catalog,self.model,self.effort=models,model,effort end
       function view:set_approval_mode(enabled) self.auto_approve=enabled end
       function view:set_thread(id,name) self.thread_id,self.thread_name=id,name end
+      function view:set_context(context) self.context=context end
       return view
     end }
   }
@@ -527,5 +528,16 @@ scenario("completed questions replace the pending record with paired questions a
   assert(rows[1].role=="Question")
   assert(rows[1].text=="Answered\n\nWhich color?\nYou: Gold\nNote: Keep the outline\n\nWhich layer?\nYou: Wings",
     "each answer must directly follow its corresponding question")
+end)
+scenario("context usage and compaction project the client's authoritative snapshot",function(c,p,e,v)
+  p.context={used=32000,limit=128000,compacting=true}
+  assert(p.options.on_context,"context callback is not wired")
+  p.options.on_context(p.context)
+  assert(v.context==p.context and v.context.compacting)
+  p.context={}; p.options.on_context(p.context)
+  assert(v.context==p.context and v.context.used==nil)
+  v.context={used=90000,limit=128000}
+  p.options.on_state("initializing")
+  assert(v.context==p.context,"client lifecycle retained the previous context display")
 end)
 print("controller: " .. passed .. " passed")

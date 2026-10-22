@@ -144,13 +144,15 @@ end
 -- on_question(request,reply) receives plain questions and an opaque key.
 -- reply({[questionId]={answer,...}}) or reply(nil) is single-use; nil skips.
 -- on_question_resolved(key,status) retires answered or server-cleared prompts.
+-- context is the latest server-reported request usage and compaction status.
+-- on_context(context) projects this client-owned table; consumers must not mutate it.
 -- Public state/thread_id/turn_id belong to this client.
 -- reply({success=boolean,contentItems=array}) is single-use and generation-bound.
 -- Empty schema objects/arrays can use json.decode("{}") / json.decode("[]").
 -- socket_factory/timer_factory accept the native constructor specs for tests.
 function Codex.new(options)
   options = options or {}
-  return setmetatable({state="disconnected", _options=options, _next_id=0,
+  return setmetatable({state="disconnected", context={}, _options=options, _next_id=0,
     _generation=0, _pending={}, _tools={}, _approvals={}, _questions={}, _terminal={}, _initialized=false}, Client)
 end
 
@@ -170,8 +172,13 @@ function Client:_state(state)
 end
 
 -- The client owns the active thread identity and its server-persisted name.
-function Client:_set_thread(thread)
+function Client:_set_thread(thread,context)
+  local changed=(thread and thread.id)~=self.thread_id
   self.thread_id, self.thread_name = thread and thread.id, thread and thread.name
+  if changed or context then
+    self.context=context or {}
+    self:_emit("on_context",self.context)
+  end
   self:_emit("on_thread", self.thread_id, self.thread_name)
 end
 
@@ -206,6 +213,10 @@ function Client:_cancel(reason, respond)
   for _, request in pairs(questions) do
     request.valid = false
     if respond then self:_write({id=request.id,result={answers={}}}) end
+  end
+  if self.context.compacting then
+    self.context.compacting=false
+    self:_emit("on_context",self.context)
   end
   self:_emit("on_cancel", reason)
 end
@@ -533,6 +544,23 @@ end
 
 function Client:_notification(message)
   local method, params = message.method, message.params
+  if method=="thread/tokenUsage/updated" then
+    assert(object(params) and type(params.threadId)=="string" and type(params.turnId)=="string",
+      "Malformed context usage notification")
+    local opening=self._opening
+    local buffered=opening and opening.thread_id==params.threadId
+    if not buffered and params.threadId~=self.thread_id then return end
+    if not buffered and self._turn and not self:_match(params.threadId,params.turnId) then return end
+    local usage=params.tokenUsage
+    assert(object(usage) and object(usage.last),"Missing context usage")
+    local used,limit=usage.last.totalTokens,usage.modelContextWindow
+    assert(type(used)=="number" and used>=0 and used<math.huge and used==math.floor(used),"Invalid context token count")
+    assert(limit==nil or (type(limit)=="number" and limit<math.huge and limit==math.floor(limit)),"Invalid context window")
+    local context=buffered and opening.context or self.context
+    context.used,context.limit=used,limit and limit>0 and limit or nil
+    if not buffered then self:_emit("on_context",context) end
+    return
+  end
   if method=="serverRequest/resolved" then
     assert(object(params) and type(params.threadId)=="string"
       and (type(params.requestId)=="string" or type(params.requestId)=="number"),"Malformed resolved request")
@@ -606,6 +634,12 @@ function Client:_notification(message)
     if turn.items[item.id] == "completed" then return end
     if method == "item/started" and turn.items[item.id] then return end
     local completed = method == "item/completed"
+    if item.type=="contextCompaction" then
+      turn.items[item.id]=completed and "completed" or "started"
+      self.context.compacting,self.context.compacted=not completed,completed
+      self:_emit("on_context",self.context)
+      return
+    end
     if item.type ~= "agentMessage" then
       local projected
       if item.type == "reasoning" then
@@ -791,7 +825,7 @@ function Client:open_thread(id, callback)
   end
   if type(id) ~= "string" or id == "" then return false, "Invalid thread ID" end
   return self:_guard(function()
-    local operation = {}
+    local operation = {thread_id=id,context={}}
     local generation, lifetime = self._generation, self._lifetime
     self._opening = operation
     local function live()
@@ -802,7 +836,7 @@ function Client:open_thread(id, callback)
       if not live() then return end
       self._opening = nil
       if result then
-        self:_set_thread(result.thread)
+        self:_set_thread(result.thread,operation.context)
         self.turn_id, self._terminal = nil, {}
         for _, turn in ipairs(result.turns) do self._terminal[turn.id] = true end
       end
