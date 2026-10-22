@@ -398,12 +398,14 @@ test("model discovery collects every page and preserves native catalog capabilit
   assert(h.client:list_models(function(value,err) models,failure=value,err end))
   local first=h:last("model/list"); eq(first.params.includeHidden,false)
   h:respond(first,{data={{id="catalog-id",model="wire-model",displayName="Visible model",isDefault=true,
-    defaultReasoningEffort="high",supportedReasoningEfforts={{reasoningEffort="high",description="Deep"}}}},nextCursor="page-2"})
+    defaultReasoningEffort="high",serviceTiers={{id="priority",name="Fast",description="More usage"}},
+    supportedReasoningEfforts={{reasoningEffort="high",description="Deep"}}}},nextCursor="page-2"})
   eq(models,nil); eq(h:last().params.cursor,"page-2")
   h:respond(h:last(),{data={{id="other",model="other-model",displayName="Other",isDefault=false,
     defaultReasoningEffort="low",supportedReasoningEfforts={{reasoningEffort="low",description="Quick"}}}}})
   eq(failure,nil); eq(#models,2); eq(models[1].model,"wire-model")
   eq(models[1].supportedReasoningEfforts[1].reasoningEffort,"high")
+  eq(models[1].serviceTiers[1].id,"priority")
   eq(h.client.state,"ready")
 end)
 
@@ -715,6 +717,44 @@ test("per-turn model and reasoning changes retain the same thread",function()
   local turn=h:last("turn/start")
   eq(turn.params.threadId,"thread"); eq(turn.params.model,"other-model"); eq(turn.params.effort,"low")
   eq(h:last("thread/start").id,original.id)
+end)
+
+test("speed overrides are snapshotted per turn and standard explicitly clears inherited Fast",function()
+  local h=harness(); h:open()
+  local selection={model="sol",effort="low",serviceTier="priority"}
+  assert(h.client:send("fast","",selection)); selection.serviceTier="default"
+  h:respond(h:last(),{thread={id="thread",status={type="idle"}}})
+  eq(h:last("turn/start").params.serviceTierForTurn,"priority")
+  eq(h:last("turn/start").params.serviceTier,nil)
+  h:respond(h:last(),{turn={id="fast",status="inProgress"}}); h:complete("fast")
+  assert(h.client:send("standard","",{serviceTier="default"}))
+  eq(h:last("turn/start").params.serviceTierForTurn,"default")
+end)
+
+test("renaming persists the current thread name, reports errors and refuses unsafe states",function()
+  local h=harness(); h:open()
+  assert(not h.client:rename_thread("Title",function() end))
+  h:start(); assert(not h.client:rename_thread("Title",function() end)); h:complete()
+  assert(not h.client:rename_thread("   ",function() end))
+  local called,ok,why=0
+  local function done(value,err) called,ok,why=called+1,value,err end
+  assert(h.client:rename_thread("  魔法书  ",done)); eq(h.client.state,"renaming")
+  local request=h:last("thread/name/set"); eq(request.params.threadId,"thread"); eq(request.params.name,"魔法书")
+  assert(not h.client:send("race",""))
+  h:respond(request,{}); eq(called,1); eq(ok,true); eq(h.client.thread_name,"魔法书"); eq(h.client.state,"ready")
+  assert(h.client:rename_thread("Replacement",done))
+  h:respond(h:last(),nil,{code=-1,message="Cannot rename"})
+  eq(called,2); eq(ok,false); eq(why,"Cannot rename"); eq(h.client.thread_name,"魔法书"); eq(h.client.state,"ready")
+  h:notify("thread/name/updated",{threadId="other",threadName="Foreign"}); eq(h.client.thread_name,"魔法书")
+  h:notify("thread/name/updated",{threadId="thread",threadName="Changed externally"}); eq(h.client.thread_name,"Changed externally")
+  h.ws:event(WebSocketMessageType.OPEN); h:respond(h:last("initialize"),{})
+  h:respond(h:last("thread/resume"),{thread={id="thread",name="Persisted title",status={type="idle"}}})
+  eq(h.client.thread_name,"Persisted title")
+  assert(h.client:rename_thread("Late",done)); local late=h:last()
+  h.client:disconnect(); h:respond(late,{})
+  eq(called,2); eq(h.client.thread_name,"Persisted title")
+  h:open(); h:respond(h:last("thread/resume"),{thread={id="thread",name="Persisted title",status={type="idle"}}})
+  assert(h.client:new_chat()); eq(h.client.thread_name,nil)
 end)
 
 for _,case in ipairs(tests) do

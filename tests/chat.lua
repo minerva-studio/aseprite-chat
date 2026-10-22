@@ -97,13 +97,13 @@ test("model and reasoning widgets are actual dropdowns populated from catalog va
   data.model=widgets.model.options[2]; widgets.model.onchange()
   assert(chosen[1]=="wire-b" and chosen[2]=="medium")
   view:set_models(models,"wire-b","medium")
-  assert(#widgets.effort.options==1 and data.effort=="Reasoning: medium")
+  assert(#widgets.effort.options==1 and data.effort=="medium")
   view:set_state("working"); assert(not widgets.model.enabled and not widgets.effort.enabled)
   local plain={{model="plain",displayName="Plain",supportedReasoningEfforts={}}}
   view:set_models(plain,"plain","high"); view:set_state("ready")
   assert(not view.selection_valid and #widgets.model.options==2, "stale effort cannot be explicitly repaired")
-  assert(widgets.model.options[2]=="Model: Plain", "unique display name repeats its technical model ID")
-  data.model="Model: Plain"; widgets.model.onchange()
+  assert(widgets.model.options[2]=="Plain", "unique display name repeats its technical model ID")
+  data.model="Plain"; widgets.model.onchange()
   assert(chosen[1]=="plain" and chosen[2]==nil)
   view:set_models(plain,"plain",nil)
   assert(view.selection_valid and not widgets.effort.enabled)
@@ -133,6 +133,49 @@ test("connection settings live in a separate window and close with the chat",fun
   view:close(); assert(settings.closed and view.settings_dialog==nil)
 end)
 
+test("speed selection uses advertised IDs, locks while working and repairs a missing tier",function()
+  local chosen
+  local view,dialogs=native_view({on_settings=function(model,effort,tier) chosen={model,effort,tier} end})
+  local main=dialogs[1]
+  local models={{model="sol",displayName="Sol",supportedReasoningEfforts={{reasoningEffort="low"}},
+    serviceTiers={{id="priority",name="Fast",description="More usage"}}}}
+  view:set_models(models,"sol","low","default"); view:set_state("ready")
+  assert(main.data.speed=="Standard" and #main.widgets.speed.options==2)
+  main.data.speed="Fast"; main.widgets.speed.onchange()
+  assert(chosen[1]=="sol" and chosen[2]=="low" and chosen[3]=="priority")
+  view:set_models(models,"sol","low","priority"); view:set_state("working")
+  assert(not main.widgets.speed.enabled)
+  models[1].serviceTiers={}
+  view:set_models(models,"sol","low","priority"); view:set_state("ready")
+  assert(not view.selection_valid and main.data.speed=="Select level")
+  main.data.speed="Standard"; main.widgets.speed.onchange()
+  assert(chosen[3]=="default")
+  view:set_models(models,"sol","low","default"); assert(view.selection_valid)
+  view:close()
+end)
+
+test("rename waits for acknowledgement, preserves named titles and cleans up on disconnect",function()
+  local callback,requested
+  local view,dialogs=native_view({on_rename=function(name,done) requested,callback=name,done; return true end})
+  assert(not dialogs[1].widgets.rename.enabled)
+  view:set_thread("one","魔法书"); view:set_state("ready")
+  assert(dialogs[1].widgets.rename.enabled)
+  view:add_message("u","You","A different preview",false)
+  assert(dialogs[1].widgets.conversation.text=="魔法书")
+  dialogs[1].widgets.rename.onclick()
+  local rename=dialogs[2]; assert(rename.data.name=="魔法书")
+  rename.data.name="封面"; rename.widgets.save.onclick(); assert(requested=="封面" and view.rename_dialog==rename)
+  view:set_state("renaming"); assert(not rename.widgets.save.enabled)
+  view:set_state("ready"); callback(false,"Server refused")
+  assert(view.rename_dialog==rename and rename.widgets.error.text=="Server refused")
+  rename.widgets.save.onclick(); view:set_thread("one","封面"); callback(true)
+  assert(rename.closed and not view.rename_dialog and dialogs[1].widgets.conversation.text=="封面")
+  view:show_rename(); local stale=dialogs[3]
+  stale.widgets.save.onclick(); view:set_state("disconnected"); callback(true)
+  assert(stale.closed and not view.rename_dialog)
+  view:close()
+end)
+
 test("settings show only the current connection action with a short caption",function()
   local view,dialogs=native_view()
   view:set_state("ready"); view:show_settings()
@@ -151,20 +194,45 @@ test("settings show only the current connection action with a short caption",fun
   view:close()
 end)
 
-test("message rows use stable mixed-script spacing and retain bottom padding",function()
+test("message cards measure actual fallback glyphs across font sizes and retain bottom padding",function()
   local view,dialogs,gc=native_view()
   gc.height=500
-  function gc:measureText(text) return {width=utf8.len(text)*6,height=(text:find("汉",1,true) or text:find("魔",1,true)) and 20 or 10} end
-  local drawn={}; function gc:fillText(text,x,y) drawn[#drawn+1]={text=text,x=x,y=y,height=self:measureText(text).height} end
+  local font_height,drawn=20,{}
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("龘",1,true) and font_height or 10} end
+  function gc:fillText(text,x,y) drawn[#drawn+1]={text=text,x=x,y=y,height=self:measureText(text).height} end
   view:add_message("a","Codex","English line",false)
-  view:add_message("b","Codex","魔法书",false)
-  dialogs[1].widgets.transcript.onpaint {context=gc}
-  assert(view.scroll.cards[1].height==view.scroll.cards[2].height, "one-line card height depends on its text")
-  for _,card in ipairs(view.scroll.cards) do
-    for _,line in ipairs(drawn) do if line.text==card.message.text then
-      assert(line.y+line.height+8<=card.top+card.height, "body glyphs have no bottom bearing/padding allowance")
-    end end
+  view:add_message("b","Codex","龘",false)
+  for _,height in ipairs({20,38,16}) do
+    font_height,drawn=height,{}
+    dialogs[1].widgets.transcript.onpaint {context=gc}
+    for _,card in ipairs(view.scroll.cards) do
+      for _,line in ipairs(drawn) do if line.text==card.message.text then
+        assert(line.y+line.height+8<=card.top+card.height, "actual fallback glyphs exceed message bottom padding")
+      end end
+    end
   end
+  view:close()
+end)
+
+test("history and approval code measure fallback glyphs absent from a fixed sample",function()
+  local view,dialogs,gc=native_view({on_list_threads=function(_,_,callback)
+    callback({data={{id="a",name="龘",preview="龘 preview"}}}); return true
+  end})
+  gc.height=500
+  function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("龘",1,true) and 37 or 10} end
+  local title,preview,background
+  function gc:fillRect(rect) if rect.x==6 then background=rect end end
+  function gc:fillText(text,_,y)
+    if text=="龘" then title={y=y,height=37} elseif text=="龘 preview" then preview={y=y,height=37} end
+  end
+  view:set_state("ready"); view:show_history(); dialogs[2].widgets.threads.onpaint {context=gc}
+  assert(title and preview and preview.y>=title.y+title.height+4, "actual history title overlaps preview")
+  assert(preview.y+preview.height+8<=background.y+background.height, "actual history preview exceeds card")
+  local code_rows={}
+  function gc:fillText(text,_,y) if text:find("龘",1,true) then code_rows[#code_rows+1]=y end end
+  view:request_approval({summary="龘",code="龘"},function() end)
+  dialogs[3].widgets.code.onpaint {context=gc}
+  assert(#code_rows==2 and code_rows[2]>=code_rows[1]+37+4, "approval glyphs overlap")
   view:close()
 end)
 
@@ -239,7 +307,7 @@ test("tool and summary cards collapse details, preserve expansion on updates and
   view:close()
 end)
 
-test("conversation navigation jumps between user prompts and Latest resumes following",function()
+test("reading history exposes an in-transcript Latest control that resumes following",function()
   local view,dialogs,gc=native_view()
   local canvas=dialogs[1].widgets.transcript
   for i=1,4 do
@@ -247,15 +315,8 @@ test("conversation navigation jumps between user prompts and Latest resumes foll
     view:add_message("a"..i,"Codex",string.rep("Answer line\n",8),false)
   end
   canvas.onpaint {context=gc}
-  local bottom=view.scroll.offset
-  assert(dialogs[1].widgets.previous and dialogs[1].widgets.next_prompt, "no turn navigation")
-  dialogs[1].widgets.previous.onclick(); canvas.onpaint {context=gc}
-  assert(view.scroll.offset<bottom and not view.scroll.follow)
-  local earlier=view.scroll.offset
-  dialogs[1].widgets.previous.onclick(); canvas.onpaint {context=gc}
-  assert(view.scroll.offset<earlier)
-  dialogs[1].widgets.next_prompt.onclick(); canvas.onpaint {context=gc}
-  assert(view.scroll.offset>0)
+  canvas.onkeydown {code="Home",stopPropagation=function() end}; canvas.onpaint {context=gc}
+  assert(view.scroll.offset==0 and not view.scroll.follow)
   assert(not dialogs[1].widgets.latest, "latest still occupies the composer toolbar")
   assert(view.scroll.latest, "no in-transcript jump control while reading history")
   local jump=view.scroll.latest
@@ -554,24 +615,24 @@ test("approval setting projects controller state, reverts rejection, and marks m
   end})
   view:set_state("ready")
   view:show_settings()
-  local settings=dialogs[2]
-  assert(settings.widgets.auto_approve and settings.widgets.auto_approve.selected==false,
+  local settings=dialogs[1]
+  assert(settings.widgets.auto_approve and settings.data.auto_approve=="Ask before edits",
     "automatic approval does not default off")
   assert(not settings.widgets.auto_approve.label, "approval row adds form label indentation")
   view:set_approval_mode(true)
-  assert(settings.widgets.auto_approve.selected==true and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
-  settings.data.auto_approve=true; settings.widgets.auto_approve.onclick()
-  assert(decisions[1]==true and settings.widgets.auto_approve.selected==true,
+  assert(settings.data.auto_approve=="Auto-approve edits" and dialogs[1].widgets.status.text:find("Auto%-approve: on"))
+  settings.data.auto_approve="Auto-approve edits"; settings.widgets.auto_approve.onchange()
+  assert(decisions[1]==true and settings.data.auto_approve=="Auto-approve edits",
     "rejected controller projection was not restored")
   view:set_state("working")
   assert(not settings.widgets.auto_approve.enabled)
-  settings.data.auto_approve=false; settings.widgets.auto_approve.onclick()
+  settings.data.auto_approve="Ask before edits"; settings.widgets.auto_approve.onchange()
   assert(#decisions==1, "disabled approval control still changed controller state")
   view:set_state("ready")
-  settings.data.auto_approve=false; settings.widgets.auto_approve.onclick()
+  settings.data.auto_approve="Ask before edits"; settings.widgets.auto_approve.onchange()
   assert(decisions[2]==false)
   view:set_approval_mode(false)
-  assert(settings.widgets.auto_approve.selected==false)
+  assert(settings.data.auto_approve=="Ask before edits")
   view:close()
 end)
 

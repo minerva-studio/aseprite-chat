@@ -43,10 +43,10 @@ local function elide(gc,text,width)
   return table.concat(chars).."…"
 end
 
--- Ink bounds omit font bearings and vary per string. A shared mixed-script
--- sample plus leading keeps layout stable across Latin and CJK message text.
-local function line_height(gc)
-  return math.max(gc:measureText("Mg").height,gc:measureText("汉字国魔Agjpqy_09").height)+4
+-- Measure actual text in the current context: fallback fonts and their sizes
+-- vary by installed font and glyph. Leading/padding are separate from metrics.
+local function line_height(gc,text)
+  return math.max(gc:measureText("Mg").height,gc:measureText(text or "").height)+4
 end
 
 local function surface(gc,scroll,height)
@@ -75,6 +75,7 @@ local function paint(gc, text, scroll)
   local lines = Chat.wrap(text, math.max(1, gc.width - 24), function(s)
     return gc:measureText(s).width
   end)
+  for _,line in ipairs(lines) do line_height=math.max(line_height,gc:measureText(line).height+4) end
   surface(gc,scroll,#lines*line_height+12)
   gc.color = Color { r = 231, g = 233, b = 240 }
   for index, line in ipairs(lines) do
@@ -88,7 +89,6 @@ end
 local function paint_messages(gc,view)
   local scroll=view.scroll
   local full_width=math.max(1,gc.width-26)
-  local body_line_height=line_height(gc)
   local base_header_height=gc:measureText("Mg").height+10
   local cards,top={},8
   for _,message in ipairs(view.messages) do
@@ -107,6 +107,8 @@ local function paint_messages(gc,view)
       if not folded or message.expanded then
         lines=Chat.wrap(message.text,width,function(text) return gc:measureText(text).width end)
       end
+      local body_line_height=line_height(gc)
+      for _,line in ipairs(lines) do body_line_height=math.max(body_line_height,line_height(gc,line)) end
       local height=header_height+#lines*body_line_height+(#lines>0 and 4 or 0)
       cards[#cards+1]={message=message,top=top,height=height,title=title,lines=lines,folded=folded,
         header_height=header_height,line_height=body_line_height,width=card_width,
@@ -187,18 +189,6 @@ local function transcript_input(view,action,event)
   return true
 end
 
---- Move the viewport to the preceding/following user prompt, keeping reading paused.
-function Chat:jump_prompt(direction)
-  local target
-  for _,card in ipairs(self.scroll.cards or {}) do
-    if card.message.role=="You" then
-      if direction<0 and card.top<self.scroll.offset-1 then target=card.top
-      elseif direction>0 and card.top>self.scroll.offset+1 then target=card.top; break end
-    end
-  end
-  if target then self.scroll.offset=math.min(target,self.scroll.maximum); self.scroll.follow=false; self.dialog:repaint() end
-end
-
 local function scroll_by(scroll, delta)
   scroll.offset = math.max(0, math.min(scroll.maximum, scroll.offset + delta))
   scroll.follow = scroll.auto_follow~=false and scroll.offset >= scroll.maximum
@@ -261,16 +251,23 @@ function Chat:add_message(id, role, text, append)
   end
   message.text = append and (message.text .. text) or text
   if self.dialog then
-    if role=="You" then
-      for _,entry in ipairs(self.messages) do if entry.role=="You" then
-        local title=preview_text(entry.text)
-        local stop=utf8.offset(title,61)
-        self.dialog:modify {id="conversation",text=stop and title:sub(1,stop-1).."…" or title}
-        break
-      end end
-    end
+    if role=="You" then self:set_thread(self.thread_id,self.thread_name) end
     self.dialog:repaint()
   end
+end
+
+--- Display the client-owned thread name, falling back to its first user prompt.
+function Chat:set_thread(id,name)
+  self.thread_id,self.thread_name=id,name
+  if not self.dialog then return end
+  local title=name
+  if not title or title=="" then
+    for _,entry in ipairs(self.messages) do if entry.role=="You" then title=preview_text(entry.text); break end end
+  end
+  title=title or "New chat"
+  local stop=utf8.offset(title,61)
+  self.dialog:modify {id="conversation",text=stop and title:sub(1,stop-1).."…" or title}
+  self.dialog:modify {id="rename",enabled=self.state=="ready" and id~=nil}
 end
 
 --- Clear the local transcript when the user starts a new conversation.
@@ -279,7 +276,7 @@ function Chat:clear()
   self.focused_message=nil
   self.scroll.cards,self.scroll.anchor,self.scroll.latest=nil,nil,nil
   self.scroll.offset, self.scroll.follow, self.scroll.grab = 0, true, nil
-  if self.dialog then self.dialog:modify {id="conversation",text="New chat"}; self.dialog:repaint() end
+  if self.dialog then self:set_thread(self.thread_id,self.thread_name); self.dialog:repaint() end
 end
 
 --- Update controls from protocol state and the current native editor context.
@@ -289,16 +286,25 @@ function Chat:set_state(state)
   local idle = state == "ready"
   local offline = state == "disconnected" or state == "error"
   if offline and previous~=state and self.history_dialog then self.history_dialog:close() end
+  if self.rename_dialog and state~="ready" and state~="renaming" then self.rename_dialog:close() end
   if self.dialog then
     local status = self.approval and "Awaiting approval"
       or state == "starting" and "正在启动本地连接…" or state
     self.dialog:modify { id = "status", text = status .. " · Auto-approve: " .. (self.auto_approve and "on" or "off") }
     self.dialog:modify { id = "model", enabled = idle and self.has_models == true }
     self.dialog:modify { id = "effort", enabled = idle and self.has_efforts == true }
+    self.dialog:modify { id = "speed", enabled = idle and self.has_models == true }
+    self.dialog:modify { id = "auto_approve", option=self.auto_approve and "Auto-approve edits" or "Ask before edits",
+      enabled=idle and self.approval==nil }
+    self.dialog:modify { id = "rename", enabled=idle and self.thread_id~=nil }
     self.dialog:modify { id = "send", enabled = idle and self.selection_valid == true and app.sprite ~= nil }
     self.dialog:modify { id = "new", enabled = (idle and self.models ~= nil) or state == "error" }
     self.dialog:modify { id = "stop", enabled = state == "working" or self.approval ~= nil }
     self.dialog:modify { id = "retry", visible = offline, enabled = offline }
+  end
+  if self.rename_dialog then
+    self.rename_dialog:modify {id="save",enabled=idle}
+    self.rename_dialog:modify {id="name",enabled=idle}
   end
   if self.settings_dialog then
     local manual = self.settings_dialog.data.manual == true
@@ -306,8 +312,6 @@ function Chat:set_state(state)
       connecting="Connecting",initializing="Connecting to Codex",recovering="Restoring conversation",
       disconnected="Disconnected",error="Connection failed"})[state] or state
     self.settings_dialog:modify { id = "status", text = "Status: " .. status }
-    self.settings_dialog:modify { id = "auto_approve", selected = self.auto_approve,
-      enabled = idle and self.approval == nil }
     self.settings_dialog:modify { id = "manual", enabled = offline }
     self.settings_dialog:modify { id = "auto_info", visible = not manual }
     self.settings_dialog:modify { id = "endpoint", visible = manual, enabled = offline and manual }
@@ -326,15 +330,15 @@ end
 function Chat:set_approval_mode(enabled)
   self.auto_approve = enabled == true
   if self.dialog then self:set_state(self.state) end
-  if self.settings_dialog then
-    self.settings_dialog:modify { id = "auto_approve", selected = self.auto_approve,
-      enabled = self.state == "ready" and self.approval == nil }
-  end
 end
 
 local function paint_history(gc,history)
   local scroll=history.scroll
   local line_height=line_height(gc)
+  for _,thread in ipairs(history.entries) do
+    line_height=math.max(line_height,gc:measureText(preview_text(thread.name)).height+4,
+      gc:measureText(preview_text(thread.preview)).height+4)
+  end
   local row_height=line_height*2+12
   -- Pages only append entries, so the visible row index and relative Y remain
   -- stable even when newly loaded fallback glyphs increase the shared row height.
@@ -477,8 +481,8 @@ function Chat:show_history()
 end
 
 --- Project the server catalog and persisted selection into native dropdowns.
-function Chat:set_models(models, model, effort)
-  self.models, self.selected_model, self.selected_effort = models, model, effort
+function Chat:set_models(models, model, effort, tier)
+  self.models, self.selected_model, self.selected_effort,self.selected_tier = models, model, effort,tier or "default"
   if not self.dialog then return end
   self.updating_selectors = true
   local labels, chosen, selected = {}, nil, nil
@@ -486,7 +490,7 @@ function Chat:set_models(models, model, effort)
   for _,entry in ipairs(models or {}) do names[entry.displayName]=(names[entry.displayName] or 0)+1 end
   self.models_by_label = {}
   for _, entry in ipairs(models or {}) do
-    local label = "Model: "..(names[entry.displayName]>1 and entry.displayName .. " (" .. entry.model .. ")" or entry.displayName)
+    local label = names[entry.displayName]>1 and entry.displayName .. " (" .. entry.model .. ")" or entry.displayName
     labels[#labels+1], self.models_by_label[label] = label, entry
     if entry.model == model then chosen, selected = label, entry end
   end
@@ -496,30 +500,43 @@ function Chat:set_models(models, model, effort)
   if not chosen then
     chosen = confirm_model and "Confirm model selection" or not models and "Waiting for connection"
       or model and ("Unavailable: " .. model) or "Select a model"
-    chosen="Model: "..chosen
     table.insert(labels, 1, chosen)
   end
   local efforts, valid = {}, false
   self.efforts_by_label={}
   if selected then
     for _, option in ipairs(selected.supportedReasoningEfforts) do
-      local label="Reasoning: "..option.reasoningEffort
+      local label=option.reasoningEffort
       efforts[#efforts+1] = label
       self.efforts_by_label[label]=option.reasoningEffort
       if option.reasoningEffort == effort then valid = true end
     end
   end
   self.has_efforts = #efforts > 0
-  local chosen_effort = effort and "Reasoning: "..effort
+  local chosen_effort = effort
   if #efforts == 0 then
-    chosen_effort = "Reasoning: Not supported"; efforts[1] = chosen_effort
+    chosen_effort = "Not supported"; efforts[1] = chosen_effort
     valid = selected ~= nil and effort == nil
   elseif not valid then
-    chosen_effort = "Reasoning: Select level"; table.insert(efforts, 1, chosen_effort)
+    chosen_effort = "Select level"; table.insert(efforts, 1, chosen_effort)
   end
-  self.selection_valid = selected ~= nil and valid
+  local speeds={"Standard"}
+  self.tiers_by_label={["Standard"]="default"}
+  local chosen_speed=self.selected_tier=="default" and "Standard" or nil
+  if selected then
+    for _,option in ipairs(selected.serviceTiers or {}) do
+      if option.id=="priority" or option.id=="fast" then
+        local label=option.name
+        speeds[#speeds+1]=label; self.tiers_by_label[label]=option.id
+        if option.id==self.selected_tier then chosen_speed=label end
+      end
+    end
+  end
+  self.selection_valid = selected ~= nil and valid and chosen_speed~=nil
+  if not chosen_speed then chosen_speed="Select level"; table.insert(speeds,1,chosen_speed) end
   self.dialog:modify {id="model", options=labels, option=chosen}
   self.dialog:modify {id="effort", options=efforts, option=chosen_effort}
+  self.dialog:modify {id="speed", options=speeds, option=chosen_speed}
   self.updating_selectors = false
   self:set_state(self.state)
 end
@@ -536,22 +553,6 @@ function Chat:show_settings()
   dlg:label {id="status", text="Status: " .. self.state}
   dlg:check {id="manual", text="Manual server (advanced)", selected=self.preferences.manual_server == true,
     onclick=function() self:set_state(self.state) end}
-  dlg:newrow()
-  dlg:check {id="auto_approve", text="Auto-approve edits (this chat)", selected=self.auto_approve,
-    enabled=self.state == "ready" and self.approval == nil, onclick=function()
-      if self.state ~= "ready" or self.approval ~= nil then
-        self.settings_dialog:modify {id="auto_approve", selected=self.auto_approve}
-        return
-      end
-      local enabled = dlg.data.auto_approve == true
-      local accepted, error_text = self.callbacks.on_approval_mode(enabled)
-      if accepted then
-        self:set_approval_mode(enabled)
-      else
-        self.settings_dialog:modify {id="auto_approve", selected=self.auto_approve}
-        if error_text then self.settings_dialog:modify {id="status", text="Status: " .. error_text} end
-      end
-    end}
   dlg:label {id="auto_info", text="Local service starts automatically."}
   dlg:entry {id="endpoint", text=self.preferences.endpoint or "ws://127.0.0.1:4500"}
   dlg:button {id="connect", text="Connect", onclick=function()
@@ -560,6 +561,30 @@ function Chat:show_settings()
   dlg:button {id="disconnect", text="Disconnect", onclick=self.callbacks.on_disconnect}
   dlg:button {id="done", text="Done"}
   self:set_state(self.state)
+  dlg:show {wait=false}
+end
+
+--- Rename a persisted current chat; saving waits for the server acknowledgement.
+function Chat:show_rename()
+  if self.rename_dialog then self.rename_dialog:show {wait=false}; return end
+  if self.state~="ready" or not self.thread_id then return end
+  local dlg
+  dlg=Dialog {title="Rename conversation",onclose=function()
+    if self.rename_dialog==dlg then self.rename_dialog=nil end
+  end}
+  self.rename_dialog=dlg
+  dlg:entry {id="name",text=self.thread_name or "",focus=true}
+  dlg:newrow(); dlg:label {id="error",text="Choose a name for this conversation."}
+  dlg:newrow(); dlg:button {id="save",text="Save",onclick=function()
+    if self.state~="ready" then return end
+    local accepted,err=self.callbacks.on_rename(dlg.data.name,function(success,error_text)
+      if self.rename_dialog~=dlg then return end
+      if success then dlg:close()
+      else dlg:modify {id="error",text=error_text or "Could not rename conversation."} end
+    end)
+    if not accepted and self.rename_dialog==dlg then dlg:modify {id="error",text=err or "Could not rename conversation."} end
+  end}
+  dlg:button {text="Cancel",onclick=function() dlg:close() end}
   dlg:show {wait=false}
 end
 
@@ -578,14 +603,14 @@ function Chat:show()
       self.history_dialog = nil
       self.history = nil
       if history then history:close() end
+      if self.rename_dialog then self.rename_dialog:close() end
       if self.callbacks.on_close then self.callbacks.on_close() end
     end
   end }
   self.dialog = dlg
   dlg:button {id="history",text="Chats...",onclick=function() self:show_history() end}
   dlg:button {id="new",text="New chat",onclick=self.callbacks.on_new_chat}
-  dlg:button {id="previous",text="Previous turn",onclick=function() self:jump_prompt(-1) end}
-  dlg:button {id="next_prompt",text="Next turn",onclick=function() self:jump_prompt(1) end}
+  dlg:button {id="rename",text="Rename...",enabled=self.thread_id~=nil,onclick=function() self:show_rename() end}
   dlg:button {id="settings",text="Settings...",onclick=function() self:show_settings() end}
   dlg:newrow()
   dlg:label {id="conversation",text="New chat"}
@@ -595,15 +620,34 @@ function Chat:show()
   add_scroll_canvas(dlg,{id="transcript",width=440,height=280,hexpand=true,vexpand=true},self.scroll,
     function(gc) paint_messages(gc,self) end,function(action,event) return transcript_input(self,action,event) end)
   dlg:newrow()
-  dlg:combobox {id="model",options={"Model: Waiting for connection"},onchange=function()
+  dlg:combobox {id="model",options={"Waiting for connection"},onchange=function()
     if self.updating_selectors then return end
     local entry=self.models_by_label[dlg.data.model]
-    if entry then self.callbacks.on_settings(entry.model,#entry.supportedReasoningEfforts>0 and entry.defaultReasoningEffort or nil) end
+    if entry then
+      local tier="default"
+      for _,option in ipairs(entry.serviceTiers or {}) do if option.id==self.selected_tier then tier=option.id end end
+      self.callbacks.on_settings(entry.model,#entry.supportedReasoningEfforts>0 and entry.defaultReasoningEffort or nil,tier)
+    end
   end}
-  dlg:combobox {id="effort",options={"Reasoning: Not supported"},onchange=function()
+  dlg:combobox {id="effort",options={"Not supported"},onchange=function()
     if self.updating_selectors then return end
     local entry=self.models_by_label[dlg.data.model]
-    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[dlg.data.effort] or nil) end
+    if entry then self.callbacks.on_settings(entry.model,self.has_efforts and self.efforts_by_label[dlg.data.effort] or nil,
+      self.tiers_by_label[dlg.data.speed]) end
+  end}
+  dlg:combobox {id="speed",options={"Standard"},onchange=function()
+    if self.updating_selectors then return end
+    local entry=self.models_by_label[dlg.data.model]
+    local tier=self.tiers_by_label[dlg.data.speed]
+    if entry and tier then self.callbacks.on_settings(entry.model,self.selected_effort,tier) end
+  end}
+  dlg:combobox {id="auto_approve",options={"Ask before edits","Auto-approve edits"},option="Ask before edits",hexpand=false,onchange=function()
+    if self.updating_selectors then return end
+    if self.state~="ready" or self.approval then self:set_state(self.state); return end
+    local enabled=dlg.data.auto_approve=="Auto-approve edits"
+    local accepted,error_text=self.callbacks.on_approval_mode(enabled)
+    if accepted then self:set_approval_mode(enabled)
+    else self:set_state(self.state); if error_text then self:add_message("approval-mode-error","Error",error_text,false) end end
   end}
   dlg:newrow()
   dlg:entry {id="input",text="",focus=true,vexpand=true,placeholder="Message Codex about the current canvas..."}
@@ -615,7 +659,8 @@ function Chat:show()
   dlg:button {id="retry",text="Retry",onclick=function()
     self.callbacks.on_connect(self.preferences.manual_server and self.preferences.endpoint or nil)
   end}
-  self:set_models(self.models, self.selected_model, self.selected_effort)
+  self:set_models(self.models, self.selected_model, self.selected_effort,self.selected_tier)
+  self:set_thread(self.thread_id,self.thread_name)
   dlg:show { wait = false }
   -- Retain the native entry's text/IME handling, giving it and the transcript
   -- extra vertical room without changing their minimum native widget sizes.
@@ -667,6 +712,7 @@ function Chat:close()
   self.history_dialog = nil
   self.history = nil
   if history then history:close() end
+  if self.rename_dialog then self.rename_dialog:close() end
   local dlg = self.dialog
   self.dialog = nil
   if dlg then dlg:close() end

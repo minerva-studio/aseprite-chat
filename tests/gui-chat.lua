@@ -9,14 +9,14 @@ end}, {})
 view:show()
 view:set_models({{model="native-model",displayName="Native model",isDefault=true,defaultReasoningEffort="high",
   supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}}},"native-model","high")
-assert(view.dialog.data.model=="Model: Native model" and view.dialog.data.effort=="Reasoning: high")
+assert(view.dialog.data.model=="Native model" and view.dialog.data.effort=="high")
 view:set_models({{model="other-model",displayName="Other",defaultReasoningEffort="medium",
   supportedReasoningEfforts={{reasoningEffort="medium"}}}},"other-model","medium")
-assert(view.dialog.data.model=="Model: Other" and view.dialog.data.effort=="Reasoning: medium")
+assert(view.dialog.data.model=="Other" and view.dialog.data.effort=="medium")
 plain={{model="plain",displayName="Plain",supportedReasoningEfforts={}}}
 view:set_models(plain,"plain","high")
-assert(not view.selection_valid and view.dialog.data.model=="Model: Confirm model selection")
-view.dialog:modify {id="model",option="Model: Plain"}
+assert(not view.selection_valid and view.dialog.data.model=="Confirm model selection")
+view.dialog:modify {id="model",option="Plain"}
 assert(chosen_model=="plain" and chosen_effort==nil and view.selection_valid,
   "native model change could not explicitly clear stale reasoning")
 view:add_message("user", "You", "让当前画布的高光暗一点。", false)

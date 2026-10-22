@@ -98,6 +98,12 @@ function Client:_state(state)
   self:_emit("on_state", state)
 end
 
+-- The client owns the active thread identity and its server-persisted name.
+function Client:_set_thread(thread)
+  self.thread_id, self.thread_name = thread and thread.id, thread and thread.name
+  self:_emit("on_thread", self.thread_id, self.thread_name)
+end
+
 function Client:_clear_requests()
   local pending = self._pending
   self._pending = {}
@@ -234,6 +240,7 @@ function Client:_resume()
     assert(object(result.thread) and result.thread.id == self.thread_id, "Malformed thread/resume response")
     local status = result.thread.status
     assert(object(status), "Missing resumed thread status")
+    self:_set_thread(result.thread)
     if status.type == "idle" then self:_state("ready"); return end
     if status.type ~= "active" then self:_request_error({message="Cannot resume thread: " .. tostring(status.type)}); return end
     local turn = {stopped=true, recovery=true, items={}}
@@ -263,7 +270,7 @@ function Client:_opened()
   self:_cancel("Connection generation changed", false)
   self._turn, self.turn_id = nil, nil
   self:_state("initializing")
-  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.3.2"},
+  self:_request("initialize", {clientInfo={name="aseprite_chat", title="Aseprite Chat", version="0.3.3"},
     capabilities={experimentalApi=true}}, function(_, err)
     if err then self:_fail(err.message or "Initialization failed"); return end
     self:_write({method="initialized"})
@@ -333,6 +340,14 @@ end
 
 function Client:_notification(message)
   local method, params = message.method, message.params
+  if method == "thread/name/updated" then
+    assert(object(params) and type(params.threadId)=="string", "Malformed thread name update")
+    if params.threadId==self.thread_id then
+      assert(params.threadName==nil or type(params.threadName)=="string", "Malformed thread name")
+      self:_set_thread({id=self.thread_id,name=params.threadName})
+    end
+    return
+  end
   local summary_delta = method == "item/reasoning/summaryTextDelta"
   local summary_part = method == "item/reasoning/summaryPartAdded"
   if method ~= "turn/started" and method ~= "turn/completed" and method ~= "item/started"
@@ -494,9 +509,14 @@ function Client:list_models(callback)
             assert(type(option.reasoningEffort)=="string", "Malformed reasoning effort")
             efforts[#efforts+1] = {reasoningEffort=option.reasoningEffort, description=option.description}
           end
+          local tiers={}
+          for _,tier in ipairs(entry.serviceTiers or {}) do
+            assert(type(tier.id)=="string" and type(tier.name)=="string", "Malformed service tier")
+            tiers[#tiers+1]={id=tier.id,name=tier.name,description=tier.description}
+          end
           models[#models+1] = {model=entry.model, displayName=entry.displayName,
             isDefault=entry.isDefault, defaultReasoningEffort=entry.defaultReasoningEffort,
-            supportedReasoningEfforts=efforts}
+            supportedReasoningEfforts=efforts,serviceTiers=tiers}
         end
         local next_cursor = result.nextCursor
         if next_cursor ~= nil then
@@ -570,7 +590,8 @@ function Client:open_thread(id, callback)
       if not live() then return end
       self._opening = nil
       if result then
-        self.thread_id, self.turn_id, self._terminal = id, nil, {}
+        self:_set_thread(result.thread)
+        self.turn_id, self._terminal = nil, {}
         for _, turn in ipairs(result.turns) do self._terminal[turn.id] = true end
       end
       self:_state("ready")
@@ -643,6 +664,7 @@ function Client:_start_turn(turn, prompt, context_text)
   if self._turn ~= turn then return end
   if turn.stopped then self:_finish(turn); return end
   self:_request("turn/start", {threadId=self.thread_id, model=turn.model, effort=turn.effort, summary=turn.summary,
+    serviceTierForTurn=turn.serviceTier,
     input={{type="text", text=prompt .. "\n\nCurrent Aseprite target:\n" .. context_text}}}, function(result, err)
     if self._turn ~= turn then return end
     if err then self:_request_error(err); return end
@@ -656,7 +678,7 @@ end
 
 -- Send accepts exactly one active turn and returns whether the request was sent
 -- locally. Later protocol failures are reported through on_error, without replay.
--- Optional settings={model=canonicalModel,effort=advertisedEffort,summary=mode}
+-- Optional settings={model=canonicalModel,effort=advertisedEffort,summary=mode,serviceTier=advertisedTier}
 -- is snapshotted for this turn. The caller supplies summary only for capable models;
 -- omission never enables summaries globally. Overrides preserve the thread.
 function Client:send(prompt, context_text, settings)
@@ -665,7 +687,7 @@ function Client:send(prompt, context_text, settings)
   if type(context_text) ~= "string" then return false, "Context must be text" end
   return self:_guard(function()
     local turn = {items={}, model=settings and settings.model, effort=settings and settings.effort,
-      summary=settings and settings.summary}
+      summary=settings and settings.summary,serviceTier=settings and settings.serviceTier}
     self._turn = turn
     self:_state("working")
     if self.thread_id then self:_start_turn(turn, prompt, context_text); return end
@@ -675,7 +697,7 @@ function Client:send(prompt, context_text, settings)
       if self._turn ~= turn then return end
       if err then self:_request_error(err); return end
       assert(result.thread and type(result.thread.id) == "string", "Malformed thread/start response")
-      self.thread_id = result.thread.id
+      self:_set_thread(result.thread)
       self:_start_turn(turn, prompt, context_text)
     end)
   end)
@@ -699,9 +721,27 @@ function Client:new_chat()
     return false, "Cannot create a new chat while disconnected or working"
   end
   return self:_guard(function()
-    self.thread_id, self.turn_id, self._terminal = nil, nil, {}
+    self:_set_thread(nil)
+    self.turn_id, self._terminal = nil, {}
     self:_cancel("New chat", false)
     self:_state("ready")
+  end)
+end
+
+--- Persist a name for the current idle thread; callback(success, errorText).
+--- Retirement suppresses late callbacks, and failure preserves the prior name.
+function Client:rename_thread(name, callback)
+  if self.state~="ready" or not self.thread_id or self._turn then return false,"Open an idle conversation first." end
+  if type(name)~="string" or name:match("^%s*$") then return false,"Enter a conversation name." end
+  name=name:match("^%s*(.-)%s*$")
+  return self:_guard(function()
+    local id=self.thread_id
+    self:_state("renaming")
+    self:_request("thread/name/set",{threadId=id,name=name},function(_,err)
+      if not err then self:_set_thread({id=id,name=name}) end
+      self:_state("ready")
+      callback(not err,err and (err.message or tostring(err)))
+    end)
   end)
 end
 

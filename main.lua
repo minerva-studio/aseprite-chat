@@ -25,6 +25,7 @@ function Controller:_message(role, text)
 end
 
 function Controller:_refresh_state()
+  self.view:set_thread(self.client.thread_id,self.client.thread_name)
   self.view:set_state(self.startup_error and "error" or self.launcher.pending and "starting" or self.client.state)
 end
 
@@ -82,9 +83,16 @@ function Controller:_tool(params, reply)
   end
 end
 
-local function valid_settings(models, model, effort)
+local function valid_settings(models, model, effort, tier)
   for _, entry in ipairs(models or {}) do
     if entry.model == model then
+      if tier and tier~="default" then
+        local supported=false
+        for _,option in ipairs(entry.serviceTiers or {}) do
+          if option.id==tier and (tier=="priority" or tier=="fast") then supported=true end
+        end
+        if not supported then return false,"Choose a speed supported by this model." end
+      end
       if #entry.supportedReasoningEfforts == 0 and effort == nil then return true end
       for _, option in ipairs(entry.supportedReasoningEfforts) do
         if option.reasoningEffort == effort then return true end
@@ -113,8 +121,8 @@ function Controller:_load_models()
         self.preferences.effort = entry.defaultReasoningEffort
       end
     end
-    self.view:set_models(self.models, self.preferences.model, self.preferences.effort)
-    local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort)
+    self.view:set_models(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
+    local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
     if not valid and models then self:_message("Aseprite", why) end
   end)
 end
@@ -131,6 +139,7 @@ function Controller:_create_client()
       self:_refresh_state()
     end,
     on_message = function(id, text, delta) self.view:add_message(id, "Codex", text, delta) end,
+    on_thread = function(id,name) self.view:set_thread(id,name) end,
     on_item = function(item,completed)
       -- Local tool results are authoritative; notifications must not overwrite
       -- cancellation/rejection with a generic completed dynamic-tool status.
@@ -161,7 +170,7 @@ function Main.create(options)
   self.executor = self.Executor.new()
   self.view = Chat.new({
     on_connect = function(endpoint) self:connect(endpoint) end,
-    on_settings = function(model, effort) return self:select_settings(model, effort) end,
+    on_settings = function(model, effort, tier) return self:select_settings(model, effort, tier) end,
     on_disconnect = function() self:disconnect() end,
     on_send = function(text) return self:send(text) end,
     on_stop = function() self:stop() end,
@@ -169,6 +178,7 @@ function Main.create(options)
     on_list_threads = function(search,cursor,callback) return self.client:list_threads({search=search,cursor=cursor},callback) end,
     on_open_thread = function(id) return self:open_thread(id) end,
     on_approval_mode = function(enabled) return self:set_approval_mode(enabled) end,
+    on_rename = function(name,callback) return self.client:rename_thread(name,callback) end,
     on_close = function() self:close() end
   }, self.preferences)
   self.client = self:_create_client()
@@ -258,12 +268,13 @@ function Controller:open_thread(id)
 end
 
 --- Select catalog-supported settings for the next turn without replacing its thread.
-function Controller:select_settings(model, effort)
+function Controller:select_settings(model, effort, tier)
   if self.client.state ~= "ready" then return false, "Wait for the current turn to finish." end
-  local valid, why = valid_settings(self.models, model, effort)
+  tier=tier or "default"
+  local valid, why = valid_settings(self.models, model, effort,tier)
   if not valid then return false, why end
-  self.preferences.model, self.preferences.effort = model, effort
-  self.view:set_models(self.models, model, effort)
+  self.preferences.model, self.preferences.effort, self.preferences.service_tier = model, effort, tier
+  self.view:set_models(self.models, model, effort,tier)
   return true
 end
 
@@ -271,7 +282,7 @@ end
 function Controller:send(text)
   if not text or text:match("^%s*$") then return false end
   if self.client.state ~= "ready" then self:_message("Aseprite", "Connect and wait for the current turn to finish."); return false end
-  local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort)
+  local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
   if not valid then self:_message("Aseprite", why); return false end
   if not app.sprite then self:_message("Aseprite", "Open a sprite before sending a message."); return false end
   local ok, context = pcall(function()
@@ -280,7 +291,7 @@ function Controller:send(text)
   end)
   if not ok then self:_message("Error", context); return false end
   local sent, err = self.client:send(text, context, {model=self.preferences.model, effort=self.preferences.effort,
-    summary=self.preferences.effort and "auto" or nil})
+    summary=self.preferences.effort and "auto" or nil,serviceTier=self.preferences.service_tier or "default"})
   if sent then self:_message("You", text) else self:_message("Error", err or "Message was not sent.") end
   return sent
 end

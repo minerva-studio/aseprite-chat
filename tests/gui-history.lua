@@ -2,7 +2,7 @@
 -- This test proxy captures callback specs while forwarding to real native Dialogs.
 local root=app.fs.filePath(app.fs.filePath(debug.getinfo(1,"S").source:sub(2)))
 local native_dialog=Dialog
-local surfaces={}
+local surfaces,widgets={},{}
 local environment=setmetatable({Dialog=function(spec)
   local native=native_dialog(spec)
   return setmetatable({}, {__index=function(self,key)
@@ -10,6 +10,7 @@ local environment=setmetatable({Dialog=function(spec)
     return function(_,...)
       local widget=select(1,...)
       if key=="canvas" then surfaces[widget.id]=widget end
+      if key~="modify" and type(widget)=="table" and widget.id then widgets[widget.id]=widget end
       native[key](native,...)
       return self
     end
@@ -17,6 +18,8 @@ local environment=setmetatable({Dialog=function(spec)
 end},{__index=_G})
 local Chat=assert(loadfile(app.fs.joinPath(root,"chat.lua"),"t",environment))()
 local view,opened
+local models={{model="gpt-6.1-sol",displayName="GPT-6.1-Sol",defaultReasoningEffort="low",
+  supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}},serviceTiers={{id="priority",name="Fast"}}}}
 view=Chat.new({
   on_list_threads=function(_,_,callback)
     local entries={}
@@ -25,12 +28,14 @@ view=Chat.new({
     callback({data=entries}); return true
   end,
   on_open_thread=function(id) opened=id; return true end,
-  on_approval_mode=function(enabled) view:set_approval_mode(enabled); return true end
+  on_approval_mode=function(enabled) view:set_approval_mode(enabled); return true end,
+  on_settings=function(model,effort,tier) view:set_models(models,model,effort,tier); return true end,
+  on_rename=function(name,callback) view:set_thread("fixture-thread",name); callback(true); return true end
 },{})
 view:show()
 view.dialog:modify {title="UI TEST · Navigation and collapsed activity · no connection"}
-view:set_models({{model="gpt-6.1-sol",displayName="GPT-6.1-Sol",defaultReasoningEffort="low",
-  supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}}},"gpt-6.1-sol","low")
+view:set_models(models,"gpt-6.1-sol","low","default")
+view:set_thread("fixture-thread",nil)
 view:set_state("ready")
 view.scroll.follow=false
 view:add_message("user","You","检查这张画布，帮我调整封面的高光。",false)
@@ -88,9 +93,15 @@ timer=Timer {interval=0.1,ontick=function()
       assert(opened=="native-1" and not view.history_dialog)
       view:show_history(); phase=4
     elseif phase==4 then
-      view:show_settings(); assert(not view.settings_dialog.data.auto_approve)
-      view:set_approval_mode(true); assert(view.settings_dialog.data.auto_approve)
+      view:show_settings(); assert(view.settings_dialog.data.auto_approve==nil)
+      assert(view.dialog.data.auto_approve=="Ask before edits")
+      view.dialog:modify {id="auto_approve",option="Auto-approve edits"}; widgets.auto_approve.onchange()
+      assert(view.auto_approve and view.dialog.data.auto_approve=="Auto-approve edits")
       view:set_approval_mode(false); view.settings_dialog:close()
+      view.dialog:modify {id="speed",option="Fast"}; widgets.speed.onchange()
+      assert(view.selected_tier=="priority")
+      view:show_rename(); view.rename_dialog:modify {id="name",text="魔法书 · 封面高光"}; widgets.save.onclick()
+      assert(view.thread_name=="魔法书 · 封面高光" and not view.rename_dialog)
       local main=view.dialog.bounds
       view.dialog.bounds=Rectangle(8,50,main.width,main.height)
       local history=view.history_dialog.bounds

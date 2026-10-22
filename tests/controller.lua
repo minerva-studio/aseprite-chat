@@ -18,7 +18,7 @@ local function scenario(name, body, configuration)
       function protocol:list_models(callback)
         self.catalog_calls=(self.catalog_calls or 0)+1
         callback({
-          {model="wire-a",displayName="A",isDefault=true,defaultReasoningEffort="high",supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}},
+          {model="wire-a",displayName="A",isDefault=true,defaultReasoningEffort="high",serviceTiers={{id="priority",name="Fast"}},supportedReasoningEfforts={{reasoningEffort="low"},{reasoningEffort="high"}}},
           {model="wire-b",displayName="B",defaultReasoningEffort="medium",supportedReasoningEfforts={{reasoningEffort="medium"}}}
         })
         return true
@@ -30,6 +30,7 @@ local function scenario(name, body, configuration)
       end
       function protocol:stop() self.allowed = false; opts.on_cancel("stopped") end
       function protocol:new_chat() return true end
+      function protocol:rename_thread(name,callback) self.rename_name=name; self.rename_callback=callback; return true end
       return protocol
     end },
     ["launcher.lua"] = {new=function()
@@ -65,6 +66,7 @@ local function scenario(name, body, configuration)
       function view:clear() self.messages = {} end
       function view:set_models(models,model,effort) self.catalog,self.model,self.effort=models,model,effort end
       function view:set_approval_mode(enabled) self.auto_approve=enabled end
+      function view:set_thread(id,name) self.thread_id,self.thread_name=id,name end
       return view
     end }
   }
@@ -162,6 +164,16 @@ scenario("dropdown selections validate capabilities and change the next turn wit
   assert(c.preferences.model=="wire-b" and c.preferences.effort=="medium")
   assert(c:send("next")); assert(p.sent_settings.model=="wire-b" and p.sent_settings.effort=="medium")
   assert(#v.messages>count and p.catalog_calls==1, "history or catalog lifecycle changed")
+end)
+scenario("Fast follows advertised tiers and standard overrides a resumed thread's speed",function(c,p,e,v)
+  assert(p.sent_settings.serviceTier=="default")
+  p.state="ready"
+  assert(c:select_settings("wire-a","low","priority"))
+  assert(c:send("fast")); assert(p.sent_settings.serviceTier=="priority")
+  p.state="ready"
+  assert(not c:select_settings("wire-b","medium","priority"))
+  assert(c:select_settings("wire-b","medium","default"))
+  assert(c:send("standard")); assert(p.sent_settings.serviceTier=="default")
 end)
 scenario("reconnection reloads catalog and does not silently replace an unavailable saved model",function(c,p,e,v)
   c.preferences.model="removed-model"; p.options.on_state("initializing")
