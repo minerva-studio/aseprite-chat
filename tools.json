@@ -1,0 +1,258 @@
+[
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "spriteId": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "region": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "y": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "height": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "width": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "width",
+            "height"
+          ]
+        },
+        "grid": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "layers": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "tag": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "frames": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "frame": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": []
+    },
+    "type": "function",
+    "name": "read_sprite",
+    "description": "Inspect a live, possibly unsaved Aseprite sprite. Returns JSON metadata (openSprites, palette, tags, slices, layers, cels for the rendered frames) and rendered PNG previews (one image per sheet when several frames are rendered). Reading the editing target returns the current revision; another open sprite from openSprites is read-only and has no revision. Options: spriteId (open sprite id), frame, frames (array of 1-based frames, no cap), tag (tag name), layers (array of layer ids; group ids include their children and selected layers render in isolation without changing the document), region {x,y,width,height} to crop, grid (source-pixel spacing, drawn when the preview scale is 4 or more)."
+  },
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "height": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "spriteId": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "x": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "y": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "layer": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "frame": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "width",
+        "height"
+      ]
+    },
+    "type": "function",
+    "name": "read_pixels",
+    "description": "Read exact pixel values of a small region (width*height must not exceed 4096). Without layer, returns the composited visible layers as #rrggbbaa hex strings. With layer (a layer id), returns that layer's cel pixels in sprite coordinates, transparent outside the cel: palette indices for INDEXED sprites, #vvaa for GRAY, #rrggbbaa for RGB. Optional spriteId and frame; no approval or revision required."
+  },
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "spriteId": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "spriteId"
+      ]
+    },
+    "type": "function",
+    "name": "switch_sprite",
+    "description": "Move the editing target to another open sprite by its openSprites spriteId. Activates it in the editor and rebinds the canvas context; returns its metadata with a new revision. Later execute_lua edits and read_sprite previews apply to the new target."
+  },
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "summary": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "expectedRevision": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "code": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "summary",
+        "expectedRevision"
+      ]
+    },
+    "type": "function",
+    "name": "execute_lua",
+    "description": "Propose short, terminating Lua for the captured sprite; the user must approve the complete code. Inspect first and pass that expectedRevision. The plugin rechecks the active sprite/frame/layer and revision, then owns one app.transaction and returns the result and new revision. For undoable pixels: local image = cel.image:clone(); image:drawPixel(x,y,pixel); cel.image = image. Raw drawPixel/pixels/bytes writes to an attached image do not create Undo and cannot roll back. Use native undoable APIs such as cel.image assignment, cel.position/opacity, layer.name/opacity/blendMode, and sprite:newLayer/newCel; layer visibility and locking are undoable inside this transaction. Only edit the captured sprite; do not save/open/close documents or cause external side effects. Environment: sprite, native app, Aseprite constructors/constants, basic Lua functions, math/string/table/utf8; no io/os/debug/package/require/dofile/loadfile/load. Native app is powerful: this is trusted approved automation, not a hostile-code sandbox. Errors roll back undoable edits only. Running Lua cannot be interrupted by Stop."
+  },
+  {
+    "inputSchema": {
+      "additionalProperties": false,
+      "type": "object",
+      "properties": {
+        "columns": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "spriteId": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "output": {
+          "enum": [
+            "frames",
+            "sheet"
+          ],
+          "type": "string"
+        },
+        "layers": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        "scale": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "frame": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "metadata": {
+          "type": "boolean"
+        },
+        "region": {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "y": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "height": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "width": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "x": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "x",
+            "y",
+            "width",
+            "height"
+          ]
+        },
+        "padding": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "tag": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "png",
+            "gif"
+          ],
+          "type": "string"
+        },
+        "frames": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "type": "array"
+        }
+      },
+      "required": []
+    },
+    "type": "function",
+    "name": "export_sprite",
+    "description": "Encode native-resolution PNG frames, an animated GIF, or a PNG spritesheet from a live unsaved sprite without editing or saving the source. Selection matches read_sprite: spriteId, frames > tag > frame (default captured frame), layers and clipped region. Explicit frames retain order and duplicates; tags select their numeric range, not playback direction. scale is an integer pixel multiplier (default 1), with no preview resizing or grid. format png (default) or gif; output frames (default) or sheet (PNG only). Sheet columns defaults to ceil(sqrt(frame count)), padding is transparent spacing between cells (default 0), metadata=true adds JSON frame rectangles and durations in milliseconds. GIF uses native palette conversion, binary transparency and 10ms timing. Limits: 16,777,216 rendered/output pixels, each dimension <=16384. Returns paths in an owned temporary directory, not image payloads. Copy files to the requested destination using Codex shell/file tools under current Access/approvals; never reconstruct image files from read_pixels. Files survive individual calls. Internal-chat files expire when switching chats/accounts or closing chat; MCP files expire when their external client disconnects or native control ends. No destination path is accepted. Inspect/export again if a historical path no longer exists."
+  }
+]

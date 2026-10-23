@@ -4,7 +4,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 
 const maxBytes = 16 * 1024 * 1024;
@@ -76,7 +76,12 @@ export function launchFor(account, baseEnv) {
   const env = { ...baseEnv, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'aseprite_chat' };
   delete env[providerEnvKey];
   const access = account && account.access || 'canvas';
-  const args = ['app-server', '--stdio', ...leanOverrides(access)];
+  const mcpHome = account?.mode === 'custom' ? account.codexHome : env.CODEX_HOME || path.join(os.homedir(), '.codex');
+  const mcpScript = fileURLToPath(new URL('./mcp-server.mjs', import.meta.url));
+  // Internal chat owns dynamic tools already. Supply a valid disabled stdio
+  // entry too: enabled=false alone is invalid before the first registration.
+  const args = ['app-server', '--stdio', ...leanOverrides(access), '-c',
+    `mcp_servers.aseprite_chat={enabled=false,command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(mcpScript)},"--home",${JSON.stringify(mcpHome)}]}`];
   if (!account || account.mode !== 'custom') return { args, env };
   env.CODEX_HOME = account.codexHome;
   if (access !== 'canvas') args.push(...windowsSandboxOverride(account.codexHome));

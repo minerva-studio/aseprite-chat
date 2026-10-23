@@ -639,8 +639,18 @@ function Controller:close()
   self.closed = true
 end
 
-local controller
+local controller,mcp
+local function mcp_shortcut_blocked()
+  return mcp and (mcp.dialog or mcp.approval.approval)
+end
 function init(plugin)
+  plugin:newCommand {
+    id="AsepriteMCP",title="Aseprite MCP",group="view_controls",
+    onclick=function()
+      if not mcp then mcp=dofile(app.fs.joinPath(plugin.path,"mcp.lua")).new{path=plugin.path,preferences=plugin.preferences} end
+      mcp:show()
+    end
+  }
   plugin:newCommand {
     id = "AsepriteChat", title = "Aseprite Chat", group = "view_controls",
     onclick = function()
@@ -650,8 +660,8 @@ function init(plugin)
   }
   plugin:newCommand {
     id="AsepriteChatSend",title="Aseprite Chat: Send / Steer",group="view_controls",
-    onenabled=function() return controller~=nil and controller.view:can_submit(true) end,
-    onclick=function() if controller then controller.view:submit(true) end end
+    onenabled=function() return not mcp_shortcut_blocked() and controller~=nil and controller.view:can_submit(true) end,
+    onclick=function() if controller and not mcp_shortcut_blocked() then controller.view:submit(true) end end
   }
   -- Enter normally plays animation. Route it to chat only while that window
   -- exists; preserve the editor action after closing chat. Transformation keeps
@@ -659,6 +669,7 @@ function init(plugin)
   plugin:newCommand {
     id="AsepriteChatEnter",title="Aseprite Chat: Enter",
     onclick=function()
+      if mcp_shortcut_blocked() then return end
       if controller and controller.view.dialog then controller.view:submit(true)
       else app.command.PlayAnimation() end
     end
@@ -669,6 +680,7 @@ function init(plugin)
 end
 
 function exit(plugin)
+  if mcp then mcp:close(); mcp=nil end
   if controller then controller:close(); controller = nil end
 end
 

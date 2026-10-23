@@ -1,6 +1,6 @@
 # Aseprite Chat
 
-A native Aseprite chat window for Codex. Talk about the current sprite, inspect its unsaved layers and rendered frame, and approve Lua edits that appear directly in the running editor.
+A native Aseprite chat window and an external Codex MCP connection. Inspect unsaved sprites, approve Lua edits in the running editor, and export native PNG/GIF/sprite sheets.
 
 The editor extension is Lua. Opening the chat automatically finds or starts a small local Node communication bridge, which starts Codex app-server using its stdio transport. No terminal command, port entry, MCP server, browser, or Python is required for normal use. The bridge exists because this Aseprite version always sends an Origin header and Codex rejects that header on its own WebSocket listener.
 
@@ -8,7 +8,7 @@ The editor extension is Lua. Opening the chat automatically finds or starts a sm
 
 - Windows, Aseprite 1.3.18.6, and Codex CLI 0.163.0 are the initial verification environment. Other versions/platforms are not claimed as tested.
 - Codex must already be signed in (`codex login`) for the default account. The plugin uses that login through app-server. A **Custom Codex home** account (below) can instead use an API key or a compatible Responses endpoint, in which case a Codex login is not required.
-- Node.js 24 or later is required for the local communication bridge. The plugin locates it and the Codex executable automatically; the bridge's pinned JavaScript dependency is included in the extension.
+- Node.js 24 or later is required for the local communication bridge. The plugin locates it and the Codex executable automatically; pinned JavaScript runtime dependencies are included in the extension.
 - The installed Codex version must support the experimental dynamic-tool API. The plugin opts into the experimental protocol during initialization.
 
 ## Install and start
@@ -34,6 +34,23 @@ Aseprite may ask permission to connect to localhost and create/read a temporary 
   - **Base URL** and **API key** are optional. With either set, the child uses a custom `model_provider` speaking the Responses API: requests go to `<Base URL>/responses` with `Authorization: Bearer <key>` (a key with an empty URL targets the official `https://api.openai.com/v1`). With both empty, the custom home's own configuration and login are used instead.
   - The API key is stored **plaintext in `providers.json` only** — never in Aseprite preferences, Codex's `config.toml`, command lines, or logs. Settings shows only a trailing hint; the key entry stays blank to keep the saved key, and **Remove saved key** clears it.
   - **Models** optionally lists model IDs (comma-separated). When non-empty it replaces the server catalog in the picker — Codex's `model/list` always returns its bundled OpenAI entries regardless of provider, which is rarely useful for a custom endpoint. Each listed model is offered with low/medium/high reasoning and normal speed, with no Fast control.
+
+## External Codex through MCP
+
+Open **View > Aseprite MCP** to connect external Codex to this running editor. This is independent of the internal chat and does not start another Codex model process.
+
+1. Set **Target Codex home** to the home used by the external Codex client. On first use it defaults to the account selected in Aseprite Chat Settings; subsequent opens remember the MCP panel's chosen home.
+2. Click **Register & connect**. The plugin creates the selected home directory if it is new, backs up an existing `config.toml` to `<home>/.aseprite-chat/config-backup-<uuid>.toml`, then invokes the native Codex CLI with process-local `CODEX_HOME` to add the `aseprite_chat` stdio MCP entry. The entry runs the installed `scripts/mcp-server.mjs` with native Node and `--home <home>`. Other model/provider/login settings and unrelated MCP entries are retained. Repeating an exact registration is a no-op; a foreign or altered same-name entry is rejected for manual inspection.
+3. Restart the external Codex client or start a fresh session so it loads the entry. Ask it to inspect or edit the current Aseprite document. All five tools below are available through MCP, including PNG preview image content.
+4. Keep the MCP panel connected while using these tools. **Connect** reconnects without changing Codex configuration. **Disconnect**, closing the panel or exiting the extension cancels pending native approvals and retires its document observations and temporary exports. A connection loss requires an explicit Connect. There is no automatic replay.
+
+The panel's home is independent of the internal chat account. It does not copy API keys or change the external host's model, provider, filesystem sandbox or approval settings. MCP edits always require **Approve once** in Aseprite, including when the internal chat has Auto-approve edits enabled. The full proposed Lua is shown and the captured revision/context is checked before execution. The original Undo contract applies. Cancelled or stale callbacks cannot execute. Enter in the MCP panel or its approval cannot submit a background internal chat draft. The internal chat disables only its own `aseprite_chat` MCP entry through a child runtime override, since it already provides these operations as dynamic tools; the saved configuration is unchanged by that override.
+
+Each home owns a loopback hub and a private discovery descriptor under `.aseprite-chat`. The hub authenticates native connections, accepts one Aseprite editor, and supports multiple Codex clients with isolated captured targets/revisions. Only one operation can be active globally; additional calls fail busy rather than queueing edits. An interrupted request stays busy until native cancellation acknowledgement; a 90-second hub deadline disconnects an unresponsive editor and revokes its pending approvals. Codex's own tool timeout can be shorter. No-peer hubs exit after two minutes. Do not share a home between different active Aseprite editors; use another home for a second editor.
+
+MCP export paths survive individual calls but expire when that external client disconnects or the native control connection ends. Copy them using the external host's authorized file tools before ending the session. The internal chat's Access dropdown does not configure an external Codex host. Native execution/encoding is synchronous and cannot be interrupted after it starts. This is trusted local automation with native approval, not a sandbox for hostile Lua.
+
+Registration uses [Codex's documented MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli). A local Codex home registration does not configure ChatGPT web, which does not read local Codex configuration files. The new MCP transport is first verified with SDK clients, isolated native Codex CLI registration and batch Aseprite documents; production GUI/WebSocket approval timing and real model selection remain separate manual checks.
 
 ## Canvas tools
 
@@ -156,4 +173,4 @@ The authenticated integration variant is `--script-param mode=live --script test
 
 `tests/gui-steering-live.lua` accepts `--script-param endpoint=ws://127.0.0.1:<test bridge port>` and must run in a disposable editor/profile. It creates its own unsaved sprite, waits for a real edit approval, steers to a no-edit answer, checks the old approval cannot execute, and closes its own editor after writing `work/steering-live-result.json`.
 
-See [validation evidence](docs/validation.md) for the actual tested results and limitations. Runtime code is split into `main.lua` (controller/lifecycle), `chat.lua` (native UI), `codex.lua` (protocol), `executor.lua` (document tools), `export.lua` (native encoding and temporary artifacts), `account.lua` (account file), and `launcher.lua` plus `scripts/launch.ps1` (automatic startup). `tests/live-account.mjs` is an opt-in live check: it drives a real Codex through a temp custom account against a local mock Responses endpoint (or, with `--default-live`, one read-mostly turn against your default home).
+See [validation evidence](docs/validation.md) for actual results and limitations. `main.lua` owns internal chat lifecycle; `chat.lua` owns its UI; `codex.lua` handles app-server; `executor.lua` implements the shared `tools.json` definitions; `export.lua` owns encoders/artifacts. `mcp.lua` owns external native control, `scripts/mcp-bridge.mjs` its loopback hub, `scripts/mcp-server.mjs` the SDK stdio surface, and `scripts/register-mcp.mjs` plus `scripts/mcp-launch.ps1` selected-home registration. `account.lua` stores account settings; `launcher.lua` supplies asynchronous native bootstrapping. `tests/live-account.mjs` remains an opt-in app-server check using a disposable home/local mock (or an actual default-account turn with `--default-live`).

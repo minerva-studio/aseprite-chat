@@ -12,7 +12,7 @@ try {
   if ($firstManifest.FullName -ne 'package.json' -or $manifest.name -ne 'aseprite-chat') {
     throw "Aseprite would install '$($manifest.name)' from '$($firstManifest.FullName)' instead of Aseprite Chat"
   }
-  foreach ($file in @('main.lua','executor.lua','export.lua','launcher.lua','timeline.lua','scripts/launch.ps1','scripts/server.mjs','node_modules/ws/package.json','node_modules/ws/wrapper.mjs','node_modules/ws/LICENSE')) {
+  foreach ($file in @('main.lua','executor.lua','export.lua','mcp.lua','tools.json','launcher.lua','timeline.lua','scripts/launch.ps1','scripts/server.mjs','scripts/mcp-server.mjs','scripts/mcp-bridge.mjs','scripts/register-mcp.mjs','scripts/mcp-launch.ps1','node_modules/@modelcontextprotocol/sdk/package.json','node_modules/ws/package.json','node_modules/ws/wrapper.mjs','node_modules/ws/LICENSE')) {
     if (-not $archive.GetEntry($file)) { throw "Missing installed runtime: $file" }
   }
   $keys = @($manifest.contributes.keys)
@@ -30,3 +30,19 @@ try {
   }
   Write-Output "PASS Aseprite installer selects aseprite-chat $($manifest.version) at archive root; runtime remains inside this extension"
 } finally { $archive.Dispose() }
+
+$packageTestRoot = Join-Path ([IO.Path]::GetTempPath()) ('aseprite-mcp-package-' + [guid]::NewGuid().ToString('N'))
+$runtimeRoot = Join-Path $packageTestRoot 'runtime'
+$homeRoot = Join-Path $packageTestRoot 'home'
+try {
+  [IO.Compression.ZipFile]::ExtractToDirectory($PackagePath, $runtimeRoot)
+  [void][IO.Directory]::CreateDirectory($homeRoot)
+  & node (Join-Path $PSScriptRoot 'package-runtime.mjs') $runtimeRoot $homeRoot
+  if ($LASTEXITCODE -ne 0) { throw 'Isolated packaged MCP runtime failed' }
+} finally {
+  $resolvedTestRoot = [IO.Path]::GetFullPath($packageTestRoot)
+  $tempPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([char[]]@(92,47)) + [IO.Path]::DirectorySeparatorChar
+  if (-not $resolvedTestRoot.StartsWith($tempPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+      [IO.Path]::GetFileName($resolvedTestRoot) -notlike 'aseprite-mcp-package-*') { throw 'Unsafe test cleanup target' }
+  if (Test-Path -LiteralPath $resolvedTestRoot) { Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force }
+}

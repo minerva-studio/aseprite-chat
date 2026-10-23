@@ -31,6 +31,8 @@ local function quote(text) return "'" .. text:gsub("'", "''") .. "'" end
 -- Construct a Windows bootstrap launcher for the extension directory `path`.
 -- timer_factory accepts a native Timer spec; execute has os.execute semantics.
 -- pending is the current opaque attempt (or nil), never connection state.
+-- script selects an installed bootstrap; parameters supplies named string/switch
+-- arguments through encoded PowerShell, never through cmd path interpolation.
 function Launcher.new(options)
   assert(type(options) == "table" and type(options.path) == "string", "Launcher requires an extension path")
   return setmetatable({_options=options}, Instance)
@@ -90,7 +92,9 @@ function Instance:ensure(callback)
       if ok then
         local container = type(result) == "table" or type(result) == "userdata"
         local endpoint = container and result.endpoint
-        local port = type(endpoint) == "string" and tonumber(endpoint:match("^ws://127%.0%.0%.1:(%d+)$"))
+        local pattern = self._options.script=="mcp-launch.ps1"
+          and "^ws://127%.0%.0%.1:(%d+)/editor/[%w_-]+$" or "^ws://127%.0%.0%.1:(%d+)$"
+        local port = type(endpoint) == "string" and tonumber(endpoint:match(pattern))
         if port and port >= 1 and port <= 65535 then finish(endpoint, nil)
         elseif container and type(result.error) == "string" and result.error ~= "" then
           finish(nil, result.error)
@@ -108,10 +112,18 @@ function Instance:ensure(callback)
     return true
   end
   attempt.timer = timer
-  local script_path = app.fs.joinPath(self._options.path, "scripts", "launch.ps1")
+  local script_path = app.fs.joinPath(self._options.path, "scripts", self._options.script or "launch.ps1")
+  local parameters=""
+  for name,value in pairs(self._options.parameters or {}) do
+    assert(type(name)=="string" and name:match("^[%a][%w]*$"),"Invalid bootstrap parameter")
+    assert(type(value)=="string" or type(value)=="boolean","Invalid bootstrap parameter value")
+    if type(value)=="string" then parameters=parameters.." -"..name.." "..quote(value)
+    elseif value then parameters=parameters.." -"..name end
+  end
   local inner = "$ErrorActionPreference='Stop'; try { & ([scriptblock]::Create([IO.File]::ReadAllText("
     .. quote(script_path) .. "))) -ResultPath " .. quote(attempt.result_path)
     .. " -ExtensionRoot " .. quote(self._options.path)
+    .. parameters
     .. " } catch { [IO.File]::WriteAllText(" .. quote(attempt.result_path)
     .. ",'{\"error\":\"无法读取或执行插件连接程序。请重新安装插件并重试。\"}',[Text.UTF8Encoding]::new($false)) }"
   -- PowerShell runs installed code as an inline command without changing its

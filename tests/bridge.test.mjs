@@ -5,7 +5,8 @@ import http from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { createBridge, launchFor, readAccount } from '../scripts/server.mjs';
@@ -87,10 +88,28 @@ test('reconnection gets a new stdio process and no prior message replay', async 
   let response = once(first, 'message'); first.send('{"id":1,"method":"first"}');
   const firstPid = JSON.parse((await response)[0]).result.pid;
   const closed = once(first, 'close'); first.close(); await closed;
+  // The local close event can precede the server's session-release callback.
+  await until(async () => assert.equal((await getJson(`${url}/readyz`)).value.busy, false));
   const second = await connect(t, url);
   response = once(second, 'message'); second.send('{"id":2,"method":"second"}');
   const value = JSON.parse((await response)[0]);
   assert.equal(value.id, 2); assert.notEqual(value.result.pid, firstPid);
+});
+
+test('native Codex accepts internal MCP isolation with and without a saved registration', { skip: process.platform !== 'win32', timeout: 10000 }, async t => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'aseprite-chat-internal-mcp-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const executable = path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe');
+  const run = promisify(execFile);
+  const plan = launchFor({ mode: 'custom', codexHome: home }, process.env);
+  for (const config of ['', '[mcp_servers.aseprite_chat]\ncommand = "existing-node"\nargs = ["existing-script"]\n\n[mcp_servers.unrelated]\ncommand = "keep-command"\n']) {
+    await writeFile(path.join(home, 'config.toml'), config);
+    const { stdout } = await run(executable, [...plan.args.slice(2), 'mcp', 'list', '--json'], { env: plan.env, windowsHide: true, timeout: 5000 });
+    const entries = JSON.parse(stdout);
+    assert.equal(entries.find(entry => entry.name === 'aseprite_chat').enabled, false);
+    if (config) assert.equal(entries.find(entry => entry.name === 'unrelated').enabled, true);
+    assert.equal(await readFile(path.join(home, 'config.toml'), 'utf8'), config);
+  }
 });
 test('binary and multiple-JSON frames never reach the backend', async t => {
   const { url } = await setup(t);
@@ -358,6 +377,15 @@ test('launchFor re-enables file tools only beyond the canvas level', async t => 
   assert.match(plan.args.join(' '), /features\.multi_agent=false/);
   assert.equal(plan.args.join(' ').includes('features.shell_tool'), false);
   assert.equal(plan.args.join(' ').includes('windows.sandbox'), false, 'default mode must not force a sandbox');
+});
+
+test('internal chat never imports its own external Aseprite MCP registration', () => {
+  for (const account of [{mode:'default'}, {mode:'custom',codexHome:'C:/fixture'}]) {
+    const plan=launchFor(account,process.env);
+    const override=plan.args.find(arg=>arg.startsWith('mcp_servers.aseprite_chat='));
+    assert.match(override,/enabled=false/);
+    assert(override.includes(JSON.stringify(process.execPath)));
+  }
 });
 
 test('launchFor default keeps the user home, strips the key and adds lean overrides', () => {

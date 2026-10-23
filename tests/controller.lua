@@ -374,7 +374,13 @@ do
   local refreshed,animated,sent=0,0,0
   local fake_app=setmetatable({isUIAvailable=true,command={Refresh=function() refreshed=refreshed+1 end,
     PlayAnimation=function() animated=animated+1 end}}, {__index=function(_,key) return app[key] end})
-  local env=setmetatable({app=fake_app},{__index=_G})
+  local mcp_view={approval={}}
+  function mcp_view:show() self.dialog={} end
+  function mcp_view:close() self.dialog=nil end
+  local env=setmetatable({app=fake_app,dofile=function(path)
+    assert(app.fs.fileName(path)=="mcp.lua")
+    return {new=function() return mcp_view end}
+  end},{__index=_G})
   local Main=assert(loadfile(app.fs.joinPath(root,"main.lua"),"t",env))()
   local allowed=true
   local view={}
@@ -382,7 +388,7 @@ do
   function view:submit(shortcut) assert(shortcut==true); if self:can_submit(shortcut) then sent=sent+1; return true end; return false end
   function Main.create() return {view=view,open=function() view.dialog={} end,close=function() view.dialog=nil end} end
   local commands={}
-  env.init {newCommand=function(_,spec) commands[spec.id]=spec end}
+  env.init {path=root,preferences={},newCommand=function(_,spec) commands[spec.id]=spec end}
   assert(commands.AsepriteChatSend and commands.AsepriteChatEnter,"missing registered send/Enter commands")
   assert(refreshed==1,"extension keys were not reloaded after registering Lua commands")
   assert(not commands.AsepriteChatSend.onenabled())
@@ -396,6 +402,11 @@ do
   commands.AsepriteChatSend.onclick(); commands.AsepriteChatEnter.onclick()
   assert(sent==1 and animated==1,"blocked chat Enter escaped to send or animation")
   allowed=true; commands.AsepriteChatSend.onclick(); assert(sent==2)
+  assert(commands.AsepriteMCP,"missing standalone MCP menu")
+  commands.AsepriteMCP.onclick()
+  assert(mcp_view.dialog and not commands.AsepriteChatSend.onenabled())
+  commands.AsepriteChatEnter.onclick(); commands.AsepriteChatSend.onclick()
+  assert(sent==2,"MCP panel Enter submitted a background chat")
   env.exit()
   commands.AsepriteChatEnter.onclick(); assert(animated==2 and sent==2)
   passed=passed+1

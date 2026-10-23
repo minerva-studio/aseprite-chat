@@ -1,7 +1,7 @@
 param([string]$OutputPath)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$runtimeFiles = @('package.json', 'package-lock.json', 'main.lua', 'chat.lua', 'chat.aseprite-keys', 'codex.lua', 'executor.lua', 'export.lua', 'launcher.lua', 'timeline.lua', 'account.lua', 'scripts/server.mjs', 'scripts/launch.ps1', 'README.md', 'docs/validation.md')
+$runtimeFiles = @('package.json', 'package-lock.json', 'main.lua', 'chat.lua', 'chat.aseprite-keys', 'codex.lua', 'executor.lua', 'export.lua', 'mcp.lua', 'tools.json', 'launcher.lua', 'timeline.lua', 'account.lua', 'scripts/server.mjs', 'scripts/launch.ps1', 'scripts/mcp-server.mjs', 'scripts/mcp-bridge.mjs', 'scripts/register-mcp.mjs', 'scripts/mcp-launch.ps1', 'README.md', 'docs/validation.md')
 foreach ($file in $runtimeFiles) {
   if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $file) -PathType Leaf)) { throw "Missing runtime file: $file" }
 }
@@ -11,13 +11,13 @@ if (-not (Test-Path -LiteralPath $wsPackagePath -PathType Leaf)) { throw 'Missin
 $wsPackage = Get-Content -LiteralPath $wsPackagePath -Raw | ConvertFrom-Json
 if ($wsPackage.version -ne '8.22.0') { throw "Expected ws 8.22.0, found $($wsPackage.version)" }
 if (-not (Test-Path -LiteralPath (Join-Path $wsRoot 'LICENSE') -PathType Leaf)) { throw 'Missing ws license' }
-$wsFiles = @(Get-ChildItem -LiteralPath $wsRoot -File -Recurse | ForEach-Object {
+$dependencyFiles = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'node_modules') -File -Recurse | ForEach-Object {
   $relative = $_.FullName.Substring($projectRoot.Length).TrimStart([char[]]@(92, 47)).Replace([char]92, '/')
-  if ($relative -notmatch '^node_modules/ws/(node_modules|prebuilds)/' -and $relative -notmatch '\.(node|dll|so|dylib)$') { $relative }
+  if ($relative -notmatch '^node_modules/\.bin/' -and $relative -notmatch '\.(node|dll|so|dylib)$') { $relative }
 })
 # Aseprite selects the first package.json anywhere in the archive. Its own
 # manifest must precede dependency manifests so installation targets this root.
-$packageEntries = @('package.json') + @($runtimeFiles + $wsFiles | Where-Object { $_ -ne 'package.json' } | Sort-Object -Unique)
+$packageEntries = @('package.json') + @($runtimeFiles + $dependencyFiles | Where-Object { $_ -ne 'package.json' } | Sort-Object -Unique)
 Add-Type -AssemblyName System.IO.Compression
 $outputPath = if ([string]::IsNullOrWhiteSpace($OutputPath)) {
   Join-Path (Join-Path $projectRoot 'dist') 'aseprite-chat.aseprite-extension'

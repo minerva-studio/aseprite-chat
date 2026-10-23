@@ -42,6 +42,18 @@ local function harness(execute, timer_factory, module)
   return h
 end
 
+test("MCP bootstrap accepts only its authenticated editor endpoint",function()
+  local h=harness()
+  h.launcher._options.script="mcp-launch.ps1"
+  h.launcher._options.parameters={CodexHome="C:\\Codex 中文 ' & $()",ConnectOnly=true}
+  h:ensure()
+  write(h.result_path,'{"endpoint":"ws://127.0.0.1:45123/editor/test_nonce-123"}')
+  h:tick(); eq(h.calls[1].endpoint,"ws://127.0.0.1:45123/editor/test_nonce-123")
+  local bad=harness(); bad.launcher._options.script="mcp-launch.ps1"; bad:ensure()
+  write(bad.result_path,'{"endpoint":"ws://127.0.0.1:45123/client/secret"}')
+  bad:tick(); assert(bad.calls[1].error)
+end)
+
 test("one pending attempt completes once and clears its polling timer", function()
   local h = harness()
   h:ensure(); local pending = assert(h.launcher.pending)
