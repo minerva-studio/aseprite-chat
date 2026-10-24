@@ -163,10 +163,105 @@ function getJson(url) {
 }
 function wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
 
+async function probe(t, url, options) {
+  const socket = new WebSocket(url, options);
+  t.after(() => socket.terminate());
+  const messages = [];
+  const code = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { socket.terminate(); reject(Error('health socket did not close')); }, 1000);
+    socket.on('message', (data, binary) => messages.push({ data, binary }));
+    socket.on('error', error => { clearTimeout(timer); reject(error); });
+    socket.on('close', code => { clearTimeout(timer); resolve(code); });
+  });
+  assert.equal(code, 1000);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].binary, false);
+  return JSON.parse(messages[0].data.toString('utf8'));
+}
+
+test('WS readyz reports idle protocol-4 health without starting or reserving a session', async t => {
+  let launches = 0;
+  const { bridge, url } = await setup(t, { launch: () => {
+    launches++;
+    return { args: [fixture], env: process.env };
+  } });
+  const health = { service: 'aseprite-chat', protocolVersion: 4, pid: process.pid, port: bridge.port, busy: false };
+  assert.deepEqual(await probe(t, `${url}/readyz`), health);
+  assert.deepEqual((await getJson(`${url}/readyz`)).value, health);
+  assert.equal(launches, 0);
+  const client = await connect(t, url);
+  assert.equal(launches, 1, 'health must leave the chat session available');
+  const reply = once(client, 'message');
+  client.send('{"id":1,"method":"after-health"}');
+  assert.equal(JSON.parse((await reply)[0]).id, 1);
+});
+
+test('WS readyz remains available while busy and leaves the active backend and session unchanged', async t => {
+  let launches = 0;
+  const { bridge, url } = await setup(t, { launch: () => {
+    launches++;
+    return { args: [fixture], env: process.env };
+  } });
+  const client = await connect(t, url);
+  let reply = once(client, 'message');
+  client.send('{"id":1,"method":"before-health"}');
+  const backendPid = JSON.parse((await reply)[0]).result.pid;
+  const health = { service: 'aseprite-chat', protocolVersion: 4, pid: process.pid, port: bridge.port, busy: true };
+  assert.deepEqual(await probe(t, `${url}/readyz`, { origin: `${url}/readyz` }), health);
+  assert.deepEqual((await getJson(`${url}/readyz`)).value, health);
+  assert.equal(await rejected(url), 409, 'active chat must stay reserved by its original client');
+  reply = once(client, 'message');
+  client.send('{"id":2,"method":"after-health"}');
+  const response = JSON.parse((await reply)[0]);
+  assert.equal(response.id, 2);
+  assert.equal(response.result.pid, backendPid);
+  assert.equal(launches, 1, 'health must not create a backend');
+  const closed = once(client, 'close'); client.close(); await closed;
+  await until(async () => assert.equal((await getJson(`${url}/readyz`)).value.busy, false));
+  assert.equal((await probe(t, `${url}/readyz`)).busy, false);
+  assert.equal(launches, 1);
+  await connect(t, url);
+  assert.equal(launches, 2, 'health must not reserve a released session');
+});
+
+test('WS readyz accepts only native absent/bare/exact health origins and retains Host/Fetch/path rejection', async t => {
+  const { url } = await setup(t, { launch: () => assert.fail('health must not resolve a launch plan') });
+  for (const origin of [undefined, url, `${url}/readyz`]) {
+    assert.equal((await probe(t, `${url}/readyz`, origin === undefined ? {} : { origin })).busy, false);
+  }
+  for (const origin of ['https://example.com', 'http://127.0.0.1:4500', 'null', 'ws://example.com',
+    `${url}/`, `${url}/other`, `${url}/readyz/`, `${url}/readyz?query=1`]) {
+    assert.equal(await rejected(`${url}/readyz`, { origin }), 403, origin);
+  }
+  for (const headers of [{ 'Sec-Fetch-Site': 'same-origin' }, { 'Sec-Fetch-Mode': 'websocket' }, { Host: 'evil.example' }]) {
+    assert.equal(await rejected(`${url}/readyz`, { origin: `${url}/readyz`, headers }), 403);
+  }
+  for (const pathname of ['/other', '/readyz/', '/readyz?query=1']) {
+    assert.equal(await rejected(`${url}${pathname}`, { origin: url }), 404, pathname);
+  }
+  assert.equal(await rejected(url, { origin: `${url}/readyz` }), 403, 'full health origin must not authorize a chat socket');
+  assert.equal((await getJson(`${url}/readyz`)).value.busy, false);
+});
+
+test('WS readyz probes do not renew the idle lifetime or count as chat clients', { timeout: 1500 }, async t => {
+  let resolveClosed;
+  const closed = new Promise(resolve => { resolveClosed = resolve; });
+  const { url } = await setup(t, { idleTimeoutMs: 250, onClose: resolveClosed,
+    launch: () => assert.fail('health must not launch a backend') });
+  const started = performance.now();
+  await wait(80);
+  assert.equal((await probe(t, `${url}/readyz`)).busy, false);
+  await wait(80);
+  assert.equal((await probe(t, `${url}/readyz`)).busy, false);
+  await closed;
+  assert.ok(performance.now() - started < 390, 'health must retain the original idle deadline');
+  await assert.rejects(getJson(`${url}/readyz`));
+});
+
 test('readyz reports bridge identity, bound port, process and live busy state', async t => {
   const { bridge, url } = await setup(t);
   const idle = await getJson(`${url}/readyz`);
-  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 3, pid: process.pid, port: bridge.port, busy: false });
+  assert.deepEqual(idle.value, { service: 'aseprite-chat', protocolVersion: 4, pid: process.pid, port: bridge.port, busy: false });
   const socket = await connect(t, url);
   const busy = await getJson(`${url}/readyz`);
   assert.equal(busy.value.busy, true, JSON.stringify(busy));
@@ -226,7 +321,7 @@ test('CLI writes readiness and atomically replaces an existing discovery hint', 
   assert.equal(ready.endpoint, metadata.endpoint);
   assert.match(ready.endpoint, /^ws:\/\/127\.0\.0\.1:\d+$/);
   assert.deepEqual(metadata, {
-    service: 'aseprite-chat', protocolVersion: 3, pid: child.pid,
+    service: 'aseprite-chat', protocolVersion: 4, pid: child.pid,
     port: Number(new URL(ready.endpoint).port), endpoint: ready.endpoint
   });
   assert.notEqual(metadata.pid, 123, 'atomic metadata replacement must replace a prior discovery hint');

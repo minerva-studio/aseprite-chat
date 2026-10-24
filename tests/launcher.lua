@@ -12,9 +12,17 @@ local function write(path, text)
   local file = assert(io.open(path, "wb")); file:write(text); file:close()
 end
 local function harness(execute, timer_factory, module)
-  local h = {timers={}, calls={}, commands={}}
+  local h = {timers={}, calls={}, commands={}, sockets={}}
   h.launcher = (module or Launcher).new {
     path=root,
+    node=app.fs.joinPath(os.getenv("ProgramFiles") or "C:\\Program Files","nodejs","node.exe"),
+    socket_factory=function(spec)
+      local socket={spec=spec}
+      function socket:connect() if not h.hold_probe then spec.onreceive(WebSocketMessageType.ERROR) end end
+      function socket:close() self.closed=true; spec.onreceive(WebSocketMessageType.CLOSE) end
+      function socket:message(value) spec.onreceive(WebSocketMessageType.TEXT,type(value)=="string" and value or json.encode(value)) end
+      h.sockets[#h.sockets+1]=socket; return socket
+    end,
     timer_factory=timer_factory or function(spec)
       local timer = {spec=spec, running=false}
       function timer:start() self.running=true end
@@ -42,6 +50,121 @@ local function harness(execute, timer_factory, module)
   return h
 end
 
+test("Chat starts Node in the background and retains its entry until completion",function()
+  local command,source,source_path
+  local h=harness(function(self)
+    source_path=self.launcher.pending.command_source_path
+    local file=assert(io.open(self.launcher.pending.command_path,"rb"))
+    command=file:read("*a"); file:close()
+    file=assert(io.open(source_path,"rb")); source=file:read("*a"); file:close()
+    return true
+  end)
+  h:ensure()
+  assert(command:lower():find("start",1,true) and command:find("/b",1,true),"Chat launch must detach its native child")
+  assert(not command:lower():find("powershell",1,true),"Chat must not wait for PowerShell startup")
+  assert(source_path:match("%.mjs$") and source:find("startChat",1,true),"Chat job must load the Node bootstrap")
+  assert(app.fs.isFile(source_path),"background source was deleted before Node could read it")
+  write(h.result_path,'{"endpoint":"ws://127.0.0.1:45123","pid":123}'); h:tick()
+  eq(app.fs.isFile(source_path),false)
+end)
+
+local function warm_harness()
+  local h=harness(); h.hold_probe=true
+  h:ensure(); write(h.result_path,'{"endpoint":"ws://127.0.0.1:45123","pid":123}'); h:tick()
+  return h
+end
+local function health(changes)
+  local data={service="aseprite-chat",protocolVersion=4,pid=123,port=45123,busy=false}
+  for key,value in pairs(changes or {}) do data[key]=value end
+  return data
+end
+
+test("warm reopen probes the verified idle bridge without another shell call",function()
+  local h=warm_harness(); h:ensure()
+  eq(#h.commands,1); eq(#h.sockets,1)
+  eq(h.sockets[1].spec.url,"ws://127.0.0.1:45123/readyz")
+  h.sockets[1]:message(health()); eq(#h.calls,2)
+  eq(h.calls[2].endpoint,"ws://127.0.0.1:45123"); assert(h.sockets[1].closed)
+  eq(h.launcher.pending,nil); eq(h.timers[2].running,false)
+end)
+
+test("warm identity busy and malformed health fall back exactly once",function()
+  for _,changes in ipairs({{pid=456},{port=45678},{busy=true},{protocolVersion=3},{service="foreign"}}) do
+    local h=warm_harness(); h:ensure(); local socket=h.sockets[1]
+    eq(#h.commands,1); socket:message(health(changes)); eq(#h.commands,2)
+    socket:message(health()); socket.spec.onreceive(WebSocketMessageType.ERROR)
+    eq(#h.commands,2); eq(#h.calls,1); h.launcher:cancel()
+  end
+  for _,wire in ipairs({"{","null",'"bad"',string.rep("x",16385)}) do
+    local h=warm_harness(); h:ensure(); h.sockets[1]:message(wire)
+    eq(#h.commands,2); h.launcher:cancel()
+  end
+end)
+
+test("warm timeout clears only its probe and cold readiness can replace the cache",function()
+  local h=warm_harness(); h:ensure(); local socket=h.sockets[1]
+  h:tick(9); eq(#h.commands,1)
+  h:tick(); eq(#h.commands,2); assert(socket.closed)
+  socket:message(health()); eq(#h.calls,1)
+  write(h.result_path,'{"endpoint":"ws://127.0.0.1:4502","pid":234}');h:tick()
+  eq(#h.calls,2); eq(h.calls[2].endpoint,"ws://127.0.0.1:4502")
+  h:ensure(); eq(h.sockets[2].spec.url,"ws://127.0.0.1:4502/readyz")
+  h.launcher:cancel()
+end)
+
+test("cancelled warm probes and queued timer callbacks cannot connect or launch",function()
+  local h=warm_harness();h:ensure();local socket,timer=h.sockets[1],h.timers[2]
+  h.launcher:cancel();assert(socket.closed);eq(timer.running,false)
+  timer:fire();socket:message(health());eq(#h.calls,1);eq(#h.commands,1)
+  h:ensure();socket:message(health());eq(#h.calls,1)
+  h.sockets[2]:message(health());eq(#h.calls,2);eq(#h.commands,1)
+end)
+
+test("cold fallback permission waits cannot consume the startup deadline",function()
+  local h=warm_harness()
+  local execute=h.launcher._options.execute
+  h.launcher._options.execute=function(command)
+    h:tick(201)
+    assert(h.launcher.pending,"permission wait retired cold fallback")
+    return execute(command)
+  end
+  h:ensure();h.sockets[1]:message(health{busy=true})
+  eq(#h.calls,1);eq(#h.commands,2);assert(h.launcher.pending)
+  write(h.result_path,'{"endpoint":"ws://127.0.0.1:4502","pid":234}');h:tick()
+  eq(h.calls[2].endpoint,"ws://127.0.0.1:4502")
+end)
+
+test("Chat readiness requires a native process identity for warm reuse",function()
+  for _,pid in ipairs({"null",'"123"',"0","1.5","4294967296"}) do
+    local h=harness();h:ensure()
+    write(h.result_path,'{"endpoint":"ws://127.0.0.1:45123","pid":'..pid..'}');h:tick()
+    eq(#h.calls,1);assert(h.calls[1].error);eq(h.launcher.pending,nil)
+  end
+end)
+
+test("missing native Node fails before executing a startup command",function()
+  local original_getenv=os.getenv
+  local env=setmetatable({os=setmetatable({getenv=function(name)
+    if name=="TEMP" then return original_getenv(name) end
+    return nil
+  end},{__index=os})},{__index=_G})
+  local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
+  local h=harness(nil,nil,module); h.launcher._options.node=nil
+  h:ensure(); eq(#h.commands,0); eq(h.launcher.pending,nil)
+  eq(#h.calls,1); assert(h.calls[1].error:find("Node.js",1,true))
+end)
+
+test("MCP retains its explicit PowerShell bootstrap",function()
+  local command
+  local h=harness(function(self)
+    local file=assert(io.open(self.launcher.pending.command_path,"rb"))
+    command=file:read("*a"); file:close(); return true
+  end)
+  h.launcher._options.script="mcp-launch.ps1"; h:ensure()
+  assert(command:lower():find("powershell",1,true))
+  h.launcher:cancel()
+end)
+
 test("MCP bootstrap accepts only its authenticated editor endpoint",function()
   local h=harness()
   h.launcher._options.script="mcp-launch.ps1"
@@ -59,7 +182,7 @@ test("one pending attempt completes once and clears its polling timer", function
   h:ensure(); local pending = assert(h.launcher.pending)
   h:ensure(); eq(h.launcher.pending, pending); eq(#h.commands, 1)
   eq(h.timers[1].spec.interval, 0.1)
-  write(h.result_path, '{"endpoint":"ws://127.0.0.1:45123"}')
+  write(h.result_path, '{"endpoint":"ws://127.0.0.1:45123","pid":123}')
   h:tick(3)
   eq(#h.calls, 1); eq(h.calls[1].endpoint, "ws://127.0.0.1:45123")
   eq(h.calls[1].error, nil); eq(h.launcher.pending, nil)
@@ -69,7 +192,7 @@ end)
 test("partial JSON is retried rather than mistaken for startup failure", function()
   local h = harness(); h:ensure()
   write(h.result_path, '{"end'); h:tick(); eq(#h.calls, 0)
-  write(h.result_path, '\239\187\191{"endpoint":"ws://127.0.0.1:4501"}')
+  write(h.result_path, '\239\187\191{"endpoint":"ws://127.0.0.1:4501","pid":123}')
   h:tick(); eq(h.calls[1].endpoint, "ws://127.0.0.1:4501")
 end)
 
@@ -105,9 +228,9 @@ test("cancel suppresses a queued tick and a late result without affecting retry"
   local old_timer, old_path = h.timers[1], h.result_path
   h.launcher:cancel(); eq(h.launcher.pending, nil); eq(old_timer.running, false)
   h:ensure(); assert(h.result_path ~= old_path)
-  write(old_path, '{"endpoint":"ws://127.0.0.1:4501"}')
+  write(old_path, '{"endpoint":"ws://127.0.0.1:4501","pid":123}')
   old_timer:fire(); eq(#h.calls, 0); assert(h.launcher.pending)
-  write(h.result_path, '{"endpoint":"ws://127.0.0.1:4502"}')
+  write(h.result_path, '{"endpoint":"ws://127.0.0.1:4502","pid":123}')
   h:tick(); eq(#h.calls, 1); eq(h.calls[1].endpoint, "ws://127.0.0.1:4502")
 end)
 
@@ -116,7 +239,7 @@ test("completion callback may immediately start the next independent attempt", f
   h:ensure(function()
     calls=calls+1; eq(h.launcher.pending, nil); h:ensure()
   end)
-  write(h.result_path, '{"endpoint":"ws://127.0.0.1:4501"}')
+  write(h.result_path, '{"endpoint":"ws://127.0.0.1:4501","pid":123}')
   h:tick(); eq(calls, 1); assert(h.launcher.pending); eq(#h.commands, 2)
   h.timers[1]:fire(); eq(calls, 1); h.launcher:cancel()
 end)
@@ -147,7 +270,7 @@ end)
 test("callback failure still retires the attempt and prevents duplicate notification", function()
   local h = harness(); local calls=0
   h:ensure(function() calls=calls+1; error("consumer failed") end)
-  write(h.result_path, '{"endpoint":"ws://127.0.0.1:4501"}')
+  write(h.result_path, '{"endpoint":"ws://127.0.0.1:4501","pid":123}')
   pcall(function() h:tick() end); h:tick(); eq(calls, 1)
   eq(h.launcher.pending, nil); eq(h.timers[1].running, false)
 end)
@@ -179,7 +302,7 @@ test("file permission and read failures report once and retire polling", functio
           read=function()
             if failure=="read throw" then error("read failed") end
             if failure=="read nil" then return nil,"read failed" end
-            return '{"endpoint":"ws://127.0.0.1:45123"}'
+            return '{"endpoint":"ws://127.0.0.1:45123","pid":123}'
           end,
           close=function()
             closed=true
@@ -198,28 +321,35 @@ test("file permission and read failures report once and retire polling", functio
   end
 end)
 
--- Run the actual encoded command against a disposable bootstrap, including the
--- native Aseprite os.execute boundary; the fixture owns no bridge or editor.
-test("native background command preserves special paths under Restricted PowerShell policy", function()
+-- Run the native os.execute boundary against a gated Node bootstrap. The
+-- launcher must return while that bootstrap is still waiting for the fixture.
+test("native Node launch returns before readiness and preserves special paths", function()
   local directory = app.fs.joinPath(app.fs.tempPath, "launcher 中文 ' 100% & $() " .. tostring(Uuid()))
   local scripts = app.fs.joinPath(directory, "scripts")
   assert(app.fs.makeDirectory(directory)); assert(app.fs.makeDirectory(scripts))
-  local bootstrap = app.fs.joinPath(scripts, "launch.ps1")
-  write(bootstrap, 'param([string]$ResultPath)\n[IO.File]::WriteAllText($ResultPath,\'{"endpoint":"ws://127.0.0.1:45123"}\')\n')
+  local bootstrap = app.fs.joinPath(scripts, "start-chat.mjs")
+  write(bootstrap, [[import {existsSync,writeFileSync} from 'node:fs';
+export async function startChat({resultPath}) {
+  const deadline=Date.now()+5000;
+  while(!existsSync(resultPath+'.release')) {
+    if(Date.now()>deadline) throw Error('fixture release timeout');
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  writeFileSync(resultPath,JSON.stringify({endpoint:'ws://127.0.0.1:45123',pid:process.pid}));
+}
+]])
   local h = harness(); h.launcher = Launcher.new {
     path=directory, timer_factory=function(spec)
       local timer={spec=spec}; function timer:start() end; function timer:stop() end
       function timer:fire() self.spec.ontick() end
       h.timers[1]=timer; return timer
     end,
-    execute=function(command)
-      -- Process-local policy applies to both hidden PowerShell children; no
-      -- machine/user policy or parent environment is changed by this fixture.
-      return os.execute('set "PSExecutionPolicyPreference=Restricted" && ' .. command)
-    end,
+    execute=os.execute,
   }
   h:ensure(); assert(h.launcher.pending, h.calls[1] and h.calls[1].error)
   paths[h.launcher.pending.result_path] = true
+  assert(not app.fs.isFile(h.launcher.pending.result_path),"launcher waited for background readiness")
+  write(h.launcher.pending.result_path..".release","release")
   local deadline = os.time()+8
   while h.launcher.pending and os.time()<deadline do
     local until_clock=os.clock()+0.05
@@ -230,7 +360,7 @@ test("native background command preserves special paths under Restricted PowerSh
   h.launcher:cancel()
   os.remove(bootstrap); paths[bootstrap]=nil
   app.fs.removeDirectory(scripts); app.fs.removeDirectory(directory)
-  assert(result, "background PowerShell did not publish its result")
+  assert(result, "background Node did not publish its result")
   eq(result.endpoint, "ws://127.0.0.1:45123")
 end)
 
@@ -246,7 +376,7 @@ test("permission dialogs cannot reenter an in-progress result read", function()
   end}}, {__index=_G})
   local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
   h=harness(nil,nil,module); h:ensure()
-  write(h.result_path,'{"endpoint":"ws://127.0.0.1:4501"}')
+  write(h.result_path,'{"endpoint":"ws://127.0.0.1:4501","pid":123}')
   h:tick(); eq(opens,1); eq(h.calls[1].endpoint,"ws://127.0.0.1:4501")
 end)
 

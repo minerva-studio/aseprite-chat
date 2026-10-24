@@ -9,7 +9,7 @@ import WebSocket, { WebSocketServer } from 'ws';
 
 const maxBytes = 16 * 1024 * 1024;
 const invalidAccount = '账户配置无效，请在 Settings 中重新保存。';
-const protocolVersion = 3;
+const protocolVersion = 4;
 const provider = 'aseprite_custom';
 const providerEnvKey = 'ASEPRITE_CHAT_API_KEY';
 // The canvas workflow uses only the extension's dynamic tools plus Codex's
@@ -111,7 +111,10 @@ function closeReason(error) {
 }
 
 /**
- * Start a loopback-only WebSocket-to-stdio bridge. Each connection owns its Codex process.
+ * Start a loopback-only WebSocket-to-stdio bridge. Each chat connection owns its Codex process.
+ * HTTP and WebSocket /readyz expose the same live protocol-4 health. A health
+ * socket sends one JSON text frame and closes without reserving a chat session,
+ * resolving a launch plan, spawning Codex, or renewing the idle deadline.
  * When idleTimeoutMs is positive, onClose runs once after either idle or explicit shutdown.
  * launch() synchronously returns {args, env} per connection; its errors close that client.
  */
@@ -129,15 +132,14 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
     const allowed = validRequest(request);
     const isReady = allowed && request.url === '/readyz';
     response.writeHead(!allowed ? 403 : isReady ? 200 : 404, isReady ? { 'Content-Type': 'application/json; charset=utf-8' } : {});
-    response.end(isReady ? JSON.stringify({
-      service: 'aseprite-chat', protocolVersion, pid: process.pid,
-      port: server.address()?.port, busy: !!active
-    }) : '');
+    response.end(isReady ? JSON.stringify(health()) : '');
   });
   const sockets = new WebSocketServer({ noServer: true, perMessageDeflate: false, maxPayload: maxBytes });
   let active = null;
   let idleTimer = null;
   let closePromise = null;
+  const health = () => ({ service: 'aseprite-chat', protocolVersion, pid: process.pid,
+    port: server.address()?.port, busy: !!active });
   const clearIdleTimer = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
   async function closeBridge() {
     if (closePromise) return closePromise;
@@ -163,15 +165,23 @@ export async function createBridge({ port = 4500, command = process.env.CODEX_CL
     const authority = `127.0.0.1:${request.socket.localPort}`;
     const origin = request.headers.origin;
     return request.socket.remoteAddress === '127.0.0.1' && request.headers.host === authority
-      && (origin === undefined || origin === `ws://${authority}`)
+      && (origin === undefined || origin === `ws://${authority}`
+        || (request.url === '/readyz' && origin === `ws://${authority}/readyz`))
       && !Object.keys(request.headers).some(key => key.startsWith('sec-fetch-'));
   }
   server.on('upgrade', (request, socket, head) => {
-    const status = !validRequest(request) ? 403 : request.url !== '/' ? 404 : active ? 409 : null;
+    const isHealth = request.url === '/readyz';
+    const status = !validRequest(request) ? 403 : request.url !== '/' && !isHealth ? 404 : active && !isHealth ? 409 : null;
     if (status) { socket.end(`HTTP/1.1 ${status} Rejected\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`); return; }
     // With no asynchronous verifyClient hook, handleUpgrade validates and
     // invokes this callback synchronously. Failed handshakes own no session.
     sockets.handleUpgrade(request, socket, head, client => {
+      if (isHealth) {
+        client.on('error', () => client.terminate());
+        client.send(JSON.stringify(health()), { binary: false });
+        client.close(1000);
+        return;
+      }
       sockets.emit('connection', client);
     });
   });

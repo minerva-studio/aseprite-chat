@@ -13,7 +13,13 @@ async function isFile(file) {
   catch { return false; }
 }
 
-async function nativeCodex() {
+/**
+ * Locate a native Codex executable using PATH and known Windows install layouts.
+ * Shell wrappers are location hints only; lookup never executes a process or
+ * reads account/configuration files. Rejects with a safe Chinese installation error.
+ * @returns {Promise<string>} Absolute path to an existing native executable.
+ */
+export async function nativeCodex() {
   const directories = (process.env.PATH ?? '').split(path.delimiter).map(value => value.replace(/^"|"$/g, ''));
   const candidates = directories.filter(Boolean).map(directory => path.resolve(directory, 'codex.exe'));
   if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe'));

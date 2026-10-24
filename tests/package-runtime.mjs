@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { readFile, realpath } from 'node:fs/promises';
 import path from 'node:path';
+import {pathToFileURL} from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -22,6 +23,9 @@ try {
   assert.equal(offline.isError,true);
   assert.match(offline.content[0].text,/Open Aseprite MCP/);
   console.log('PASS isolated packaged MCP runtime initializes and lists all five tools');
+  const startup=await import(pathToFileURL(path.join(runtime,'scripts/start-chat.mjs')).href);
+  assert.equal(typeof startup.startChat,'function');
+  console.log('PASS isolated packaged Chat bootstrap imports its native resolver');
 } finally {
   await client.close();
   if(descriptor?.home===await realpath(home) && descriptor.extensionRoot===await realpath(runtime) && descriptor.pid!==process.pid) {
