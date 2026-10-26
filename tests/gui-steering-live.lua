@@ -25,7 +25,7 @@ timer=Timer {interval=0.1,ontick=function()
     for _,message in ipairs(controller.view.messages) do assert(message.role~="Error",message.text) end
     if phase=="ready" and controller.client.state=="ready" and controller.models then
       assert(controller:select_settings("gpt-6.1-sol","low","default"))
-      assert(controller:send("Call read_sprite, then request execute_lua to set pixel (1,1) to opaque green. Use a cloned cel image and assign it back. Wait for the tool result before answering."))
+      assert(controller:send("Call view_sprite, then request execute_lua to set pixel (1,1) to opaque green. Use a cloned cel image and assign it back. Wait for the tool result before answering."))
       phase="approval"
     elseif phase=="approval" and controller.pending then
       assert(controller.client:can_steer())

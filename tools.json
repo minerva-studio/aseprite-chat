@@ -1,5 +1,30 @@
 [
   {
+    "type": "function",
+    "name": "list_sprites",
+    "description": "Discover open Aseprite documents, including when no sprite is open or bound. Returns {sprites:{items,total,offset,nextOffset?},activeSpriteId?,targetSpriteId?}. Items contain spriteId, filename, width, height, colorMode and frameCount. Does not activate or bind a document. Pagination defaults to offset 0 and limit 64 (maximum 256). Use switch_sprite to choose the editing target.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Zero-based offset applied independently to each requested collection."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 64,
+          "description": "Maximum items per collection."
+        }
+      },
+      "required": []
+    }
+  },
+  {
     "inputSchema": {
       "additionalProperties": false,
       "type": "object",
@@ -45,7 +70,8 @@
             "minimum": 1,
             "type": "integer"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "tag": {
           "minLength": 1,
@@ -56,7 +82,8 @@
             "minimum": 1,
             "type": "integer"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "frame": {
           "minimum": 1,
@@ -66,8 +93,65 @@
       "required": []
     },
     "type": "function",
-    "name": "read_sprite",
-    "description": "Inspect a live, possibly unsaved Aseprite sprite. Returns JSON metadata (openSprites, palette, tags, slices, layers, cels for the rendered frames) and rendered PNG previews (one image per sheet when several frames are rendered). Reading the editing target returns the current revision; another open sprite from openSprites is read-only and has no revision. Options: spriteId (open sprite id), frame, frames (array of 1-based frames, no cap), tag (tag name), layers (array of layer ids; group ids include their children and selected layers render in isolation without changing the document), region {x,y,width,height} to crop, grid (source-pixel spacing, drawn when the preview scale is 4 or more)."
+    "name": "view_sprite",
+    "description": "Render PNG preview sheets from a live, possibly unsaved Aseprite document. Returns sparse JSON (spriteId, target, optional revision, selectedFrames, clipped region, scale, layout and preview dimensions) plus PNG images; use inspect_sprite for structure. Discover IDs with list_sprites. Selection precedence: frames > tag > frame; frames are 1-based, explicit order/duplicates are retained, default is the captured target frame or frame 1 for another sprite. Layers are native IDs, groups include descendants, and isolation includes hidden layers without changing the document. Region coordinates are zero-based and clipped to the canvas. Grid spacing is in source pixels and is drawn only at scale >=4. Previews upscale/downscale and split into sheets <=2048 pixels; export_sprite creates source-resolution files. Only the bound editing target reports a revision; reading another sprite never changes the target. Missing documents return NO_OPEN_SPRITE; a missing explicit ID returns SPRITE_NOT_OPEN."
+  },
+  {
+    "type": "function",
+    "name": "inspect_sprite",
+    "description": "Query a live Aseprite document without rendering images or changing the editing target. Omitted/empty sections returns only a compact overview: spriteId, target, optional revision, filename, width, height, colorMode, captured frame, queryFrame, activeLayer when available, isModified, hasAssociatedFile and counts {layers,frames,tags,slices,cels,palette}. Counts describe the whole document; palette count uses the effective requested frame. Optional sections: layers, frames, tags, slices, cels, palette, selection. Collections return {items,total,offset,nextOffset?}; total counts the filtered collection before paging. Layers are flat native-ID records with parentId for children (roots omit it), without children arrays. The layers filter includes selected groups and descendants and applies to layers/cels. The overview frame remains the captured target frame (or frame 1 for a reference sprite). queryFrame always identifies the frame used for cels and the effective palette; it equals the requested frame, defaulting to the captured target frame or frame 1 for a reference sprite. Frames/tags/slices remain document-wide. Palette entries are {index,rgba}, zero-based index and #rrggbbaa; paletteFrame identifies the source frame of the palette effective at the requested frame. Selection is a single {x,y,width,height,empty} bounds object, unaffected by paging. Only the bound target reports revision. Missing documents return NO_OPEN_SPRITE; a missing explicit ID returns SPRITE_NOT_OPEN. Use list_sprites for IDs, view_sprite for PNGs, and inspect before proposing an edit.",
+    "inputSchema": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "spriteId": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "layers",
+              "frames",
+              "tags",
+              "slices",
+              "cels",
+              "palette",
+              "selection"
+            ]
+          },
+          "default": []
+        },
+        "frame": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Zero-based offset applied independently to each requested collection."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 256,
+          "default": 64,
+          "description": "Maximum items per collection."
+        }
+      },
+      "required": []
+    }
   },
   {
     "inputSchema": {
@@ -130,7 +214,7 @@
     },
     "type": "function",
     "name": "switch_sprite",
-    "description": "Move the editing target to another open sprite by its openSprites spriteId. Activates it in the editor and rebinds the canvas context; returns its metadata with a new revision. Later execute_lua edits and read_sprite previews apply to the new target."
+    "description": "Activate an open sprite by its list_sprites spriteId and bind it as the editing target. Returns only {spriteId,target:true,frame,activeLayer?,revision}. Later execute_lua edits use this target. Use inspect_sprite for structure or view_sprite for previews. No open document returns NO_OPEN_SPRITE; a missing ID while documents are open returns SPRITE_NOT_OPEN."
   },
   {
     "inputSchema": {
@@ -158,7 +242,7 @@
     },
     "type": "function",
     "name": "execute_lua",
-    "description": "Propose short, terminating Lua for the captured sprite; the user must approve the complete code. Inspect first and pass that expectedRevision. The plugin rechecks the active sprite/frame/layer and revision, then owns one app.transaction and returns the result and new revision. For undoable pixels: local image = cel.image:clone(); image:drawPixel(x,y,pixel); cel.image = image. Raw drawPixel/pixels/bytes writes to an attached image do not create Undo and cannot roll back. Use native undoable APIs such as cel.image assignment, cel.position/opacity, layer.name/opacity/blendMode, and sprite:newLayer/newCel; layer visibility and locking are undoable inside this transaction. Only edit the captured sprite; do not save/open/close documents or cause external side effects. Environment: sprite, native app, Aseprite constructors/constants, basic Lua functions, math/string/table/utf8; no io/os/debug/package/require/dofile/loadfile/load. Native app is powerful: this is trusted approved automation, not a hostile-code sandbox. Errors roll back undoable edits only. Running Lua cannot be interrupted by Stop."
+    "description": "Propose short, terminating Lua for the captured sprite; the user must approve the complete code. Call inspect_sprite first and pass its revision as expectedRevision. The plugin rechecks the active sprite/frame/layer and revision, then owns one app.transaction and returns the result and new revision. For undoable pixels: local image = cel.image:clone(); image:drawPixel(x,y,pixel); cel.image = image. Raw drawPixel/pixels/bytes writes to an attached image do not create Undo and cannot roll back. Use native undoable APIs such as cel.image assignment, cel.position/opacity, layer.name/opacity/blendMode, and sprite:newLayer/newCel; layer visibility and locking are undoable inside this transaction. Only edit the captured sprite; do not save/open/close documents or cause external side effects. Environment: sprite, native app, Aseprite constructors/constants, basic Lua functions, math/string/table/utf8; no io/os/debug/package/require/dofile/loadfile/load. Native app is powerful: this is trusted approved automation, not a hostile-code sandbox. Errors roll back undoable edits only. Running Lua cannot be interrupted by Stop."
   },
   {
     "inputSchema": {
@@ -185,7 +269,8 @@
             "minimum": 1,
             "type": "integer"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         },
         "scale": {
           "minimum": 1,
@@ -246,13 +331,14 @@
             "minimum": 1,
             "type": "integer"
           },
-          "type": "array"
+          "type": "array",
+          "minItems": 1
         }
       },
       "required": []
     },
     "type": "function",
     "name": "export_sprite",
-    "description": "Encode native-resolution PNG frames, an animated GIF, or a PNG spritesheet from a live unsaved sprite without editing or saving the source. Selection matches read_sprite: spriteId, frames > tag > frame (default captured frame), layers and clipped region. Explicit frames retain order and duplicates; tags select their numeric range, not playback direction. scale is an integer pixel multiplier (default 1), with no preview resizing or grid. format png (default) or gif; output frames (default) or sheet (PNG only). Sheet columns defaults to ceil(sqrt(frame count)), padding is transparent spacing between cells (default 0), metadata=true adds JSON frame rectangles and durations in milliseconds. GIF uses native palette conversion, binary transparency and 10ms timing. Limits: 16,777,216 rendered/output pixels, each dimension <=16384. Returns paths in an owned temporary directory, not image payloads. Copy files to the requested destination using Codex shell/file tools under current Access/approvals; never reconstruct image files from read_pixels. Files survive individual calls. Internal-chat files expire when switching chats/accounts or closing chat; MCP files expire when their external client disconnects or native control ends. No destination path is accepted. Inspect/export again if a historical path no longer exists."
+    "description": "Encode native-resolution PNG frames, an animated GIF, or a PNG spritesheet from a live unsaved sprite without editing or saving the source. Selection matches view_sprite: spriteId, frames > tag > frame (default captured frame), layers and clipped region. Explicit frames retain order and duplicates; tags select their numeric range, not playback direction. scale is an integer pixel multiplier (default 1), with no preview resizing or grid. format png (default) or gif; output frames (default) or sheet (PNG only). Sheet columns defaults to ceil(sqrt(frame count)), padding is transparent spacing between cells (default 0), metadata=true adds JSON frame rectangles and durations in milliseconds. GIF uses native palette conversion, binary transparency and 10ms timing. Limits: 16,777,216 rendered/output pixels, each dimension <=16384. Returns paths in an owned temporary directory, not image payloads. Copy files to the requested destination using any authorized client file capability; never reconstruct image files from read_pixels. Files survive individual calls. Internal-chat files expire when switching chats/accounts or closing chat; MCP files expire when their external client disconnects or native control ends. No destination path is accepted. Inspect/export again if a historical path no longer exists."
   }
 ]

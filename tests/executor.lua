@@ -96,9 +96,14 @@ local function preview(result)
 end
 
 test("dynamic tools expose valid function schemas", function()
-  eq(#Executor.tools, 5)
+  eq(#Executor.tools, 7)
   local tools = json.decode(json.encode(Executor.tools))
-  eq(tools[1].type, "function"); eq(tools[1].name, "read_sprite")
+  eq(tools[1].type, "function"); eq(tools[1].name, "list_sprites")
+  eq(tools[1].inputSchema.properties.limit.maximum, 256)
+  eq(tools[3].name, "inspect_sprite")
+  eq(tools[3].inputSchema.properties.sections.items.enum[7], "selection")
+  tools = {tools[2],tools[4],tools[5],tools[6],tools[7]}
+  eq(tools[1].name, "view_sprite")
   eq(tools[1].inputSchema.properties.frame.type, "integer")
   eq(tools[1].inputSchema.properties.frames.type, "array")
   eq(tools[1].inputSchema.properties.region.type, "object")
@@ -123,14 +128,15 @@ test("unsaved RGBA metadata and preview preserve live pixels and document", func
   s.selection:select(Rectangle(1, 1, 3, 2))
   local e = bound(s)
   local before, file = e:metadata(), s.filename
-  local m, image = preview(e:read({}))
+  local m = success(e:inspect {sections={"frames","layers","selection"}})
+  local v, image = preview(e:view({}))
   eq(m.spriteId, s.id); eq(m.width, 8); eq(m.height, 4); eq(m.colorMode, "RGB")
   eq(m.hasAssociatedFile, false); eq(m.isModified, s.isModified); eq(m.filename, file)
-  eq(m.frameCount, 1); eq(m.frames[1].number, 1); eq(m.frames[1].duration, s.frames[1].duration)
-  eq(m.layers[1].id, s.layers[1].id); eq(m.layers[1].name, "Live art")
-  eq(m.layers[1].type, "image"); eq(m.layers[1].visible, true); eq(m.layers[1].locked, false)
+  eq(m.counts.frames, 1); eq(m.frames.items[1].number, 1); eq(m.frames.items[1].duration, s.frames[1].duration)
+  eq(m.layers.items[1].id, s.layers[1].id); eq(m.layers.items[1].name, "Live art")
+  eq(m.layers.items[1].type, "image"); eq(m.layers.items[1].visible, true); eq(m.layers.items[1].locked, false)
   eq(m.activeLayer, s.layers[1].id); eq(m.selection.x, 1); eq(m.selection.width, 3)
-  eq(image:getPixel(m.scale, m.scale), red); eq(m.revision, before.revision)
+  eq(image:getPixel(v.scale, v.scale), red); eq(m.revision, before.revision); eq(v.revision, before.revision)
   eq(s.filename, file); eq(s.hasAssociatedFile, false); eq(s.cels[1].image:getPixel(1, 1), red)
 end)
 
@@ -139,8 +145,9 @@ test("indexed preview renders palette colors into RGB", function()
   s.palettes[1]:setColor(1, Color { r = 12, g = 34, b = 56, a = 255 })
   s.cels[1].image:drawPixel(0, 0, 1)
   local e = bound(s)
-  local m, image = preview(e:read({}))
-  eq(m.colorMode, "INDEXED"); eq(m.hasAssociatedFile, false)
+  local m, image = preview(e:view({}))
+  local overview=success(e:inspect {})
+  eq(overview.colorMode, "INDEXED"); eq(overview.hasAssociatedFile, false)
   eq(image.colorMode, ColorMode.RGB)
   eq(image:getPixel(0, 0), app.pixelColor.rgba(12, 34, 56, 255))
 end)
@@ -148,8 +155,8 @@ end)
 test("preview is capped to 1024 preserving aspect ratio", function()
   local s = sprite(2048, 512)
   local e = bound(s)
-  local m, image = preview(e:read({}))
-  eq(m.width, 2048); eq(m.height, 512)
+  local m, image = preview(e:view({}))
+  eq(m.region.width, 2048); eq(m.region.height, 512)
   eq(m.preview.width, 1024); eq(m.preview.height, 256)
   eq(image.width, 1024); eq(image.height, 256)
 end)
@@ -162,22 +169,22 @@ test("native Frame and number binding plus optional rendered frame", function()
   s:newCel(s.layers[1], 2, image)
   app.frame = 2
   local e = bound(s, s.frames[2])
-  local m, rendered = preview(e:read({}))
-  eq(m.frame, 2); eq(rendered:getPixel(0, 0), app.pixelColor.rgba(0, 255, 0, 255))
+  local m, rendered = preview(e:view({}))
+  eq(m.selectedFrames[1], 2); eq(rendered:getPixel(0, 0), app.pixelColor.rgba(0, 255, 0, 255))
   local older = e:metadata().revision
   e:bind(s, 2, s.layers[1])
   assert(e:metadata().revision > older)
-  local response = e:read { frame = 1 }
+  local response = e:view { frame = 1 }
   local other = success(response)
   assert(e:check(other.revision))
   local _, blank = preview(response)
-  eq(other.frame, 1); eq(blank:getPixel(0, 0), 0); eq(app.frame.frameNumber, 2)
+  eq(other.selectedFrames[1], 1); eq(blank:getPixel(0, 0), 0); eq(app.frame.frameNumber, 2)
 end)
 
-test("malformed and out-of-range read frames fail", function()
+test("malformed and out-of-range view frames fail", function()
   local e = bound(sprite())
   for _, frame in ipairs { 0, -1, 2, 1.5, "1", true, false } do
-    assert(not e:read({ frame = frame }).success)
+    assert(not e:view({ frame = frame }).success)
   end
 end)
 
@@ -334,7 +341,7 @@ test("closed target never modifies another active document", function()
   s:close(); local other = sprite()
   rejected(execute(e, edit, revision))
   eq(other.cels[1].image:getPixel(1, 1), 0)
-  assert(not e:read({}).success)
+  assert(not e:view({}).success)
 end)
 
 test("rebind retains monotonic revision and removes old sprite listeners", function()
@@ -351,7 +358,7 @@ test("dispose is idempotent, invalidates execution, and releases listener closur
   local s = sprite(); local e = Executor.new(); e:bind(s, 1, s.layers[1])
   local revision = e:metadata().revision
   e:dispose(); e:dispose()
-  rejected(execute(e, edit, revision)); assert(not e:read({}).success)
+  rejected(execute(e, edit, revision)); assert(not e:view({}).success)
   local weak = setmetatable({ e }, { __mode = "v" }); e = nil
   collectgarbage("collect"); collectgarbage("collect")
   eq(weak[1], nil)
@@ -378,20 +385,20 @@ test("preview uses unique owned files and removes them after read failures", fun
     return native_open(path, mode)
   end
   local ok, err = pcall(function()
-    assert(not e:read({}).success)
-    assert(not e:read({}).success)
+    assert(not e:view({}).success)
+    assert(not e:view({}).success)
   end)
   io.open = native_open
   assert(ok, err)
   eq(#paths, 2); assert(paths[1] ~= paths[2])
   for _, path in ipairs(paths) do assert(not app.fs.isFile(path), "leaked preview " .. path) end
-  preview(e:read({}))
+  preview(e:view({}))
 end)
 
 test("native JSON tool arguments inspect the live sprite", function()
   local s = sprite()
   local e = bound(s)
-  local data = success(e:read(json.decode("{}")))
+  local data = success(e:inspect(json.decode("{}")))
   eq(data.width, 8)
 end)
 test("native JSON tool arguments execute an undoable edit", function()
@@ -425,24 +432,25 @@ test("frames, tag and frame selection order applies", function()
   s:newCel(s.layers[1], 3, image)
   local tag = s:newTag(2, 3); tag.name = "walk"
   local e = bound(s)
-  local m = success(e:read { tag = "walk" })
+  local m = success(e:view { tag = "walk" })
   eq(#m.selectedFrames, 2); eq(m.selectedFrames[1], 2); eq(m.selectedFrames[2], 3)
   eq(#m.layout, 2); eq(m.layout[1].frame, 2); eq(m.layout[2].frame, 3)
-  eq(#m.cels, 1); eq(m.cels[1].frame, 3)
-  m = success(e:read { tag = "walk", frames = { 4 } })
+  local cels=success(e:inspect {sections={"cels"},frame=3}).cels
+  eq(cels.total, 1); eq(cels.items[1].frame, 3)
+  m = success(e:view { tag = "walk", frames = { 4 } })
   eq(#m.selectedFrames, 1); eq(m.selectedFrames[1], 4)
-  m = success(e:read { frame = 2 })
+  m = success(e:view { frame = 2 })
   eq(#m.selectedFrames, 1); eq(m.selectedFrames[1], 2)
-  assert(not e:read({ tag = "missing" }).success)
-  assert(not e:read({ frames = { 0 } }).success)
-  assert(not e:read({ frames = {} }).success)
+  assert(not e:view({ tag = "missing" }).success)
+  assert(not e:view({ frames = { 0 } }).success)
+  assert(not e:view({ frames = {} }).success)
 end)
 
-test("uncapped many-frame reads tile multiple sheets with a correct layout", function()
+test("uncapped many-frame views tile multiple sheets with a correct layout", function()
   local s = sprite(60, 500)
   for _ = 2, 16 do s:newEmptyFrame() end
   local e = bound(s)
-  local result = e:read { frames = (function() local f = {}; for i = 1, 16 do f[i] = i end; return f end)() }
+  local result = e:view { frames = (function() local f = {}; for i = 1, 16 do f[i] = i end; return f end)() }
   local m = success(result)
   eq(#m.selectedFrames, 16); eq(#m.layout, 16)
   local max_sheet = 0
@@ -465,7 +473,7 @@ end)
 
 test("small renders upscale by an integer factor and report scale", function()
   local s = sprite(16, 16); local e = bound(s)
-  local m = success(e:read {})
+  local m = success(e:view {})
   eq(m.scale, 64); eq(m.preview.width, 1024); eq(m.preview.height, 1024)
 end)
 
@@ -473,26 +481,26 @@ test("region crops to the canvas and an empty region fails", function()
   local s = sprite(8, 8)
   s.cels[1].image:drawPixel(2, 2, app.pixelColor.rgba(255, 0, 0, 255))
   local e = bound(s)
-  local m = success(e:read { region = { x = 2, y = 2, width = 4, height = 4 } })
+  local m = success(e:view { region = { x = 2, y = 2, width = 4, height = 4 } })
   eq(m.preview.width / m.scale, 4); eq(m.preview.height / m.scale, 4)
-  local image = sheet_image(e:read { region = { x = 2, y = 2, width = 4, height = 4 } })
+  local image = sheet_image(e:view { region = { x = 2, y = 2, width = 4, height = 4 } })
   eq(image:getPixel(0, 0), app.pixelColor.rgba(255, 0, 0, 255))
-  m = success(e:read { region = { x = 6, y = 6, width = 8, height = 8 } })
+  m = success(e:view { region = { x = 6, y = 6, width = 8, height = 8 } })
   eq(m.preview.width / m.scale, 2)
-  assert(not e:read({ region = { x = 20, y = 20, width = 4, height = 4 } }).success)
-  assert(not e:read({ region = { x = 0, y = 0, width = 0, height = 4 } }).success)
+  assert(not e:view({ region = { x = 20, y = 20, width = 4, height = 4 } }).success)
+  assert(not e:view({ region = { x = 0, y = 0, width = 0, height = 4 } }).success)
 end)
 
 test("grid draws only when the upscale factor is at least four", function()
   local s = sprite(16, 16)
   s.cels[1].image:drawPixel(0, 0, app.pixelColor.rgba(255, 0, 0, 255))
   local e = bound(s)
-  local m = success(e:read { grid = 4 })
+  local m = success(e:view { grid = 4 })
   eq(m.grid, 4); eq(m.scale, 64)
-  local image = sheet_image(e:read { grid = 4 })
+  local image = sheet_image(e:view { grid = 4 })
   assert(image:getPixel(4 * m.scale, 2) ~= image:getPixel(4 * m.scale - 1, 2), "grid line did not tint")
   local big = sprite(512, 512); local e2 = bound(big)
-  local m2 = success(e2:read { grid = 4 })
+  local m2 = success(e2:view { grid = 4 })
   eq(m2.grid, "skipped (scale < 4)"); assert(m2.scale < 4)
 end)
 
@@ -503,13 +511,14 @@ test("layer isolation renders a hidden layer without touching the document", fun
   s:newCel(hidden, 1, image)
   local e = bound(s)
   local revision = e:metadata().revision
-  local m = success(e:read { layers = { hidden.id } })
-  eq(m.layers[2].visible, false)
+  success(e:view { layers = { hidden.id } })
+  local m=success(e:inspect {sections={"layers"},layers={hidden.id}})
+  eq(m.layers.items[1].visible, false)
   assert(not hidden.isVisible, "isolation changed layer visibility")
   eq(e:metadata().revision, revision, "isolation staled the target")
-  local rendered = sheet_image(e:read { layers = { hidden.id } })
+  local rendered = sheet_image(e:view { layers = { hidden.id } })
   eq(rendered:getPixel(0, 0), app.pixelColor.rgba(0, 255, 0, 255))
-  assert(not e:read({ layers = { 9999 } }).success)
+  assert(not e:view({ layers = { 9999 } }).success)
 end)
 
 test("layer isolation converts indexed and gray cels through their palettes", function()
@@ -518,7 +527,7 @@ test("layer isolation converts indexed and gray cels through their palettes", fu
   s.palettes[1]:setColor(2, Color { r = 0, g = 255, b = 0, a = 255 })
   s.cels[1].image:drawPixel(0, 0, 1); s.cels[1].image:drawPixel(1, 0, 2)
   local e = bound(s)
-  local image = sheet_image(e:read { layers = { s.layers[1].id } })
+  local image = sheet_image(e:view { layers = { s.layers[1].id } })
   eq(image:getPixel(0, 0), app.pixelColor.rgba(255, 0, 0, 255))
   eq(image:getPixel(image.width // 4, 0), app.pixelColor.rgba(0, 255, 0, 255))
   eq(app.pixelColor.rgbaA(image:getPixel(image.width // 2, 0)), 0, "transparent index did not stay transparent")
@@ -527,7 +536,7 @@ test("layer isolation converts indexed and gray cels through their palettes", fu
   local g = sprite(4, 4, ColorMode.GRAY)
   g.cels[1].image:drawPixel(0, 0, app.pixelColor.graya(200, 255))
   e:bind(g, 1, g.layers[1])
-  local gray = sheet_image(e:read { layers = { g.layers[1].id } })
+  local gray = sheet_image(e:view { layers = { g.layers[1].id } })
   eq(gray:getPixel(0, 0), app.pixelColor.rgba(200, 200, 200, 255))
 end)
 
@@ -594,21 +603,21 @@ test("tags and slices feed metadata and the observation signature", function()
   local m3 = e:metadata()
   assert(m3.revision > m2.revision, "slice change did not bump the revision")
   eq(m3.slices[1].name, "cut"); eq(m3.slices[1].bounds.width, 3)
-  assert(e:read({}).success)
+  assert(e:inspect({}).success)
 end)
 
-test("a non-target sprite reads without a revision and defaults to frame 1", function()
+test("a non-target sprite view has no revision and defaults to frame 1", function()
   local s = sprite(); local e = bound(s)
   local other = sprite(4, 4); other:newEmptyFrame()
   local other_id = other.id
-  local m = success(e:read { spriteId = other_id })
-  eq(m.target, false); eq(m.revision, nil); eq(m.frame, 1)
-  assert(m.openSprites and #m.openSprites >= 2)
-  local owned = success(e:read { spriteId = s.id })
+  local m = success(e:view { spriteId = other_id })
+  eq(m.target, false); eq(m.revision, nil); eq(m.selectedFrames[1], 1)
+  eq(m.openSprites,nil); eq(e.sprite,s)
+  local owned = success(e:view { spriteId = s.id })
   eq(owned.target, true); assert(owned.revision)
-  assert(not e:read({ spriteId = 99999 }).success)
+  assert(not e:view({ spriteId = 99999 }).success)
   other:close()
-  assert(not e:read({ spriteId = other_id }).success)
+  assert(not e:view({ spriteId = other_id }).success)
 end)
 
 test("switch_sprite activates and rebinds the target with a fresh revision", function()
@@ -641,7 +650,7 @@ test("export PNG keeps source resolution, alpha and editor state",function()
   e.exports:clear(); assert(not app.fs.isFile(data.files[1].path))
 end)
 
-test("export shares frame precedence, isolated layers and clipped regions with read",function()
+test("export shares frame precedence, isolated layers and clipped regions with view",function()
   local s=sprite(4,3)
   s:newEmptyFrame(); s:newEmptyFrame()
   local layer=s.layers[1]
@@ -704,6 +713,163 @@ test("export rejects unsupported options and unsafe allocations before encoding"
     assert(not e:export(args).success,"invalid export accepted")
   end
   eq(calls,0)
+end)
+
+test("focused tools discover empty editors and return structured document errors", function()
+  local e = Executor.new(); executors[#executors + 1] = e
+  local m = success(e:list {})
+  eq(m.sprites.total, 0); eq(#m.sprites.items, 0); eq(m.sprites.offset, 0)
+  eq(m.activeSpriteId, nil); eq(m.targetSpriteId, nil)
+  eq(json.encode(m.sprites.items), "[]")
+  for _, response in ipairs {e:view {}, e:inspect {},
+      e:read_pixels {x=0,y=0,width=1,height=1}, e:export {}, e:switch {spriteId=123},
+      e:execute {code="return true",summary="empty",expectedRevision=0}} do
+    eq(response.success, false); eq(response.contentItems[1].type, "inputText")
+    eq(json.decode(text(response)).error.code, "NO_OPEN_SPRITE")
+  end
+  local missing = e:inspect {spriteId=999}
+  eq(json.decode(text(missing)).error.code, "SPRITE_NOT_OPEN")
+end)
+
+test("list pages open documents without rebinding or observing pixels", function()
+  local s = sprite(); local e = bound(s); local other = sprite(3, 2)
+  app.sprite = other
+  local revision = e.revision
+  function e:metadata() error("list must not observe") end
+  local m = success(e:list {offset=1,limit=1})
+  eq(m.sprites.total, 2); eq(m.sprites.offset, 1); eq(#m.sprites.items, 1)
+  eq(m.sprites.items[1].spriteId, app.sprites[2].id); eq(m.sprites.nextOffset, nil)
+  eq(m.activeSpriteId, other.id); eq(m.targetSpriteId, s.id); eq(e.revision, revision)
+  eq(m.sprites.items[1].isTarget, nil)
+  eq(success(e:list {limit=1}).sprites.nextOffset, 1)
+  local empty = success(e:list {offset=9}).sprites
+  eq(#empty.items, 0); eq(empty.total, 2); eq(json.encode(empty.items), "[]")
+end)
+
+test("inspect defaults to sparse overview and preserves full revision observation", function()
+  local s = sprite(); local e = bound(s)
+  local m = success(e:inspect {})
+  eq(m.spriteId, s.id); eq(m.target, true); eq(m.frame, 1); eq(m.activeLayer, s.layers[1].id)
+  eq(m.width, 8); eq(m.height, 4); eq(m.counts.layers, 1); eq(m.counts.frames, 1)
+  eq(m.counts.cels, 1); eq(m.counts.tags, 0); eq(m.counts.slices, 0)
+  eq(m.layers, nil); eq(m.frames, nil); eq(m.palette, nil); eq(m.selection, nil); eq(m.openSprites, nil)
+  s.cels[1].image:drawPixel(0, 0, app.pixelColor.rgba(1,2,3,255))
+  assert(success(e:inspect {}).revision > m.revision, "sparse inspect weakened revision checks")
+  local reference = sprite(); local current = app.sprite
+  local r = success(e:inspect {spriteId=reference.id})
+  eq(r.target, false); eq(r.revision, nil); eq(r.frame, 1); eq(e.sprite, s); eq(app.sprite, current)
+end)
+
+test("inspect pages flat layer descendants and frame-filtered cels", function()
+  local s = sprite(); local base = s.layers[1]
+  local group = s:newGroup(); local nested = s:newGroup(); nested.parent = group
+  local child = s:newLayer(); child.parent = nested
+  s:newCel(child,1,Image(2,2)); s:newEmptyFrame(); s:newCel(child,2,Image(2,2))
+  local e = bound(s,2,child)
+  local m = success(e:inspect {sections={"layers","frames","cels","tags","slices","selection"},layers={group.id},frame=2,limit=2})
+  eq(m.layers.total, 3); eq(#m.layers.items, 2); eq(m.layers.nextOffset, 2)
+  eq(m.layers.items[1].id, group.id); eq(m.layers.items[2].parentId, group.id)
+  eq(m.layers.items[1].children, nil); eq(m.cels.total, 1); eq(m.cels.items[1].layer, child.id)
+  eq(m.cels.items[1].frame, 2); eq(m.frames.total, 2); eq(m.selection.empty, true)
+  eq(json.encode(m.tags.items), "[]"); eq(json.encode(m.slices.items), "[]")
+  local page = success(e:inspect {sections={"layers"},layers={group.id},offset=2,limit=2}).layers
+  eq(#page.items,1); eq(page.items[1].id,child.id); eq(page.items[1].parentId,nested.id)
+  eq(page.nextOffset,nil)
+  eq(success(e:inspect {sections={"cels"}}).cels.total, 1)
+  eq(success(e:inspect {sections={"layers"},layers={base.id}}).layers.total, 1)
+end)
+
+test("inspect palette pages have zero-based indices and effective frame", function()
+  local s = sprite(2,2,ColorMode.INDEXED); s:newEmptyFrame(); s:newEmptyFrame()
+  -- Insert a native frame-2 palette chunk into an owned .ase fixture.
+  local path = app.fs.joinPath(app.fs.tempPath,"executor-palette-"..tostring(Uuid())..".ase")
+  s:saveAs(path)
+  local f=assert(io.open(path,"rb")); local bytes=f:read("*a"); f:close()
+  local frame1size=string.unpack("<I4",bytes,129)
+  local pos=129+frame1size
+  local frame2size,magic,chunks,duration=string.unpack("<I4I2I2I2",bytes,pos)
+  local payload=string.pack("<I4I4I4",256,1,1)..string.rep("\0",8)..string.pack("<I2BBBB",0,12,34,56,255)
+  local chunk=string.pack("<I4I2",#payload+6,0x2019)..payload
+  local header=string.pack("<I4I2I2I2",frame2size+#chunk,magic,chunks+1,duration)..string.rep("\0",6)
+  bytes=bytes:sub(1,pos-1)..header..bytes:sub(pos+16,pos+frame2size-1)..chunk..bytes:sub(pos+frame2size)
+  bytes=string.pack("<I4",#bytes)..bytes:sub(5)
+  f=assert(io.open(path,"wb")); f:write(bytes); f:close()
+  local ok, loaded=pcall(app.open,path); os.remove(path); assert(ok,loaded)
+  owned[#owned+1]=loaded
+  eq(#loaded.palettes,2)
+  local e=bound(loaded,3,loaded.layers[1])
+  local m=success(e:inspect {sections={"palette"},offset=1,limit=1})
+  eq(m.frame,3); eq(m.queryFrame,3); eq(m.paletteFrame,2)
+  eq(m.palette.items[1].index,1); eq(m.palette.items[1].rgba,"#0c2238ff")
+  eq(m.palette.total,256); eq(m.palette.nextOffset,2)
+  local first=success(e:inspect {sections={"palette"},frame=1,offset=1,limit=1})
+  eq(first.frame,3); eq(first.queryFrame,1); eq(first.paletteFrame,1)
+  assert(first.palette.items[1].rgba~="#0c2238ff")
+  local reference=bound(s,1,s.layers[1])
+  eq(success(reference:inspect {spriteId=loaded.id,sections={"palette"}}).paletteFrame,1)
+end)
+
+test("inspect and list validate finite paging and section arguments", function()
+  local e=bound(sprite())
+  for _,args in ipairs {{offset=-1},{offset=0.5},{limit=0},{limit=257},{limit=false}} do
+    assert(not e:inspect(args).success); assert(not e:list(args).success)
+  end
+  for _,args in ipairs {{sections={"unknown"}},{sections="layers"},{frame=0},{layers={999999}},{layers={}}} do
+    assert(not e:inspect(args).success)
+  end
+  local s=sprite(1,1,ColorMode.INDEXED); s.palettes[1]:resize(300); e:bind(s,1,s.layers[1])
+  eq(#success(e:inspect {sections={"palette"}}).palette.items,64)
+  eq(#success(e:inspect {sections={"palette"},limit=256}).palette.items,256)
+  eq(success(e:inspect {sections={"palette"},offset=256}).palette.items[1].index,256)
+end)
+
+test("view preserves independent pixel and selection fidelity with sparse metadata", function()
+  local s=sprite(); s:newEmptyFrame(); local tag=s:newTag(1,2); tag.name="walk"
+  local rgba=app.pixelColor.rgba
+  for frame=1,2 do
+    local image=Image(s.width,s.height); image:drawPixel(6,2,rgba(frame*70,20,30,255))
+    if s.layers[1]:cel(frame) then s.layers[1]:cel(frame).image=image else s:newCel(s.layers[1],frame,image) end
+  end
+  s.layers[1].isVisible=false
+  local e=bound(s,2,s.layers[1])
+  local args={frames={2,1,2},tag="walk",frame=1,layers={s.layers[1].id},region={x=6,y=2,width=20,height=20}}
+  local result=e:view(json.decode(json.encode(args))); local m=success(result)
+  eq(m.selectedFrames[1],2); eq(m.selectedFrames[2],1); eq(m.selectedFrames[3],2)
+  eq(m.region.width,2); eq(m.region.height,2); eq(m.target,true); assert(m.revision)
+  for i,frame in ipairs {2,1,2} do
+    local cell=m.layout[i]
+    local image=sheet_image(result,cell.sheet)
+    eq(cell.frame,frame); eq(cell.width,2*m.scale); eq(cell.height,2*m.scale)
+    eq(image:getPixel(cell.x,cell.y),rgba(frame*70,20,30,255))
+    eq(image:getPixel(cell.x+m.scale,cell.y+m.scale),0)
+  end
+  for _,key in ipairs {"layers","frames","cels","palette","tags","slices","selection","openSprites","filename","counts"} do eq(m[key],nil) end
+  eq(success(e:view {tag="walk"}).selectedFrames[1],1)
+  eq(success(e:view {}).selectedFrames[1],2)
+  eq(success(e:view {}).region.width,8)
+end)
+
+test("switch returns only the fresh target identity and native context", function()
+  local s=sprite(); local e=bound(s); local other=sprite()
+  local m=success(e:switch {spriteId=other.id})
+  eq(m.spriteId,other.id); eq(m.target,true); eq(m.frame,1); eq(m.activeLayer,other.layers[1].id)
+  eq(m.width,nil); eq(m.layers,nil); eq(m.palette,nil); eq(m.openSprites,nil); assert(e:check(m.revision))
+end)
+
+test("inspect distinguishes the queried frame from the captured current frame", function()
+  local s=sprite(); s:newEmptyFrame(); s:newEmptyFrame()
+  s:newCel(s.layers[1],3,Image(2,2))
+  app.frame=2
+  local e=bound(s,2,s.layers[1])
+  local m=success(e:inspect {frame=3,sections={"cels","palette"}})
+  eq(m.frame,2); eq(m.queryFrame,3); eq(m.paletteFrame,1)
+  eq(app.frame.frameNumber,2)
+  eq(m.cels.items[1].frame,3)
+  eq(success(e:inspect {}).queryFrame,2)
+  local reference=success(e:inspect {spriteId=sprite().id})
+  eq(reference.frame,1); eq(reference.queryFrame,1); eq(reference.target,false)
+  local explicit=success(e:inspect {spriteId=s.id,frame=1})
+  eq(explicit.frame,2); eq(explicit.queryFrame,1)
 end)
 
 for _, item in ipairs(tests) do

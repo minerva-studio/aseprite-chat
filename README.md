@@ -1,6 +1,6 @@
 # Aseprite Chat
 
-A native Aseprite chat window and an external Codex MCP connection. Inspect unsaved sprites, approve Lua edits in the running editor, and export native PNG/GIF/sprite sheets.
+A native Aseprite chat window and a client-neutral local MCP connection. Inspect unsaved sprites, approve Lua edits in the running editor, and export native PNG/GIF/sprite sheets.
 
 The editor extension is Lua. Opening the chat automatically finds or starts a small local Node communication bridge, which starts Codex app-server using its stdio transport. No terminal command, port entry, MCP server, browser, or Python is required for normal use. The bridge exists because this Aseprite version always sends an Origin header and Codex rejects that header on its own WebSocket listener.
 
@@ -37,13 +37,15 @@ Aseprite may ask permission to connect to localhost and create/read a temporary 
   - The API key is stored **plaintext in `providers.json` only** — never in Aseprite preferences, Codex's `config.toml`, command lines, or logs. Settings shows only a trailing hint; the key entry stays blank to keep the saved key, and **Remove saved key** clears it.
   - **Models** optionally lists model IDs (comma-separated). When non-empty it replaces the server catalog in the picker — Codex's `model/list` always returns its bundled OpenAI entries regardless of provider, which is rarely useful for a custom endpoint. Each listed model is offered with low/medium/high reasoning and normal speed, with no Fast control.
 
-## External Codex through MCP
+## External clients through MCP
 
-Open **View > Aseprite MCP** to connect external Codex to this running editor. This is independent of the internal chat and does not start another Codex model process.
+Open **View > Aseprite MCP** to connect an external MCP client to this running editor. This runtime is independent of the internal chat: it does not start Codex app-server or require a model login. The built-in registration shortcut targets Codex homes; another local client supporting stdio MCP can configure the same server manually.
+
+Use native Node as the MCP command, with arguments `["<installed extension>/scripts/mcp-server.mjs", "--home", "<same home selected in Aseprite MCP>"]`. The home identifies the local hub; the runtime does not require it to contain Codex configuration. Image input and file-copy capabilities depend on the external client/model. **Connect** only needs Node; **Register & connect** additionally needs the Codex CLI to edit its configuration.
 
 1. Set **Target Codex home** to the home used by the external Codex client. On first use it defaults to the account selected in Aseprite Chat Settings; subsequent opens remember the MCP panel's chosen home.
 2. Click **Register & connect**. The plugin creates the selected home directory if it is new, backs up an existing `config.toml` to `<home>/.aseprite-chat/config-backup-<uuid>.toml`, then invokes the native Codex CLI with process-local `CODEX_HOME` to add the `aseprite_chat` stdio MCP entry. The entry runs the installed `scripts/mcp-server.mjs` with native Node and `--home <home>`. Other model/provider/login settings and unrelated MCP entries are retained. Repeating an exact registration is a no-op; a foreign or altered same-name entry is rejected for manual inspection.
-3. Restart the external Codex client or start a fresh session so it loads the entry. Ask it to inspect or edit the current Aseprite document. All five tools below are available through MCP, including PNG preview image content.
+3. Restart the external Codex client or start a fresh session so it loads the entry. Ask it to inspect or edit the current Aseprite document. All seven tools below are available through MCP, including PNG preview image content.
 4. Keep the MCP panel connected while using these tools. **Connect** reconnects without changing Codex configuration. **Disconnect**, closing the panel or exiting the extension cancels pending native approvals and retires its document observations and temporary exports. A connection loss requires an explicit Connect. There is no automatic replay.
 
 The panel's home is independent of the internal chat account. It does not copy API keys or change the external host's model, provider, filesystem sandbox or approval settings. MCP edits always require **Approve once** in Aseprite, including when the internal chat has Auto-approve edits enabled. The full proposed Lua is shown and the captured revision/context is checked before execution. The original Undo contract applies. Cancelled or stale callbacks cannot execute. Enter in the MCP panel or its approval cannot submit a background internal chat draft. The internal chat disables only its own `aseprite_chat` MCP entry through a child runtime override, since it already provides these operations as dynamic tools; the saved configuration is unchanged by that override.
@@ -58,17 +60,34 @@ Registration uses [Codex's documented MCP configuration](https://learn.chatgpt.c
 
 The model works through the extension's own tools:
 
-- `read_sprite` returns document metadata (open sprites, layers, frames, palette, tags, slices, cels) and PNG previews. It can select frames by list or tag with no frame limit (several sheets plus a layout when needed), isolate layers without changing the document, crop a region, and overlay a grid. Small pixel art is upscaled with nearest-neighbor.
+- `list_sprites` discovers open documents without requiring an editing target. It returns a paged `sprites` collection of IDs, filenames, dimensions, color modes and frame counts, plus active/target identities. No open document returns an empty collection successfully.
+- `view_sprite` returns rendered PNG previews and only the identity, revision (editing target only), selected frames, crop, scale and sheet layout needed to interpret them. It can select frames by list or tag, isolate layers without changing the document, crop a region, and overlay a grid. Small pixel art is upscaled with nearest-neighbor. It does not return the document's palette or structural arrays.
+- `inspect_sprite` returns a compact document overview and counts. Add `sections` to request any of `layers`, `frames`, `tags`, `slices`, `cels`, `palette`, `selection`; omitted sections stay omitted. No preview images are generated.
 - `read_pixels` returns exact pixel values for up to 4096 pixels without an approval.
-- Other open sprites can be read by `spriteId` as references. Edits apply only to the current target; `switch_sprite` activates another open sprite and makes it the target.
+- Other open sprites can be read by `spriteId` as references. Edits apply only to the current target; `switch_sprite` activates another open sprite and returns its identity, current frame/layer and new revision without full metadata.
 - `execute_lua` proposes edits through the approval flow described below.
-- `export_sprite` encodes live selections as PNG frames, animated GIF, or a PNG spritesheet with optional JSON. It returns temporary file paths; destination copies use Codex shell/file tools under the selected Access and approvals. Export does not save or modify the source document.
+- `export_sprite` encodes live selections as PNG frames, animated GIF, or a PNG spritesheet with optional JSON. It returns temporary file paths; destination copies use the client's authorized file capability (internal Chat follows Access and approvals). Export does not save or modify the source document.
 
-Conversations created before a tool was added keep their original tool list, because Codex fixes dynamic tools when a thread starts.
+Here `sprite` consistently means a complete Aseprite document, including all layers and frames. Frames are 1-based, pixel coordinates and palette indices are 0-based, and layers use native IDs. Both view and inspect return the editing target's current revision; pass it to `execute_lua` for approval and stale-state validation. Reference reads never grant editing permission.
+
+`list_sprites` and inspect collections accept `offset` (default 0) and `limit` (default 64, maximum 256). Each collection returns `{items,total,offset,nextOffset?}`; an absent nextOffset means complete. Inspect layers are flat records with parentId, so pagination cannot hide a nested subtree. `layers` filters requested layers/cels and includes group descendants. The `frame` argument chooses cel records and the effective frame palette; palette entries contain explicit `{index,rgba}`. The result distinguishes `frame` (captured frame), `queryFrame` (requested frame) and `paletteFrame` (effective palette's source frame). Selection is a single bounds object instead of a collection.
+
+Examples:
+
+```js
+list_sprites({})
+view_sprite({frame: 3})
+inspect_sprite({sections: ["layers", "tags"]})
+inspect_sprite({sections: ["palette"], frame: 3, offset: 0, limit: 32})
+```
+
+Ordinary Chat sends/steers attach only `{hasSprite,spriteId?,frame?,layerId?,revision?}`; they never automatically send a palette, image or full structure. Chat works with no canvas. Document operations return a failed tool result with `{error:{code:"NO_OPEN_SPRITE",message:...}}` when no document is open; the MCP connection stays online. Internal revision observations remain complete, so this is a payload reduction, not a promise of faster document scanning.
+
+This release deliberately breaks the previous tool contract. `read_sprite` is removed. Codex fixes dynamic tools when a thread starts, so start a new conversation to use these tools; previous tool definitions are not translated or supported. Reconnect external MCP clients to refresh their catalogs. Existing transcripts remain readable.
 
 ### Export parameters
 
-`export_sprite` uses the same `spriteId`, `frame`, `frames`, `tag`, `layers` and `region` selectors as `read_sprite`. Explicit `frames` take precedence over `tag`, then `frame`; the default is the captured frame (frame 1 for another sprite). Explicit lists retain order and duplicates. Tags select their inclusive numeric frame range; playback direction and repeat counts are not expanded. Regions are clipped to the canvas. Without `layers`, visible layers are composited; selected layers render in isolation.
+`export_sprite` uses the same `spriteId`, `frame`, `frames`, `tag`, `layers` and `region` selectors as `view_sprite`. Explicit `frames` take precedence over `tag`, then `frame`; the default is the captured frame (frame 1 for another sprite). Explicit lists retain order and duplicates. Tags select their inclusive numeric frame range; playback direction and repeat counts are not expanded. Regions are clipped to the canvas. Without `layers`, visible layers are composited; selected layers render in isolation.
 
 | Parameter | Default | Behavior |
 | --- | --- | --- |

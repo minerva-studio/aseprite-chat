@@ -97,7 +97,8 @@ function Session:_call(connection,packet)
   assert(type(id)=="string" and #id>0 and #id<=128 and type(clientId)=="string"
     and #clientId>0 and #clientId<=128,"Invalid MCP request identity")
   if self.active then self:_send(connection,id,failure("Another Aseprite operation is awaiting completion.")); return end
-  local methods={read_sprite="read",read_pixels="read_pixels",switch_sprite="switch",export_sprite="export",execute_lua="execute"}
+  local methods={list_sprites="list",view_sprite="view",inspect_sprite="inspect",read_pixels="read_pixels",
+    switch_sprite="switch",export_sprite="export",execute_lua="execute"}
   local method=methods[packet.tool]
   if not method then self:_send(connection,id,failure("Unknown Aseprite tool.")); return end
   local args=packet.arguments
@@ -111,7 +112,8 @@ function Session:_call(connection,packet)
   self:_status("Working: "..packet.tool,"Edits require approval in Aseprite.")
   if packet.tool~="execute_lua" then
     local ok,result=pcall(function()
-      if packet.tool~="switch_sprite" and app.sprite then
+      if not app.sprite then executor:dispose() end
+      if packet.tool~="switch_sprite" and packet.tool~="list_sprites" and app.sprite then
         local current=executor.sprite and executor.sprite.isValid and executor.sprite==app.sprite
           and executor.frame==app.frame and executor.layer==app.layer
         if not executor.sprite or (args.spriteId==nil and not current) then
@@ -124,7 +126,10 @@ function Session:_call(connection,packet)
     return
   end
   if not executor.sprite or not executor.sprite.isValid then
-    self:_finish(active,failure("Use read_sprite to inspect the current sprite before editing.")); return
+    if not app.sprite then
+      self:_finish(active,failure(json.encode{error={code="NO_OPEN_SPRITE",message="请先打开一个 Aseprite 文档。"}}))
+    else self:_finish(active,failure("Use view_sprite or inspect_sprite to inspect the current sprite before editing.")) end
+    return
   end
   if type(args.code)~="string" or #args.code>65536 or type(args.summary)~="string" or #args.summary>1000 then
     self:_finish(active,failure("A short Lua code and summary are required.")); return

@@ -45,7 +45,7 @@ const mock = http.createServer((req, res) => {
     responseCount++;
     const id = `resp_${responseCount}`;
     const hasToolOutput = parsed?.input?.some(i => i.type === 'function_call_output');
-    const readTool = parsed?.tools?.find(t => JSON.stringify(t).includes('read_sprite'));
+    const readTool = parsed?.tools?.find(t => JSON.stringify(t).includes('view_sprite'));
     const questionTool = parsed?.tools?.find(t => t.name === 'request_user_input');
     const created = { type: 'response.created', response: { id } };
     const completed = { type: 'response.completed', response: { id, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } };
@@ -145,7 +145,7 @@ try {
     console.log(`default-live model=${model} effort=${effort}`);
   }
 
-  const tools = [{ type: 'function', name: 'read_sprite', description: 'Inspect the live sprite',
+  const tools = [{ type: 'function', name: 'view_sprite', description: 'Inspect the live sprite',
     inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false } }];
   const started = await request('thread/start', { dynamicTools: tools, model,
     config: { 'features.default_mode_request_user_input': true },
@@ -160,7 +160,7 @@ try {
   const done = new Promise(resolve => { turnDone = resolve; });
   const turn = await request('turn/start', { threadId, model, effort,
     input: [{ type: 'text', text: defaultLive ? 'Reply with exactly: ok'
-      : 'Call read_sprite, then reply with exactly account-ok.' }] });
+      : 'Call view_sprite, then reply with exactly account-ok.' }] });
   check('turn/start accepted', !turn.error, turn.error);
   let turnTimeout;
   const finished = await Promise.race([done, new Promise(r => { turnTimeout = setTimeout(() => r('timeout'), defaultLive ? 120000 : 60000); })]);
@@ -206,7 +206,7 @@ try {
     check('mock saw POST /responses', calls.length >= 1, report.requests);
     check('mock saw the Bearer key', calls.every(r => r.authIsBearerFakeKey));
     const names = new Set((calls[0]?.toolNames ?? []));
-    check('request tools include read_sprite', names.has('read_sprite'), [...names]);
+    check('request tools include view_sprite', names.has('view_sprite'), [...names]);
     if (questionProbe) check('request tools include request_user_input', names.has('request_user_input'), [...names]);
     for (const banned of ['exec_command', 'write_stdin', 'view_image', 'web_search', 'namespace',
       'multi_agent', 'get_goal', 'create_goal', 'update_goal']) {

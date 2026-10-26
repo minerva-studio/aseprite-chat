@@ -18,11 +18,11 @@ try {
   assert.equal(descriptor.home,await realpath(home));
   assert.equal(descriptor.extensionRoot,await realpath(runtime));
   const listed=await client.listTools();
-  assert.deepEqual(listed.tools.map(tool=>tool.name),['read_sprite','read_pixels','switch_sprite','execute_lua','export_sprite']);
-  const offline=await client.callTool({name:'read_sprite',arguments:{}});
+  assert.deepEqual(listed.tools.map(tool=>tool.name),['list_sprites','view_sprite','inspect_sprite','read_pixels','switch_sprite','execute_lua','export_sprite']);
+  const offline=await client.callTool({name:'view_sprite',arguments:{}});
   assert.equal(offline.isError,true);
   assert.match(offline.content[0].text,/Open Aseprite MCP/);
-  console.log('PASS isolated packaged MCP runtime initializes and lists all five tools');
+  console.log('PASS isolated packaged MCP runtime initializes and lists all seven focused tools');
   const startup=await import(pathToFileURL(path.join(runtime,'scripts/start-chat.mjs')).href);
   assert.equal(typeof startup.startChat,'function');
   console.log('PASS isolated packaged Chat bootstrap imports its native resolver');

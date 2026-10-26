@@ -38,7 +38,7 @@ server.on('upgrade', (req, socket, head) => {
     pending.set(id, callback);
     send({ id, method: 'item/tool/call', params: { threadId: 'fixture-thread', turnId: active.id, callId: id, tool, arguments: args } });
   };
-  const readThenEdit = label => call('read_sprite', {}, response => {
+  const readThenEdit = label => call('view_sprite', {}, response => {
     if (!response.success) throw Error('read failed: ' + JSON.stringify(response));
     const metadata = JSON.parse(response.contentItems.find(x => x.type === 'inputText').text);
     const preview = response.contentItems.find(x => x.type === 'inputImage');

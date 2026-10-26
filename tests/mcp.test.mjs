@@ -77,9 +77,9 @@ test('hub authenticates endpoints, isolates IDs and returns native results', { t
   const b = await hub(t);
   const editor = await socket(t, b.descriptor.endpoint, { origin: b.descriptor.endpoint });
   const client = await socket(t, b.descriptor.clientEndpoint);
-  client.send({ type: 'call', id: 'request-1', tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 'request-1', tool: 'view_sprite', arguments: {} });
   const call = await editor.next('call');
-  assert.equal(call.tool, 'read_sprite');
+  assert.equal(call.tool, 'view_sprite');
   assert.match(call.clientId, /^[\da-f-]{36}$/);
   assert.notEqual(call.id, 'request-1');
   editor.send({ type: 'result', id: call.id, result: success('live sprite') });
@@ -100,7 +100,7 @@ test('busy never queues operations, cancellation waits for acknowledgement and c
   const editor = await socket(t, b.descriptor.endpoint);
   const a = await socket(t, b.descriptor.clientEndpoint);
   const c = await socket(t, b.descriptor.clientEndpoint);
-  a.send({ type: 'call', id: 'same', tool: 'read_sprite', arguments: {} });
+  a.send({ type: 'call', id: 'same', tool: 'view_sprite', arguments: {} });
   const first = await editor.next('call');
   c.send({ type: 'result', id: first.id, result: success('spoof') });
   c.send({ type: 'cancel', id: 'same' });
@@ -111,11 +111,11 @@ test('busy never queues operations, cancellation waits for acknowledgement and c
   assert.equal((await editor.next('cancel')).id, first.id);
   assert.equal((await a.next('result')).result.success, false);
   assert.equal(editor.messages.filter(m => m.type === 'cancel').length, 0);
-  c.send({ type: 'call', id: 'second', tool: 'read_sprite', arguments: {} });
+  c.send({ type: 'call', id: 'second', tool: 'view_sprite', arguments: {} });
   assert.match((await c.next('result')).result.contentItems[0].text, /busy/i);
   editor.send({ type: 'result', id: first.id, result: success('late') });
   await pause(30);
-  c.send({ type: 'call', id: 'third', tool: 'read_sprite', arguments: {} });
+  c.send({ type: 'call', id: 'third', tool: 'view_sprite', arguments: {} });
   const third = await editor.next('call');
   assert.notEqual(third.clientId, first.clientId);
   editor.send({ type: 'result', id: first.id, result: success('foreign late') });
@@ -130,18 +130,18 @@ test('client disconnect cancels and closes its native scope; editor disconnect p
   const editor = await socket(t, b.descriptor.endpoint);
   const a = await socket(t, b.descriptor.clientEndpoint);
   const c = await socket(t, b.descriptor.clientEndpoint);
-  a.send({ type: 'call', id: 'a', tool: 'read_sprite', arguments: {} });
+  a.send({ type: 'call', id: 'a', tool: 'view_sprite', arguments: {} });
   const call = await editor.next('call');
   a.ws.terminate();
   assert.equal((await editor.next('cancel')).id, call.id);
   assert.equal((await editor.next('client_closed')).clientId, call.clientId);
   editor.ws.terminate();
   await pause(30);
-  c.send({ type: 'call', id: 'offline', tool: 'read_sprite', arguments: {} });
+  c.send({ type: 'call', id: 'offline', tool: 'view_sprite', arguments: {} });
   assert.match((await c.next('result')).result.contentItems[0].text, /Open Aseprite MCP and connect/);
   const reconnected = await socket(t, b.descriptor.endpoint);
   assert.equal(reconnected.messages.length, 0);
-  c.send({ type: 'call', id: 'online', tool: 'read_sprite', arguments: {} });
+  c.send({ type: 'call', id: 'online', tool: 'view_sprite', arguments: {} });
   await reconnected.next('call');
   reconnected.ws.terminate();
   assert.equal((await c.next('result')).result.success, false);
@@ -152,7 +152,7 @@ test('timeout revokes editor and idle shutdown waits until all peers leave', { t
   const b = await hub(t, { activeTimeoutMs: 100, idleTimeoutMs: 100 });
   const editor = await socket(t, b.descriptor.endpoint);
   const client = await socket(t, b.descriptor.clientEndpoint);
-  client.send({ type: 'call', id: 'hung', tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 'hung', tool: 'view_sprite', arguments: {} });
   await editor.next('call');
   assert.match((await client.next('result')).result.contentItems[0].text, /timed out/i);
   await until(() => editor.ws.readyState === WebSocket.CLOSED);
@@ -166,14 +166,14 @@ test('malformed requests and native results fail safely without unblocking a for
   const b = await hub(t);
   const editor = await socket(t, b.descriptor.endpoint);
   const client = await socket(t, b.descriptor.clientEndpoint);
-  client.send({ type: 'call', id: 7, tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 7, tool: 'view_sprite', arguments: {} });
   assert.equal((await client.next('result')).result.success, false);
-  client.send({ type: 'call', id: 'spoof', clientId: 'chosen', tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 'spoof', clientId: 'chosen', tool: 'view_sprite', arguments: {} });
   assert.equal((await client.next('result')).result.success, false);
-  client.send({ type: 'call', id: 'good', tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 'good', tool: 'view_sprite', arguments: {} });
   const call = await editor.next('call');
   editor.send({ type: 'result', id: 'foreign', result: success('no') });
-  client.send({ type: 'call', id: 'busy', tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 'busy', tool: 'view_sprite', arguments: {} });
   assert.match((await client.next('result')).result.contentItems[0].text, /busy/i);
   editor.send({ type: 'result', id: call.id, result: { success: true, contentItems: 'bad' } });
   assert.match((await client.next('result')).result.contentItems[0].text, /malformed/i);
@@ -188,14 +188,16 @@ test('stdio SDK initializes offline and lists canonical tools with truthful anno
   const { tools } = await client.listTools();
   const canonical = JSON.parse(await readFile(path.join(root, 'tools.json'), 'utf8'));
   assert.deepEqual(tools.map(({ annotations, ...tool }) => tool), canonical.map(({ type, ...tool }) => tool));
-  assert.equal(tools.find(x => x.name === 'read_sprite').annotations.readOnlyHint, true);
+  assert.deepEqual(tools.map(tool => tool.name), ['list_sprites','view_sprite','inspect_sprite','read_pixels','switch_sprite','execute_lua','export_sprite']);
+  for (const name of ['list_sprites', 'inspect_sprite']) assert.equal(tools.find(x => x.name === name).annotations.readOnlyHint, true);
+  assert.equal(tools.find(x => x.name === 'view_sprite').annotations.readOnlyHint, true);
   assert.equal(tools.find(x => x.name === 'read_pixels').annotations.readOnlyHint, true);
   assert.deepEqual(tools.find(x => x.name === 'switch_sprite').annotations,
     { readOnlyHint: false, destructiveHint: false, openWorldHint: false });
   assert.equal(tools.find(x => x.name === 'export_sprite').annotations.readOnlyHint, false);
   assert.equal(tools.find(x => x.name === 'export_sprite').annotations.destructiveHint, false);
   assert.equal(tools.find(x => x.name === 'execute_lua').annotations.destructiveHint, true);
-  const result = await client.callTool({ name: 'read_sprite', arguments: {} });
+  const result = await client.callTool({ name: 'view_sprite', arguments: {} });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /Open Aseprite MCP and connect/);
 });
@@ -204,7 +206,7 @@ test('real stdio SDK maps text, PNG and failures and rejects unsafe image data U
   const b = await hub(t);
   const editor = await socket(t, b.descriptor.endpoint);
   const { client } = await sdk(t, b.descriptor.home);
-  const pending = client.callTool({ name: 'read_sprite', arguments: {} });
+  const pending = client.callTool({ name: 'view_sprite', arguments: {} });
   let call = await editor.next('call');
   editor.send({ type: 'result', id: call.id, result: { success: true, contentItems: [
     { type: 'inputText', text: '{"revision":2}' }, { type: 'inputImage', imageUrl: `data:image/png;base64,${png}` },
@@ -213,7 +215,7 @@ test('real stdio SDK maps text, PNG and failures and rejects unsafe image data U
     { type: 'text', text: '{"revision":2}' }, { type: 'image', data: png, mimeType: 'image/png' },
   ] });
   for (const imageUrl of ['https://foreign/image.png', 'data:image/png;base64,AAAA', 'data:image/svg+xml;base64,PHN2Zz4=', 'data:image/png;base64,%%%']) {
-    const p = client.callTool({ name: 'read_sprite', arguments: {} });
+    const p = client.callTool({ name: 'view_sprite', arguments: {} });
     call = await editor.next('call');
     editor.send({ type: 'result', id: call.id, result: { success: true,
       contentItems: [{ type: 'inputImage', imageUrl }] } });
@@ -231,7 +233,7 @@ test('SDK abort forwards native cancellation and stdio exit closes only its own 
   const editor = await socket(t, b.descriptor.endpoint);
   const { client } = await sdk(t, b.descriptor.home);
   const controller = new AbortController();
-  const pending = client.callTool({ name: 'read_sprite', arguments: {} }, undefined, { signal: controller.signal });
+  const pending = client.callTool({ name: 'view_sprite', arguments: {} }, undefined, { signal: controller.signal });
   const rejection = assert.rejects(pending, /abort|cancel/i);
   const call = await editor.next('call');
   controller.abort();
@@ -313,7 +315,7 @@ test('16 MiB websocket limit revokes an oversized native editor and fails its ac
   const b = await hub(t);
   const editor = await socket(t, b.descriptor.endpoint);
   const client = await socket(t, b.descriptor.clientEndpoint);
-  client.send({ type: 'call', id: 'large', tool: 'read_sprite', arguments: {} });
+  client.send({ type: 'call', id: 'large', tool: 'view_sprite', arguments: {} });
   const call = await editor.next('call');
   editor.send({ type: 'result', id: call.id, result: success('x'.repeat(16 * 1024 * 1024)) });
   assert.equal((await client.next('result')).result.success, false);
@@ -327,7 +329,7 @@ test('idle editor keeps hub alive; duplicate active ID retires only that client'
   await pause(150);
   await access(b.descriptorPath);
   const a = await socket(t, b.descriptor.clientEndpoint);
-  a.send({ type: 'call', id: 'duplicate', tool: 'read_sprite', arguments: {} });
+  a.send({ type: 'call', id: 'duplicate', tool: 'view_sprite', arguments: {} });
   const call = await editor.next('call');
   a.send({ type: 'call', id: 'duplicate', tool: 'foreign', arguments: null, clientId: 'spoof' });
   assert.equal((await editor.next('cancel')).id, call.id);
@@ -370,14 +372,14 @@ test('stdio first initialization bootstraps daemon; two SDK clients retain indep
     try { process.kill(descriptor.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
     await until(() => { try { process.kill(descriptor.pid, 0); return false; } catch { return true; } });
   });
-  assert.equal((await first.client.listTools()).tools.length, 5);
+  assert.equal((await first.client.listTools()).tools.length, 7);
   const editor = await socket(t, descriptor.endpoint);
   const second = await sdk(t, dir);
-  const one = first.client.callTool({ name: 'read_sprite', arguments: {} });
+  const one = first.client.callTool({ name: 'view_sprite', arguments: {} });
   const a = await editor.next('call');
   editor.send({ type: 'result', id: a.id, result: success('first') });
   assert.equal((await one).content[0].text, 'first');
-  const two = second.client.callTool({ name: 'read_sprite', arguments: {} });
+  const two = second.client.callTool({ name: 'view_sprite', arguments: {} });
   const b = await editor.next('call');
   assert.notEqual(a.clientId, b.clientId);
   editor.send({ type: 'result', id: b.id, result: success('second') });

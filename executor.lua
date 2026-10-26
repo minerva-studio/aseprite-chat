@@ -11,6 +11,18 @@ local function result(ok, value)
   return { success = ok, contentItems = { { type = "inputText", text = value } } }
 end
 
+local function failure(value)
+  return result(false, type(value) == "table" and json.encode(value) or tostring(value))
+end
+
+local function document_error(code, message)
+  error({ error = { code = code, message = message } }, 0)
+end
+
+local function empty_editor()
+  document_error("NO_OPEN_SPRITE", "当前没有打开的精灵，请先在 Aseprite 中打开或创建文档。")
+end
+
 local function integer(value)
   return type(value) == "number" and value % 1 == 0 and value >= 0
 end
@@ -277,7 +289,7 @@ local function array_of(value, name)
   return out
 end
 
--- Frame selection precedence: frames array > tag name > legacy frame > the bound frame.
+-- Frame selection precedence: frames array > tag name > frame > the bound frame.
 local function frames_for(args, sprite, fallback)
   local count = #sprite.frames
   if args.frames ~= nil then
@@ -505,26 +517,149 @@ end
 -- with it any open sprite qualifies, and only the bound target reports a revision.
 function Executor:_sprite_for(args)
   if args.spriteId == nil then
+    if #app.sprites == 0 then empty_editor() end
     local sprite = self.sprite
-    assert(sprite and sprite.isValid, "The target is closed or unbound; inspect again.")
+    assert(sprite and sprite.isValid, "编辑目标已关闭或尚未绑定，请使用 list_sprites 和 switch_sprite 选择目标。")
     return sprite, true
   end
-  assert(integer(args.spriteId) and args.spriteId >= 1, "spriteId must be a positive integer.")
+  assert(integer(args.spriteId) and args.spriteId >= 1, "spriteId 必须是正整数。")
   local sprite = open_sprite(args.spriteId)
-  assert(sprite, "Sprite is not open; use openSprites.")
+  if not sprite then document_error("SPRITE_NOT_OPEN", "指定的精灵未打开，请使用 list_sprites 查询文档。") end
   return sprite, self.sprite ~= nil and sprite == self.sprite and sprite.isValid
 end
 
---- Return live metadata and independent RGB PNG previews; never saves or flattens the source document.
-function Executor:read(args)
+local function paging(args)
+  local offset = args.offset == nil and 0 or args.offset
+  local limit = args.limit == nil and 64 or args.limit
+  assert(integer(offset), "offset 必须是非负整数。")
+  assert(integer(limit) and limit >= 1 and limit <= 256, "limit 必须是 1 到 256 之间的整数。")
+  return offset, limit
+end
+
+-- Empty Lua tables encode as arrays; nested native JSON userdata would encode as null.
+local function page(items, offset, limit)
+  local out = {}
+  for i = offset + 1, math.min(#items, offset + limit) do out[#out + 1] = items[i] end
+  return { items = out, total = #items, offset = offset,
+    nextOffset = offset + #out < #items and offset + #out or nil }
+end
+
+--- Discover open documents without requiring a binding or observing document pixels.
+--- Pagination is zero-based, defaults to 64 items, and accepts at most 256 items.
+function Executor:list(args)
   local ok, value = pcall(function()
-    assert(args == nil or arguments_object(args), "read_sprite arguments must be an object.")
+    assert(args == nil or arguments_object(args), "list_sprites 参数必须是对象。")
+    args = args or {}
+    local offset, limit = paging(args)
+    local items = open_sprites(nil)
+    for _, item in ipairs(items) do item.isTarget = nil end
+    return result(true, json.encode { sprites = page(items, offset, limit),
+      activeSpriteId = app.sprite and app.sprite.id or nil,
+      targetSpriteId = self.sprite and self.sprite.isValid and self.sprite.id or nil })
+  end)
+  return ok and value or failure(value)
+end
+
+--- Query a compact overview and only the requested structural sections.
+--- Layer groups include descendants; cels default to the bound frame (reference sprites use frame 1).
+--- frame reports the captured current frame; queryFrame reports the frame used for cels and palette queries.
+--- Collections share zero-based paging; paletteFrame identifies the effective palette's source frame.
+function Executor:inspect(args)
+  local ok, value = pcall(function()
+    assert(args == nil or arguments_object(args), "inspect_sprite 参数必须是对象。")
+    args = args or {}
+    local sprite, target = self:_sprite_for(args)
+    local offset, limit = paging(args)
+    local frame = args.frame == nil and (target and self.frame.frameNumber or 1) or args.frame
+    assert(integer(frame) and frame >= 1 and frame <= #sprite.frames, "frame 必须是文档内从 1 开始的帧号。")
+    local sections, allowed = {}, {layers=true,frames=true,tags=true,slices=true,cels=true,palette=true,selection=true}
+    if args.sections ~= nil then
+      for _, section in ipairs(array_of(args.sections,"sections")) do
+        assert(allowed[section], "未知的 inspect_sprite 数据分区：" .. tostring(section))
+        sections[section] = true
+      end
+    end
+    local wanted
+    if args.layers ~= nil then
+      wanted = {}
+      for _, id in ipairs(array_of(args.layers,"layers")) do
+        assert(integer(id) and id >= 1 and find_layer(sprite.layers,id), "layers 必须包含有效的原生图层 ID。")
+        wanted[id] = true
+      end
+      assert(next(wanted), "layers 不能为空。")
+    end
+    local metadata = target and self:metadata() or self:_observe(sprite,false)
+    local layers, selected, layer_count = {}, {}, 0
+    local function flatten(records, parent, inherited)
+      for _, record in ipairs(records) do
+        layer_count = layer_count + 1
+        local include = not wanted or inherited or wanted[record.id]
+        if include then
+          local item = {}
+          for key, value in pairs(record) do if key ~= "children" then item[key] = value end end
+          item.parentId = parent
+          layers[#layers + 1] = item
+          selected[record.id] = true
+        end
+        if record.children then flatten(record.children,record.id,include) end
+      end
+    end
+    flatten(metadata.layers,nil,false)
+    local effective
+    local palettes = sprite.palettes
+    for i = 1, #palettes do
+      local palette = palettes[i]
+      if palette.frame.frameNumber <= frame and
+          (not effective or palette.frame.frameNumber > effective.frame.frameNumber) then effective = palette end
+    end
+    local data = {spriteId=sprite.id,target=target,revision=target and metadata.revision or nil,
+      filename=metadata.filename,width=metadata.width,height=metadata.height,colorMode=metadata.colorMode,
+      frame=metadata.frame,queryFrame=frame,activeLayer=metadata.activeLayer,isModified=metadata.isModified,
+      hasAssociatedFile=metadata.hasAssociatedFile,
+      counts={layers=layer_count,frames=#sprite.frames,tags=#metadata.tags,slices=#metadata.slices,
+        cels=#sprite.cels,palette=effective and #effective or 0}}
+    if sections.layers then data.layers = page(layers,offset,limit) end
+    for _, name in ipairs {"frames","tags","slices"} do
+      if sections[name] then data[name] = page(metadata[name],offset,limit) end
+    end
+    if sections.cels then
+      local cels = {}
+      for _, cel in ipairs(sprite.cels) do
+        if cel.frameNumber == frame and selected[cel.layer.id] then
+          cels[#cels + 1] = {layer=cel.layer.id,frame=cel.frameNumber,x=cel.position.x,y=cel.position.y,
+            width=cel.image.width,height=cel.image.height,opacity=cel.opacity}
+        end
+      end
+      data.cels = page(cels,offset,limit)
+    end
+    if sections.palette then
+      -- Read only the requested entries, preserving their actual zero-based native indices.
+      local total, colors = effective and #effective or 0, {}
+      for i = offset, math.min(total,offset + limit) - 1 do
+        local color = effective:getColor(i)
+        colors[#colors + 1] = {index=i,rgba=string.format("#%02x%02x%02x%02x",color.red,color.green,color.blue,color.alpha)}
+      end
+      data.palette = {items=colors,total=total,offset=offset,
+        nextOffset=offset + #colors < total and offset + #colors or nil}
+      data.paletteFrame = effective and effective.frame.frameNumber or nil
+    end
+    if sections.selection then data.selection = metadata.selection end
+    return result(true,json.encode(data))
+  end)
+  return ok and value or failure(value)
+end
+
+--- Return sparse selection metadata and RGB PNG sheets without modifying the source document.
+--- Frames retain explicit order/duplicates; region is clipped; reference views never rebind the target.
+function Executor:view(args)
+  local ok, value = pcall(function()
+    assert(args == nil or arguments_object(args), "view_sprite 参数必须是对象。")
     args = args or {}
     local selection = selection_for(self,args)
     local sprite, target, frames = selection.sprite, selection.target, selection.frames
-    local data = target and self:metadata() or self:_observe(sprite, false)
-    data.target = target
-    data.openSprites = open_sprites(self.sprite)
+    local metadata = target and self:metadata() or nil
+    local data = {spriteId=sprite.id,target=target,revision=target and metadata.revision or nil,
+      region=selection.region or {x=0,y=0,width=sprite.width,height=sprite.height}}
     if args.grid ~= nil then
       assert(integer(args.grid) and args.grid >= 1, "grid must be a positive integer.")
     end
@@ -538,17 +673,6 @@ function Executor:read(args)
       end
     end
     local sheets, layout = pack_sheets(renders, frames)
-    local seen = {}
-    for _, frame in ipairs(frames) do seen[frame] = true end
-    data.cels = {}
-    for _, cel in ipairs(sprite.cels) do
-      if seen[cel.frameNumber] then
-        data.cels[#data.cels + 1] = { layer = cel.layer.id, frame = cel.frameNumber,
-          x = cel.position.x, y = cel.position.y,
-          width = cel.image.width, height = cel.image.height, opacity = cel.opacity }
-      end
-    end
-    data.frame = frames[1]
     data.selectedFrames = frames
     data.scale = scale
     data.layout = layout
@@ -560,7 +684,7 @@ function Executor:read(args)
     end
     return response
   end)
-  return ok and value or result(false, tostring(value))
+  return ok and value or failure(value)
 end
 
 --- Encode selected live frames into owned artifacts. The controller owns conversation cleanup;
@@ -613,10 +737,10 @@ function Executor:export(args)
     data.spriteId, data.target = sprite.id, selection.target
     data.selectedFrames, data.scale, data.region = selection.frames, scale, region
     if selection.target then data.revision = self:metadata().revision end
-    data.lifetime = "Until changing chats/accounts or closing the chat window. Copy using Codex file tools under current Access."
+    data.lifetime = "Until changing chats/accounts or closing the chat window; MCP artifacts expire when the client disconnects or native control ends. Copy using the client's authorized file capability."
     return result(true,json.encode(data))
   end)
-  return ok and value or result(false,tostring(value))
+  return ok and value or failure(value)
 end
 
 --- Read exact pixel values without approval or revision; see Executor.tools for the contract.
@@ -678,22 +802,24 @@ function Executor:read_pixels(args)
     return result(true, json.encode { spriteId = sprite.id, frame = frame, layer = args.layer,
       x = x, y = y, width = w, height = h, format = format, rows = rows })
   end)
-  return ok and value or result(false, tostring(value))
+  return ok and value or failure(value)
 end
 
---- Activate another open sprite and rebind the executor to it, returning fresh metadata.
+--- Activate and rebind an open sprite, returning only identity, native context, and the fresh revision.
 function Executor:switch(args)
   local ok, value = pcall(function()
     assert(arguments_object(args), "switch_sprite arguments must be an object.")
     local id = args.spriteId
-    assert(integer(id) and id >= 1, "spriteId must be a positive integer.")
+    assert(integer(id) and id >= 1, "spriteId 必须是正整数。")
+    if #app.sprites == 0 then empty_editor() end
     local sprite = open_sprite(id)
-    assert(sprite, "Sprite is not open; use openSprites.")
+    if not sprite then document_error("SPRITE_NOT_OPEN", "指定的精灵未打开，请使用 list_sprites 查询文档。") end
     if app.sprite ~= sprite then app.sprite = sprite end
-    self:bind(sprite, app.frame, app.layer)
-    return result(true, json.encode(self:metadata()))
+    local captured = self:bind(sprite, app.frame, app.layer)
+    return result(true, json.encode {spriteId=captured.spriteId,target=true,
+      frame=captured.frame,activeLayer=captured.activeLayer,revision=captured.revision})
   end)
-  return ok and value or result(false, tostring(value))
+  return ok and value or failure(value)
 end
 
 --- Reobserve immediately before approval/execution and reject stale or changed native context.
@@ -711,6 +837,9 @@ end
 
 --- Execute already-approved trusted Lua. The caller must first validate the active protocol turn and user approval.
 function Executor:execute(args)
+  if #app.sprites == 0 then
+    return failure({error={code="NO_OPEN_SPRITE",message="当前没有打开的精灵，请先在 Aseprite 中打开或创建文档。"}})
+  end
   if not arguments_object(args) or type(args.code) ~= "string" or not args.code:find("%S")
       or type(args.summary) ~= "string" or not args.summary:find("%S") or not integer(args.expectedRevision) then
     return result(false, "execute_lua requires code, summary, and an integer expectedRevision. Inspect again.")

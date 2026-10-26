@@ -599,7 +599,7 @@ test("tool and summary cards collapse details, preserve expansion on updates and
   gc.height=600
   local canvas=dialogs[1].widgets.transcript
   local visible={}; function gc:fillText(text) visible[#visible+1]=text end
-  view:add_message("tool","Tool",'read_sprite · Running\nResult:\n{"secretDetail":123}',false)
+  view:add_message("tool","Tool",'view_sprite · Running\nResult:\n{"secretDetail":123}',false)
   view:add_message("reason","Summary","Detailed reasoning summary",false)
   canvas.onpaint {context=gc}
   assert(not table.concat(visible):find("secretDetail",1,true) and not table.concat(visible):find("Detailed reasoning",1,true), "activity floods the default transcript")
@@ -607,7 +607,7 @@ test("tool and summary cards collapse details, preserve expansion on updates and
   canvas.onmousedown {button=MouseButton.LEFT,x=20,y=card.top-view.scroll.offset+6}
   visible={}; canvas.onpaint {context=gc}
   assert(table.concat(visible):find("secretDetail",1,true), "tool details did not expand")
-  view:add_message("tool","Tool",'read_sprite · Succeeded\nResult:\n{"secretDetail":456}',false)
+  view:add_message("tool","Tool",'view_sprite · Succeeded\nResult:\n{"secretDetail":456}',false)
   visible={}; canvas.onpaint {context=gc}
   assert(table.concat(visible):find("456",1,true), "stream update reset expansion")
   canvas.onkeydown {code="Enter",stopPropagation=function() end}
@@ -815,7 +815,7 @@ test("collapsed tools use one compact line and history uses two dense nonoverlap
   end})
   function gc:measureText(text) return {width=utf8.len(text)*6,height=text:find("魔",1,true) and 22 or 10} end
   gc.height=300
-  view:add_message("tool","Tool","read_sprite · Succeeded\nResult:\nLong JSON",false)
+  view:add_message("tool","Tool","view_sprite · Succeeded\nResult:\nLong JSON",false)
   dialogs[1].widgets.transcript.onpaint {context=gc}
   assert(view.scroll.cards[1].height<=22, "collapsed tool has a large empty card")
   view:set_state("ready"); view:show_history()

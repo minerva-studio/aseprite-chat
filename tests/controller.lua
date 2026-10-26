@@ -53,7 +53,7 @@ local function scenario(name, body, configuration)
       function executor:metadata() return { revision = self.revision } end
       function executor:check(rev) return rev == self.revision, "stale revision" end
       function executor:execute() executed = executed + 1; return { success = true, contentItems = {} } end
-      function executor:read() return { success = true, contentItems = {} } end
+      function executor:view() return { success = true, contentItems = {} } end
       function executor:read_pixels() return { success = true, contentItems = {} } end
       function executor:switch() return { success = true, contentItems = {} } end
       function executor:dispose() end
@@ -148,7 +148,7 @@ scenario("steering remains available after closing the canvas and disposes the c
   p.turn_id="turn"; app.sprite:close(); assert(not app.sprite)
   local disposed=false; function e:dispose() disposed=true end
   assert(c:send("Do not edit; explain the result"))
-  assert(disposed and p.steered_context=="No open sprite. Canvas tools are unavailable.")
+  assert(disposed and json.decode(p.steered_context).hasSprite==false)
 end)
 scenario("stop invalidates pending and late approval", function(c, p, e, v, request, result)
   request(); local decide = v.decision; c:stop(); decide(true)
@@ -333,10 +333,36 @@ scenario("closing and reopening starts a fresh client session", function(c, p, e
   assert(c.client ~= p and #v.messages == 0)
 end)
 scenario("sending serializes the captured bind snapshot without a second full document scan",function(c,p,e)
-  function e:bind(sprite,frame,layer) return {revision=123,spriteId=sprite.id} end
+  function e:bind(sprite,frame,layer) return {revision=123,spriteId=sprite.id,frame=1,activeLayer=layer.id,
+    palette={"#ff0000ff"},layers={{id=layer.id}},frames={{number=1}},openSprites={{spriteId=sprite.id}}} end
   function e:metadata() error("duplicate full document scan") end
   assert(c:send("inspect"),"send discarded bind's already captured snapshot")
-  assert(json.decode(p.sent_context).revision==123)
+  local context=json.decode(p.sent_context)
+  assert(context.revision==123 and context.hasSprite and context.frame==1 and context.layerId==app.layer.id)
+  assert(not context.palette and not context.layers and not context.frames and not context.openSprites)
+end,{skip_send=true})
+scenario("ordinary chat remains usable with no open sprite and retires the old target",function(c,p,e)
+  app.sprite:close(); assert(not app.sprite)
+  local disposed=false; function e:dispose() disposed=true end
+  assert(c:send("Explain how layers work"))
+  assert(disposed and json.decode(p.sent_context).hasSprite==false)
+end,{skip_send=true})
+scenario("focused tools dispatch without edit approval",function(c,p,e,v)
+  local replies={}
+  for tool,method in pairs {list_sprites="list",view_sprite="view",inspect_sprite="inspect"} do
+    e[method]=function(_,args) return {success=true,contentItems={{type="inputText",text=tool}}} end
+    p.options.on_tool({threadId="thread",turnId="turn",callId=tool,tool=tool,arguments={}},
+      function(reply) replies[tool]=reply end)
+    assert(replies[tool] and replies[tool].success and replies[tool].contentItems[1].text==tool)
+  end
+  assert(not v.decision)
+end)
+scenario("empty chat refuses canvas execution with a document error before approval",function(c,p,e,v,request,result)
+  app.sprite:close(); assert(c:send("hello"))
+  request()
+  local count,replies=result()
+  assert(count==0 and #replies==1 and not replies[1].success and not v.decision)
+  assert(json.decode(replies[1].contentItems[1].text).error.code=="NO_OPEN_SPRITE")
 end,{skip_send=true})
 scenario("approval-time observation failure is returned once and displayed", function(c, p, e, v, request, result)
   request()

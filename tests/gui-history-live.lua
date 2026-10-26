@@ -41,7 +41,7 @@ timer=Timer {interval=0.1,ontick=function()
       if restoring then phase="first"; return end
       assert(controller:select_settings("gpt-6.1-sol","medium"))
       assert(not controller.auto_approve); assert(controller:set_approval_mode(true))
-      assert(controller:send("Remember the word opal. Use read_sprite to inspect this unsaved 8x8 sprite. Then use execute_lua to set pixel (1,1) in sprite.cels[1] to RGBA(0,255,0,255), cloning its image and assigning the clone back. Do not save or open documents. After success, reply with opal and a short confirmation."))
+      assert(controller:send("Remember the word opal. Use view_sprite to inspect this unsaved 8x8 sprite. Then use execute_lua to set pixel (1,1) in sprite.cels[1] to RGBA(0,255,0,255), cloning its image and assigning the clone back. Do not save or open documents. After success, reply with opal and a short confirmation."))
       phase="first"
     elseif phase=="first" then
       if not restoring then
@@ -68,7 +68,7 @@ timer=Timer {interval=0.1,ontick=function()
       for _,message in ipairs(controller.view.messages) do if message.role=="Tool" then historical_tools=historical_tools+1 end end
       assert(historical_tools>=2,"restored history omitted tool activity")
       assert(controller:select_settings("gpt-6.1-sol","low"))
-      assert(controller:send("What word did I ask you to remember? Call read_sprite to inspect the current sprite without editing it, then reply with that word only."))
+      assert(controller:send("What word did I ask you to remember? Call view_sprite to inspect the current sprite without editing it, then reply with that word only."))
       phase="second"
     elseif phase=="second" then
       local reply

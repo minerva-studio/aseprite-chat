@@ -34,6 +34,9 @@ function Timeline.tool(tool,args,status,result)
   if args.frames then labels[#labels+1]="frames="..listed(args.frames) end
   if args.layers then labels[#labels+1]="layers="..listed(args.layers) end
   if args.layer then labels[#labels+1]="layer="..tostring(args.layer) end
+  if args.sections then labels[#labels+1]="sections="..listed(args.sections) end
+  if args.offset~=nil then labels[#labels+1]="offset="..tostring(args.offset) end
+  if args.limit~=nil then labels[#labels+1]="limit="..tostring(args.limit) end
   if args.region then labels[#labels+1]=rect("region=",args.region) end
   if args.grid then labels[#labels+1]="grid="..tostring(args.grid) end
   if tool=="export_sprite" then

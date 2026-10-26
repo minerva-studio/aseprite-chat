@@ -37,7 +37,7 @@ export async function createMcpServer({ home, extensionRoot: root = extensionRoo
   const descriptor = await ensureBridge({ home, extensionRoot: root });
   const definitions = JSON.parse(await readFile(path.join(root, 'tools.json'), 'utf8'));
   const tools = definitions.map(({ name, description, inputSchema }) => ({ name, description, inputSchema,
-    annotations: { readOnlyHint: name === 'read_sprite' || name === 'read_pixels',
+    annotations: { readOnlyHint: ['list_sprites', 'view_sprite', 'inspect_sprite', 'read_pixels'].includes(name),
       destructiveHint: name === 'execute_lua', openWorldHint: false } }));
   const names = new Set(tools.map(tool => tool.name));
   const pending = new Map();
@@ -51,8 +51,10 @@ export async function createMcpServer({ home, extensionRoot: root = extensionRoo
   let closed = false;
   const server = new Server({ name: 'aseprite_chat', version: '1.0.0' }, {
     capabilities: { tools: {} },
-    instructions: 'Control the live Aseprite editor. Open Aseprite MCP and connect before calling tools. '
-      + 'Inspect the live sprite before editing; execute_lua requires its expectedRevision and native user approval. '
+    instructions: 'Control the live Aseprite editor from any MCP client. Open Aseprite MCP and connect before calling tools. '
+      + 'Use list_sprites for discovery, view_sprite for rendered images, and inspect_sprite for requested structural sections. '
+      + 'No open sprite is a normal state: listing returns empty; document operations report NO_OPEN_SPRITE. '
+      + 'Inspect the live target before editing; execute_lua requires its expectedRevision and native user approval. '
       + 'Each client has its own editing target and observations. A busy operation is never queued or replayed. '
       + 'Export paths refer to temporary native files; copy them with your own authorized file tools.',
   });

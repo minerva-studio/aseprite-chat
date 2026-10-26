@@ -52,11 +52,22 @@ test('SDK stdio tools control a persistent native Aseprite document with PNG GIF
     args:[path.join(root,'scripts/mcp-server.mjs'),'--home',home],stderr:'pipe'});
   const client=new Client({name:'native-acceptance',version:'1.0.0'});
   t.after(()=>client.close()); await client.connect(transport);
-  const catalog=await client.listTools(); assert.equal(catalog.tools.length,5);
-  const read=await client.callTool({name:'read_sprite',arguments:{}});
+  const catalog=await client.listTools(); assert.equal(catalog.tools.length,7);
+  const listed=await client.callTool({name:'list_sprites',arguments:{}});
+  assert.equal(listed.isError,false);
+  const sprites=JSON.parse(listed.content[0].text).sprites;
+  assert.equal(sprites.items.length,1);
+  const inspected=await client.callTool({name:'inspect_sprite',arguments:{sections:['layers']}});
+  assert.equal(inspected.isError,false);
+  const structure=JSON.parse(inspected.content[0].text);
+  assert.equal(structure.layers.items.length,1);
+  assert.equal(structure.palette,undefined);
+  const read=await client.callTool({name:'view_sprite',arguments:{}});
   assert.equal(read.isError,false); assert.equal(read.content[1].type,'image');
   assert.equal(read.content[1].mimeType,'image/png');
   const metadata=JSON.parse(read.content[0].text);
+  assert.equal(metadata.palette,undefined); assert.equal(metadata.layers,undefined);
+  assert.equal(metadata.frames,undefined); assert.equal(metadata.openSprites,undefined);
   const edit=await client.callTool({name:'execute_lua',arguments:{summary:'Native fixture rename',
     code:"sprite.layers[1].name='MCP Native'; return sprite.layers[1].name",expectedRevision:metadata.revision}});
   assert.equal(edit.isError,false); assert.equal(JSON.parse(edit.content[0].text).result,'MCP Native');

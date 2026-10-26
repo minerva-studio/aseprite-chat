@@ -15,18 +15,18 @@ local green = app.pixelColor.rgba(0, 255, 0, 255)
 local steps = mode == "fixture" and { "accept", "reject", "stale", "stop", "stream-stop", "break", "post-reconnect" }
   or { "live-first", "live-second", "live-reconnect" }
 local prompts = {
-  ["live-first"] = "Remember the word cobalt. Call read_sprite to inspect my unsaved sprite. Tell me the color at the top left using the image. Then call execute_lua to set pixel (1,1) in sprite.cels[1] to RGBA(0,255,0,255), cloning the image and assigning the clone. Do not save the document. After the tool succeeds reply with cobalt and a short confirmation.",
-  ["live-second"] = "What word did I ask you to remember? Reply with it. Call read_sprite again and use execute_lua to set pixel (1,1) green (0,255,0,255) using clone and assignment again. I undid your previous edit.",
-  ["live-reconnect"] = "After reconnecting, recall the remembered word, then call read_sprite and execute_lua to set pixel (1,1) green (0,255,0,255) using clone/assignment. Do not save."
+  ["live-first"] = "Remember the word cobalt. Call view_sprite to inspect my unsaved sprite. Tell me the color at the top left using the image. Then call execute_lua to set pixel (1,1) in sprite.cels[1] to RGBA(0,255,0,255), cloning the image and assigning the clone. Do not save the document. After the tool succeeds reply with cobalt and a short confirmation.",
+  ["live-second"] = "What word did I ask you to remember? Reply with it. Call view_sprite again and use execute_lua to set pixel (1,1) green (0,255,0,255) using clone and assignment again. I undid your previous edit.",
+  ["live-reconnect"] = "After reconnecting, recall the remembered word, then call view_sprite and execute_lua to set pixel (1,1) green (0,255,0,255) using clone/assignment. Do not save."
 }
 local index, phase, began, thread = 1, "ready", os.time(), nil
 local approvals, reads, stream_items = 0, 0, {}
 local needs_undo = false
 local timer
-local read_original = c.executor.read
-function c.executor:read(args)
+local view_original = c.executor.view
+function c.executor:view(args)
   reads = reads + 1
-  return read_original(self, args)
+  return view_original(self, args)
 end
 local function finish(ok, reason)
   timer:stop()

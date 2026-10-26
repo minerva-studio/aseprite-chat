@@ -4,13 +4,16 @@ Controller.__index = Controller
 
 local instructions = [[You are an artist working inside the user's running Aseprite editor.
 Reply concisely in plain text, in the user's language. Do not use Markdown or code fences.
-Use read_sprite to inspect the live unsaved document before every edit; it returns the current revision and rendered previews (frame/frames/tag/layers/region/grid options).
+Use list_sprites to discover open documents; an empty list is a normal editor state, not a connection failure.
+Use view_sprite to see rendered PNG previews (frame/frames/tag/layers/region/grid options).
+Use inspect_sprite for document structure; its default overview is compact. Request only the sections needed, and use each collection's nextOffset to read more.
+Both view_sprite and inspect_sprite return a revision for the editing target. Inspect the live target before editing and pass its expectedRevision.
 Use read_pixels for exact pixel values of a small region; do not spend an execute_lua approval on reads.
 Use export_sprite for PNG frames, animated GIF or PNG spritesheets with optional JSON; never reconstruct image files from read_pixels.
 Exports encode the live unsaved selection at native resolution (scale=1 by default) without saving or modifying the source.
-Export paths are temporary artifacts, not user destination files. Copy them using Codex shell/file tools under current Access and approvals; Canvas only cannot copy to a project destination.
+Export paths are temporary artifacts, not user destination files. Copy them using available file tools under current Access and approvals; Canvas only cannot copy to a project destination.
 Export files survive turn completion and reconnect but are deleted when switching chats/accounts or closing the chat window. Historical paths may be gone; inspect and export again when needed.
-The metadata's openSprites lists every open document; other sprites are read-only references.
+list_sprites lists every open document; other sprites are read-only references until switched to.
 Use switch_sprite with a spriteId to move the editing target to another open sprite; edits apply only to the current target.
 File and project work follows the current Access setting below and Codex's permission approvals.
 Use available shell/file tools for the user's requested project work when Access permits it; never write directly to a file that is currently open in Aseprite.
@@ -24,7 +27,8 @@ The client controls edit approval: each execute_lua call is either approved indi
 Treat rejection as a decision, not an invitation to retry the same edit.
 Use request_user_input to ask the user when an unresolved choice materially affects the requested result.
 Use ordinary, non-secret questions with clear options or free text; never ask for passwords or API keys.
-Each prompt includes the current target sprite/frame/layer context. Conversation history may concern a different target.
+Each prompt includes only current target sprite/frame/layer identity, revision and hasSprite. Query tools for details; conversation history may concern a different target.
+With hasSprite=false, ordinary conversation remains available. Document tools report NO_OPEN_SPRITE until a document is opened.
 ]]
 
 local function failure(text)
@@ -98,28 +102,18 @@ function Controller:_tool(params, reply)
     return delivered
   end
   self.view:add_message(id,"Tool",self.Timeline.tool(params.tool,args,"Running"),false)
-  if params.tool == "read_sprite" then
-    local ok, result = pcall(self.executor.read, self.executor, args)
-    respond(ok and result or failure(result))
-    return
-  end
-  if params.tool == "read_pixels" then
-    local ok, result = pcall(self.executor.read_pixels, self.executor, args)
-    respond(ok and result or failure(result))
-    return
-  end
-  if params.tool == "export_sprite" then
-    local ok, result = pcall(self.executor.export, self.executor, args)
-    respond(ok and result or failure(result))
-    return
-  end
-  if params.tool == "switch_sprite" then
-    if self.pending then respond(failure("Another Lua request is awaiting approval.")); return end
-    local ok, result = pcall(self.executor.switch, self.executor, args)
+  local method=({list_sprites="list",view_sprite="view",inspect_sprite="inspect",
+    read_pixels="read_pixels",export_sprite="export",switch_sprite="switch"})[params.tool]
+  if method then
+    if method=="switch" and self.pending then respond(failure("Another Lua request is awaiting approval.")); return end
+    local ok, result = pcall(self.executor[method], self.executor, args)
     respond(ok and result or failure(result))
     return
   end
   if params.tool ~= "execute_lua" then respond(failure("Unknown Aseprite tool.")); return end
+  if not app.sprite then
+    respond(failure(json.encode{error={code="NO_OPEN_SPRITE",message="请先打开一个 Aseprite 文档。"}})); return
+  end
   if not args or type(args.code) ~= "string" or type(args.summary) ~= "string"
       or type(args.expectedRevision) ~= "number" or args.expectedRevision % 1 ~= 0 then
     respond(failure("execute_lua requires code, summary, and an integer expectedRevision.")); return
@@ -479,11 +473,12 @@ function Controller:send(text)
   if steering and not self.client:can_steer() then self:_message("Aseprite","Wait for the active turn before steering."); return false end
   local valid, why = valid_settings(self.models, self.preferences.model, self.preferences.effort,self.preferences.service_tier)
   if not valid then self:_message("Aseprite", why); return false end
-  if not app.sprite and not steering then self:_message("Aseprite", "Open a sprite before sending a message."); return false end
   if steering then self:_cancel_pending("Superseded by your steering instruction.") end
   local ok, context = pcall(function()
-    if not app.sprite then self.executor:dispose(); return "No open sprite. Canvas tools are unavailable." end
-    return json.encode(self.executor:bind(app.sprite, app.frame, app.layer))
+    if not app.sprite then self.executor:dispose(); return json.encode{hasSprite=false} end
+    local captured=self.executor:bind(app.sprite, app.frame, app.layer)
+    return json.encode{hasSprite=true,spriteId=captured.spriteId,frame=captured.frame,
+      layerId=captured.activeLayer,revision=captured.revision}
   end)
   if not ok then self:_message("Error", context); return false end
   local sent, err

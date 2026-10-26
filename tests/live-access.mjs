@@ -225,7 +225,7 @@ try {
     }
     const names = new Set(report.requests.at(-1)?.toolNames ?? []);
     check(`${level}: exec_command + view_image offered`, names.has('exec_command') && names.has('view_image'), [...names]);
-    for (const banned of ['read_sprite', 'web_search']) check(`${level}: ${banned} absent`, !names.has(banned), [...names]);
+    for (const banned of ['view_sprite', 'web_search']) check(`${level}: ${banned} absent`, !names.has(banned), [...names]);
   }
   check('write outside workspace denies under workspace level',
     seen.workspace.writes[`w-workspace.txt@outside`] !== true, seen.workspace.writes);

@@ -24,7 +24,7 @@ view=Chat.new({
   on_list_threads=function(_,_,callback)
     local entries={}
     for i=1,30 do entries[i]={id="native-"..i,name=i==1 and "魔法书 · 调整封面高光" or "Canvas conversation "..i,
-      preview=i==1 and "Remember the word opal. Use read_sprite to inspect this unsaved 8x8 canvas." or "Inspect layers and refine the current sprite.",updatedAt=os.time()-i*3600,status=i==2 and "active" or "idle"} end
+      preview=i==1 and "Remember the word opal. Use view_sprite to inspect this unsaved 8x8 canvas." or "Inspect layers and refine the current sprite.",updatedAt=os.time()-i*3600,status=i==2 and "active" or "idle"} end
     callback({data=entries}); return true
   end,
   on_open_thread=function(id) opened=id; return true end,
@@ -39,11 +39,11 @@ view:set_thread("fixture-thread",nil)
 view:set_state("ready")
 view.scroll.follow=false
 view:add_message("user","You","检查这张画布，帮我调整封面的高光。",false)
-view:add_message("tool","Tool",'read_sprite · Succeeded\nResult:\n{"width":32,"height":32,"layers":10,"revision":42}',false)
+view:add_message("tool","Tool",'view_sprite · Succeeded\nResult:\n{"width":32,"height":32,"layers":10,"revision":42}',false)
 view:add_message("summary","Summary","先检查图层和当前像素，再决定修改范围。",false)
 view:add_message("edit","Tool","execute_lua · Succeeded\nLua:\nlocal image = sprite.cels[1].image:clone()\n-- Fixture display only; never executed",false)
 view:add_message("answer","Codex","opal。已将 (1,1) 设为不透明绿色，克隆图像并赋回成功；未保存或打开文档。置信度 100%。",false)
-view:add_message("user2","You","What word did I ask you to remember? Call read_sprite to inspect the current sprite without editing it, then reply with that word only.",false)
+view:add_message("user2","You","What word did I ask you to remember? Call view_sprite to inspect the current sprite without editing it, then reply with that word only.",false)
 view:add_message("answer2","Codex","我会先检查画布，再克隆首个 cel 的图像，将 (1,1) 设为不透明绿色并赋回；不会保存或打开文档。",false)
 local phase,began,timer,finished,running=1,os.time()
 local function finish(ok,err)

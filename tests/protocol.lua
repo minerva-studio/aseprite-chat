@@ -8,7 +8,7 @@ local function test(name, fn) tests[#tests + 1] = {name, fn} end
 local function harness(overrides)
   local h = {sockets={}, timers={}, errors={}, messages={}, items={}, calls={}, cancels={}, states={}}
   local options = {
-    tools={{type="function", name="read_sprite", description="Read live sprite",
+    tools={{type="function", name="view_sprite", description="Read live sprite",
       inputSchema={type="object", properties=json.decode("{}"), required=json.decode("[]")}}},
     thread_settings=function() return {developerInstructions="Use Aseprite tools only."} end,
     on_state=function(s) h.states[#h.states+1]=s end,
@@ -76,7 +76,7 @@ local function harness(overrides)
   end
   function h:tool(id,turn,call_id)
     self.ws:receive({id=id or "server-tool",method="item/tool/call",params={
-      threadId="thread",turnId=turn or "turn",callId=call_id or tostring(id or "server-tool"),tool="read_sprite",arguments={}}})
+      threadId="thread",turnId=turn or "turn",callId=call_id or tostring(id or "server-tool"),tool="view_sprite",arguments={}}})
   end
   function h:reopen(status)
     self.ws:event(WebSocketMessageType.OPEN)
@@ -492,11 +492,11 @@ test("opening history loads every full ascending page before replacing binding w
   eq(resume.params.sandbox,"read-only"); eq(resume.params.approvalPolicy,"on-request"); eq(resume.params.approvalsReviewer,"user")
   h:history_resume()
   h.ws:receive({id="historical-request",method="item/tool/call",params={threadId="history",turnId="past1",
-    callId="past-call",tool="read_sprite",arguments={}}})
+    callId="past-call",tool="view_sprite",arguments={}}})
   eq(h:last().result.success,false); eq(#h.calls,0)
   local first=h:last("thread/turns/list")
   eq(first.params.threadId,"history"); eq(first.params.sortDirection,"asc"); eq(first.params.itemsView,"full"); eq(first.params.limit,50)
-  h:respond(first,{data={{id="past1",status="completed",items={{id="tool",type="dynamicToolCall",tool="read_sprite",
+  h:respond(first,{data={{id="past1",status="completed",items={{id="tool",type="dynamicToolCall",tool="view_sprite",
     arguments={},status="completed",success=true,contentItems={{type="inputText",text="old result"}}}}}},nextCursor="page2"})
   eq(calls,0); eq(h.client.thread_id,"thread"); eq(h:last().params.cursor,"page2")
   h:respond(h:last(),{data={},nextCursor="page3"}); eq(h:last().params.cursor,"page3"); eq(calls,0)
@@ -566,7 +566,7 @@ test("idle resumed history retains recorded in-progress turns without treating t
   assert(h.client:open_thread("history",function(value,err) result,why=value,err end))
   h:history_read(); h:history_resume()
   h:respond(h:last(),{data={{id="past",status="inProgress",items={{id="tool",type="dynamicToolCall",
-    tool="read_sprite",arguments={},status="inProgress"}}}}})
+    tool="view_sprite",arguments={},status="inProgress"}}}}})
   eq(why,nil); eq(result.turns[1].status,"inProgress"); eq(h.client.state,"ready"); eq(#h.calls,0)
   assert(h.client:send("continue","canvas"))
   h:notify("turn/started",{threadId="history",turn={id="past",status="inProgress"}})
@@ -617,7 +617,7 @@ end)
 
 test("non-agent item lifecycle is plain Lua and completed items deduplicate without tool execution",function()
   local h=harness(); h:open(); h:start()
-  local item={id="activity",type="dynamicToolCall",tool="read_sprite",arguments={code="return 1"},status="inProgress"}
+  local item={id="activity",type="dynamicToolCall",tool="view_sprite",arguments={code="return 1"},status="inProgress"}
   h:notify("item/started",{threadId="thread",turnId="turn",item=item})
   eq(#h.items,1); eq(h.items[1].completed,false); eq(type(h.items[1].item),"table")
   eq(type(h.items[1].item.arguments),"table"); eq(h.items[1].item.arguments.code,"return 1")
