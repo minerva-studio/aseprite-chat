@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { open, lstat, stat, mkdir, writeFile, link, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import { nativeCodex } from './register-mcp.mjs';
 
 const maxBytes = 16 * 1024;
@@ -107,7 +108,10 @@ async function publish(resultPath, result) {
  * discovery publication and PID-checked cleanup. This helper never writes,
  * restores, or deletes shared discovery, including after startup failures.
  *
- * @param {{extensionRoot:string, resultPath:string}} options Installed extension and owned result file.
+ * accountFile is the editor's authoritative account path. A nondefault path
+ * starts its own bridge instead of reusing a service with unknown account
+ * identity; the same Lua Launcher can still reuse its verified PID on reopen.
+ * @param {{extensionRoot:string, resultPath:string, accountFile?:string}} options Installed extension and owned result file.
  * @param {{discoveryPath?:string, conventionalPort?:number, nativeCodex?:Function,
  *   spawn?:Function, startupTimeoutMs?:number, nodeVersion?:string}} deps Test-only boundaries:
  *   discoveryPath selects a disposable absolute hint; conventionalPort=0 disables
@@ -117,7 +121,7 @@ async function publish(resultPath, result) {
  *   compatibility. Production always spawns process.execPath and server.mjs.
  * @returns {Promise<{endpoint:string, pid:number}|{error:string}>}
  */
-export async function startChat({ extensionRoot, resultPath }, deps = {}) {
+export async function startChat({ extensionRoot, resultPath, accountFile }, deps = {}) {
   // Do this before any reuse/spawn; failure has no safe publication destination.
   try {
     if (!validPath(resultPath) || /[\\/]$/.test(resultPath)
@@ -133,15 +137,21 @@ export async function startChat({ extensionRoot, resultPath }, deps = {}) {
   try {
     if (!validPath(extensionRoot) || (await readJson(path.join(extensionRoot, 'package.json')))?.name !== 'aseprite-chat'
       || !(await stat(path.join(extensionRoot, 'scripts/server.mjs'))).isFile()) throw Error();
-    stage = '无法确定本机用户数据目录。请重新登录 Windows 后重试。';
-    const discoveryPath = deps.discoveryPath ?? (process.env.LOCALAPPDATA
-      ? path.join(process.env.LOCALAPPDATA, 'AsepriteChat', 'bridge.json') : null);
+    stage = '无法确定本机用户数据目录。请检查用户主目录后重试。';
+    const dataDirectory = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'AsepriteChat');
+    const defaultAccount = path.join(dataDirectory, 'providers.json');
+    const selectedAccount = accountFile ?? (process.env.ASEPRITE_CHAT_ACCOUNT_FILE || defaultAccount);
+    if (!validPath(selectedAccount)) throw Error();
+    const privateAccount = path.resolve(selectedAccount) !== path.resolve(defaultAccount);
+    const discoveryPath = deps.discoveryPath ?? path.join(path.dirname(selectedAccount), 'bridge.json');
     if (!validPath(discoveryPath)) throw Error();
     let hint;
-    try { hint = await readJson(discoveryPath); } catch { /* Untrusted hints are optional. */ }
+    if (!privateAccount) {
+      try { hint = await readJson(discoveryPath); } catch { /* Untrusted hints are optional. */ }
+    }
     let bridge;
     if (Number.isSafeInteger(hint?.pid) && hint.pid > 0) bridge = await idleBridge(hint.port, hint.pid);
-    if (!bridge) bridge = await idleBridge(deps.conventionalPort ?? 4500);
+    if (!privateAccount && !bridge) bridge = await idleBridge(deps.conventionalPort ?? 4500);
     if (bridge) result = bridge;
     else {
       stage = 'Node.js 版本不受支持。请安装 Node.js 24 或更新版本，重新打开 Aseprite 后重试。';
@@ -163,6 +173,7 @@ export async function startChat({ extensionRoot, resultPath }, deps = {}) {
       child = (deps.spawn ?? spawn)(process.execPath, [path.join(extensionRoot, 'scripts/server.mjs')], {
         cwd: extensionRoot, shell: false, windowsHide: true, detached: true, stdio: 'ignore',
         env: { ...process.env, CODEX_CLI: executable, ASEPRITE_CHAT_PORT: '0',
+          ASEPRITE_CHAT_ACCOUNT_FILE: selectedAccount,
           ASEPRITE_CHAT_READY_FILE: readyPath, ASEPRITE_CHAT_DISCOVERY_FILE: discoveryPath,
           ASEPRITE_CHAT_IDLE_TIMEOUT_MS: '120000' }
       });

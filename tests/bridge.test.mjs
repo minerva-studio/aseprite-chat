@@ -455,7 +455,7 @@ test('launchFor re-enables file tools only beyond the canvas level', async t => 
   assert.match(canvasText, /features\.view_image=false/);
   for (const access of ['read', 'workspace', 'full']) {
     const home = path.join(dir, access);
-    const plan = launchFor({ mode: 'custom', codexHome: home, access, workspace: home }, {});
+    const plan = launchFor({ mode: 'custom', codexHome: home, access, workspace: home }, {}, 'win32');
     const text = plan.args.join(' ');
     assert.equal(text.includes('features.shell_tool'), false, access);
     assert.equal(text.includes('features.unified_exec'), false, access);
@@ -466,7 +466,7 @@ test('launchFor re-enables file tools only beyond the canvas level', async t => 
   const configured = path.join(dir, 'configured');
   await mkdir(configured, { recursive: true });
   await writeFile(path.join(configured, 'config.toml'), '[windows]\nsandbox = "elevated"\n');
-  const kept = launchFor({ mode: 'custom', codexHome: configured, access: 'read', workspace: configured }, {});
+  const kept = launchFor({ mode: 'custom', codexHome: configured, access: 'read', workspace: configured }, {}, 'win32');
   assert.equal(kept.args.join(' ').includes('windows.sandbox'), false);
   const plan = launchFor({ mode: 'default', access: 'read' }, {});
   assert.match(plan.args.join(' '), /features\.multi_agent=false/);

@@ -81,6 +81,60 @@ test('exports startChat and the existing shared nativeCodex resolver', () => {
   assert.equal(typeof implementation.startChat, 'function');
   assert.equal(typeof registrar.nativeCodex, 'function');
 });
+test('an explicit nondefault account file reaches the child without reusing another account bridge', async t => {
+  const f = await fixture(t);
+  f.options.accountFile = path.join(f.directory, 'native-user-config', 'providers.json');
+  delete f.deps.discoveryPath;
+  f.deps.conventionalPort = await healthServer(t);
+  assert.equal((await implementation.startChat(f.options, f.deps)).error, undefined);
+  assert.equal(f.calls.length, 1, 'a healthy bridge with unknown account identity was reused');
+  assert.equal(f.calls[0].settings.env.ASEPRITE_CHAT_ACCOUNT_FILE, f.options.accountFile);
+  assert.equal(f.calls[0].settings.env.ASEPRITE_CHAT_DISCOVERY_FILE,
+    path.join(path.dirname(f.options.accountFile), 'bridge.json'));
+});
+
+test('Chat discovery uses the server user-data fallback without LOCALAPPDATA', async t => {
+  const f = await fixture(t);
+  const previous = { LOCALAPPDATA: process.env.LOCALAPPDATA, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  delete process.env.LOCALAPPDATA;
+  process.env.HOME = f.directory;
+  process.env.USERPROFILE = f.directory;
+  try {
+    const port = await healthServer(t);
+    const actual = await implementation.startChat(f.options, { conventionalPort: port,
+      nativeCodex: () => assert.fail('idle fallback must be reused without native lookup') });
+    assert.deepEqual(actual, { endpoint: `ws://127.0.0.1:${port}`, pid: process.pid });
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+});
+
+test('Chat startup publishes and reuses owned discovery without LOCALAPPDATA', async t => {
+  const f = await fixture(t);
+  const previous = { LOCALAPPDATA: process.env.LOCALAPPDATA, HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  delete process.env.LOCALAPPDATA;
+  process.env.HOME = f.directory;
+  process.env.USERPROFILE = f.directory;
+  try {
+    const deps = { ...f.deps };
+    delete deps.discoveryPath;
+    const actual = await implementation.startChat(f.options, deps);
+    assert.equal(actual.error, undefined, actual.error);
+    const discovery = path.join(f.directory, 'AppData/Local/AsepriteChat/bridge.json');
+    assert.equal(f.calls[0].settings.env.ASEPRITE_CHAT_DISCOVERY_FILE, discovery);
+    const descriptor = JSON.parse(await readFile(discovery, 'utf8'));
+    assert.equal(descriptor.pid, actual.pid);
+    assert.deepEqual(await implementation.startChat({ ...f.options, resultPath: path.join(f.directory, 'again.json') }, {
+      conventionalPort: 0, nativeCodex: () => assert.fail('fallback discovery must reuse the owned bridge')
+    }), actual);
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
+});
 
 test('reuses exact idle discovery with matching PID, before conventional port or executable lookup', async t => {
   const f = await fixture(t);
@@ -327,8 +381,13 @@ test('temporary import entry survives slow startup, awaits result, unlinks itsel
   const local = path.join(f.directory, 'local');
   const bin = path.join(f.directory, "原生 ' %PATH% bin");
   await mkdir(bin);
-  const native = path.join(bin, 'codex.exe');
-  await writeFile(native, 'This is a lookup fixture and must never execute.');
+  const native = path.join(bin, process.platform === 'win32' ? 'codex.exe' : 'codex');
+  if (process.platform === 'win32') await writeFile(native, 'This is a lookup fixture and must never execute.');
+  else {
+    const { copyFile, chmod } = await import('node:fs/promises');
+    await copyFile(process.execPath, native);
+    await chmod(native, 0o700);
+  }
   const entry = `${f.options.resultPath}.mjs`;
   await writeFile(entry, `
     import { startChat } from ${JSON.stringify(new URL('../scripts/start-chat.mjs', import.meta.url).href)};
@@ -369,7 +428,7 @@ test('temporary import entry survives slow startup, awaits result, unlinks itsel
 });
 
 for (const layout of ['path', 'desktop', 'npm-wrapper', 'npm-appdata', 'missing']) {
-  test(`shared native resolver uses disposable ${layout} layout without executing wrappers or native CLI`, async t => {
+  test(`shared native resolver uses disposable Windows ${layout} layout without executing wrappers or native CLI`, { skip: process.platform !== 'win32' }, async t => {
     const f = await fixture(t);
     const bin = path.join(f.directory, 'bin');
     const local = path.join(f.directory, 'local');

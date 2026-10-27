@@ -14,7 +14,7 @@ end
 local posix={config="/\n;\n?\n!\n-\n"}
 
 test("POSIX account defaults are absolute and match the Node bridge fallback",function()
-  local vars={HOME="/home/artist"}
+  local vars={HOME="/home/artist",USERPROFILE="C:\\wrong-platform"}
   local account=module("account.lua",{os=setmetatable({getenv=function(name) return vars[name] end},{__index=os})})
   assert(account.path()=="/home/artist/AppData/Local/AsepriteChat/providers.json",account.path())
   assert(account.default_home()=="/home/artist/AppData/Local/AsepriteChat/codex-home")
@@ -46,12 +46,17 @@ test("MCP accepts an absolute POSIX home and connects without registration",func
   m:close()
 end)
 
-test("MCP rejects relative homes and unsupported registration without side effects",function()
+test("MCP rejects relative homes without side effects",function()
   local m,calls=controller()
   for _,home in ipairs({"", "relative/home", "~/home", "C:relative", "C:/windows", "\\\\server\\share"}) do assert(not m:start(home,false)) end
-  local ok,why=m:start("/home/artist",true)
-  assert(not ok and why:find("Connect",1,true),tostring(why))
   assert(#calls==0 and not m.startup and not m.preferences.mcp_home)
+  m:close()
+end)
+test("MCP registers into an absolute Linux Codex home",function()
+  local m,calls=controller()
+  assert(m:start("/home/artist/.codex",true))
+  assert(calls[1].parameters.CodexHome=="/home/artist/.codex")
+  assert(calls[1].parameters.ConnectOnly==false)
   m:close()
 end)
 
@@ -63,11 +68,11 @@ test("Windows keeps rejecting POSIX homes before startup",function()
   m:close()
 end)
 
-local function launcher(options,env)
+local function launcher(options,env,chat)
   local h={calls={},commands={},timers={}}
   options=options or {}
   options.path=options.path or root
-  options.script="mcp-launch.ps1"
+  if not chat then options.script=options.script or "mcp-launch.ps1" end
   options.parameters=options.parameters or {CodexHome="/home/artist/账户 ' $()",ConnectOnly=true}
   options.timer_factory=function(spec)
     local timer={spec=spec}; function timer:start() self.running=true end; function timer:stop() self.running=false end
@@ -105,30 +110,39 @@ test("missing Node fails without executing a shell",function()
   assert(#h.commands==0 and not h.instance.pending and h.calls[1].error:find("Node.js",1,true))
 end)
 
-test("POSIX launcher never executes unsupported registration",function()
-  local h=launcher{parameters={CodexHome="/home/artist",ConnectOnly=false}}
+test("POSIX launcher rejects unknown bootstraps",function()
+  local h=launcher{script="unknown.ps1"}
   h:start(); assert(#h.commands==0 and not h.instance.pending and h.calls[1].error)
 end)
 
-test("native POSIX Node startup is asynchronous and preserves special path characters",function()
+test("native POSIX Chat Connect and registration launch asynchronously with private quoted paths",function()
   local directory=app.fs.joinPath(app.fs.tempPath,"mcp 中文 ' % & $() ` ; "..tostring(Uuid()))
   local scripts=app.fs.joinPath(directory,"scripts")
   assert(app.fs.makeAllDirectories(scripts))
   local helper=app.fs.joinPath(scripts,"register-mcp.mjs")
-  write(helper,[[import {existsSync,writeFileSync,statSync} from 'node:fs';
+  local fixture=[[import {existsSync,writeFileSync,statSync} from 'node:fs';
 import path from 'node:path';
-export async function registerMcp(job) {
-  if(!job.connectOnly) throw Error('registration must not run');
+async function complete(job,operation) {
   if((statSync(path.dirname(job.resultPath)).mode & 0o777)!==0o700) throw Error('startup directory is not private');
   const deadline=Date.now()+5000;
   while(!existsSync(job.resultPath+'.release')) {
     if(Date.now()>deadline) throw Error('release timeout');
     await new Promise(resolve=>setTimeout(resolve,20));
   }
-  writeFileSync(job.resultPath+'.job',JSON.stringify(job));
-  writeFileSync(job.resultPath,JSON.stringify({endpoint:'ws://127.0.0.1:45123/editor/fixture-token'}));
+  writeFileSync(job.resultPath+'.job',JSON.stringify({...job,operation}));
+  writeFileSync(job.resultPath,JSON.stringify(operation==='chat'
+    ? {endpoint:'ws://127.0.0.1:45123',pid:process.pid}
+    : {endpoint:'ws://127.0.0.1:45123/editor/fixture-token'}));
 }
-]])
+export async function registerMcp(job) {return complete(job,job.connectOnly?'connect':'register');}
+export async function startChat(job) {
+  if('home' in job || 'connectOnly' in job) throw Error('Chat received MCP-only parameters');
+  if(!job.accountFile) throw Error('Chat lost its native account path');
+  return complete(job,'chat');
+}
+]]
+  write(helper,fixture)
+  write(app.fs.joinPath(scripts,"start-chat.mjs"),fixture)
   local home=directory.."/home ' 账户 $()"
   local real_node
   for folder in (os.getenv("PATH") or ""):gmatch("[^:]+") do
@@ -137,12 +151,19 @@ export async function registerMcp(job) {
   end
   assert(real_node,"Node is required for this native process test")
   local function quoted(value) return "'"..value:gsub("'", "'\"'\"'").."'" end
+  -- Aseprite canonicalizes os.remove paths, so a symlink fixture must never
+  -- point at a shared/system executable, even if cleanup later regresses.
+  local native=app.fs.joinPath(directory,"native-node")
+  assert(os.execute("cp -- "..quoted(real_node).." "..quoted(native)))
   local node=app.fs.joinPath(directory,"node")
-  assert(os.execute("ln -s "..quoted(real_node).." "..quoted(node)))
+  assert(os.execute("ln -s "..quoted(native).." "..quoted(node)))
   -- Both actual shell operands now contain hostile characters, not only JSON data.
   local fs=setmetatable({tempPath=directory},{__index=app.fs})
-  local h=launcher({path=directory,node=node,execute=os.execute,parameters={CodexHome=home,ConnectOnly=true}},
-    {app={fs=fs}})
+  for _,operation in ipairs {"connect","register","chat"} do
+  local account_file=directory.."/native-account/providers.json"
+  local h=launcher({path=directory,node=node,accountFile=account_file,execute=os.execute,
+    parameters={CodexHome=home,ConnectOnly=operation=="connect"}},
+    {app={fs=fs}},operation=="chat")
   h:start(); local attempt=assert(h.instance.pending,h.calls[1] and h.calls[1].error)
   assert(not app.fs.isFile(attempt.result_path),"launcher waited for readiness")
   write(attempt.result_path..".release","go")
@@ -153,11 +174,19 @@ export async function registerMcp(job) {
   end
   local result=h.calls[1]
   h.instance:cancel()
-  assert(result and result.endpoint=="ws://127.0.0.1:45123/editor/fixture-token",result and result.error or "no result")
+  local endpoint=operation=="chat" and "ws://127.0.0.1:45123" or "ws://127.0.0.1:45123/editor/fixture-token"
+  assert(result and result.endpoint==endpoint,result and result.error or "no result")
   local job=json.decode(read(attempt.result_path..".job"))
-  assert(job.home==home and job.extensionRoot==directory and job.connectOnly==true)
-  for _,file in ipairs({helper,node,attempt.result_path..".release",attempt.result_path..".job"}) do os.remove(file) end
+  assert(job.operation==operation and job.extensionRoot==directory)
+  if operation=="chat" then assert(job.home==nil and job.connectOnly==nil and job.accountFile==account_file)
+  else assert(job.home==home and job.connectOnly==(operation=="connect")) end
+  for _,file in ipairs({attempt.result_path..".release",attempt.result_path..".job"}) do os.remove(file) end
   app.fs.removeDirectory(attempt.private_dir)
+  end
+  assert(os.execute("unlink -- "..quoted(node)))
+  for _,file in ipairs {helper,app.fs.joinPath(scripts,"start-chat.mjs")} do os.remove(file) end
+  assert(app.fs.isFile(native),"symbolic-link cleanup deleted its native executable target")
+  os.remove(native)
   app.fs.removeDirectory(scripts); app.fs.removeDirectory(directory)
 end)
 

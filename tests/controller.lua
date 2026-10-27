@@ -87,11 +87,10 @@ local function scenario(name, body, configuration)
     end }
   }
   local env = setmetatable({
-    -- Internal Chat's Windows cwd default is independent of this native test host.
-    os=setmetatable({getenv=function(name)
-      if name=="USERPROFILE" then return os.getenv(name) or os.getenv("HOME") end
-      return os.getenv(name)
-    end},{__index=os}),
+    package=configuration.platform and {config=configuration.platform} or package,
+    os=configuration.environment and setmetatable({getenv=function(name)
+      return configuration.environment[name]
+    end},{__index=os}) or os,
     Timer = function(spec)
     if not configuration.timers then return Timer(spec) end
     local timer={ontick=spec.ontick,running=false}
@@ -293,6 +292,15 @@ scenario("model instructions follow Access and keep canvas constraints local to 
     end
   end
 end)
+scenario("Linux Chat uses HOME even if a Windows USERPROFILE is inherited",function(c,p)
+  local settings=p.options.thread_settings()
+  assert(settings.cwd=="/home/artist","Linux Chat did not choose its native home")
+  c.account.access,c.account.workspace="workspace","/home/artist/project"
+  assert(p.options.thread_settings().cwd=="/home/artist/project")
+end,{skip_send=true,platform="/",environment={HOME="/home/artist",USERPROFILE="C:\\wrong-platform"}})
+scenario("Chat falls back to the native user configuration path without a home variable",function(c,p)
+  assert(p.options.thread_settings().cwd==app.fs.userConfigPath)
+end,{skip_send=true,platform="/",environment={}})
 scenario("apply_access keeps the conversation and reconnects the same client", function(c, p, e, v, request, result, l)
   p.state = "ready"
   local client = c.client

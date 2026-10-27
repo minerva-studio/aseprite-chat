@@ -35,13 +35,14 @@ local function close_probe(attempt)
 end
 
 -- Construct a native bootstrap launcher for the extension directory `path`.
--- POSIX currently supports only MCP Connect, without Codex registration/login.
+-- POSIX uses the same Node Chat/registration operations through private jobs.
 -- timer_factory accepts a native Timer spec; execute has os.execute semantics.
 -- pending is the current opaque attempt (or nil), never connection state.
--- script selects an installed bootstrap; parameters supplies named string/switch
--- arguments through encoded PowerShell, never through cmd path interpolation.
+-- script selects the MCP bootstrap; parameters carries named string/switch
+-- arguments in encoded PowerShell on Windows and a JSON Node job on Linux.
 -- Without script, Chat launches native Node without waiting for PowerShell.
 -- node optionally supplies the native executable at the process-launch test seam.
+-- accountFile supplies Chat's authoritative account path to its Node child.
 -- socket_factory accepts a native WebSocket spec. A verified endpoint/PID is
 -- cached only in this instance and revalidated asynchronously before warm reuse.
 function Launcher.new(options)
@@ -125,7 +126,7 @@ function Instance:ensure(callback)
       end
     end
     if attempt.ticks >= 200 or os.time() - attempt.started_at >= 20 then
-      finish(nil, "自动启动在 20 秒内未完成。请确认已安装 Node.js 24 或更新版本及 Codex 桌面版，并允许 Aseprite 的文件和进程访问，然后重试。")
+      finish(nil, "自动启动在 20 秒内未完成。请检查 Node.js、扩展依赖及文件和进程权限，重新打开窗口后重试。")
     end
   end
   local timer_ok, timer = pcall(self._options.timer_factory or Timer, {interval=0.1, ontick=tick})
@@ -151,8 +152,13 @@ function Instance:ensure(callback)
   local name = "aseprite-chat-" .. tostring(Uuid()) .. ".cmd"
   local source_name,source,command
   if not windows then
-    if self._options.script~="mcp-launch.ps1" or not self._options.parameters or self._options.parameters.ConnectOnly~=true then
-      finish(nil,"Linux 当前仅支持 MCP Connect；请使用 Connect，外部客户端手动配置 stdio。")
+    local registration=self._options.script=="mcp-launch.ps1"
+    if self._options.script and not registration then
+      finish(nil,"不支持此 Linux 启动操作，请重新打开插件后重试。")
+      return true
+    end
+    if registration and (not self._options.parameters or type(self._options.parameters.CodexHome)~="string") then
+      finish(nil,"请填写要连接或注册的 Codex home 绝对路径。")
       return true
     end
     local node=self._options.node
@@ -179,19 +185,26 @@ function Instance:ensure(callback)
     if self.pending~=attempt then pcall(app.fs.removeDirectory,private_dir); return true end
     attempt.result_path=app.fs.joinPath(private_dir,"result.json")
     source_name=name:gsub("%.cmd$",".mjs")
-    local job=json.encode{extensionRoot=self._options.path,resultPath=attempt.result_path,
-      home=self._options.parameters.CodexHome,connectOnly=true}
+    local job={extensionRoot=self._options.path,resultPath=attempt.result_path}
+    if registration then
+      job.home=self._options.parameters.CodexHome
+      job.connectOnly=self._options.parameters.ConnectOnly==true
+    else
+      job.accountFile=self._options.accountFile
+    end
+    local operation=registration and "registerMcp" or "startChat"
+    local module=registration and "register-mcp.mjs" or "start-chat.mjs"
     source=[[import {pathToFileURL} from 'node:url';
 import {writeFile,rename,unlink} from 'node:fs/promises';
-const job=]]..job..[[;
+const job=]]..json.encode(job)..[[;
 try {
   if (Number(process.versions.node.split('.')[0])<24) throw Error('Unsupported Node');
-  const {registerMcp}=await import(pathToFileURL(job.extensionRoot+'/scripts/register-mcp.mjs'));
-  await registerMcp(job);
+  const {]]..operation..[[}=await import(pathToFileURL(job.extensionRoot+'/scripts/]]..module..[['));
+  await ]]..operation..[[(job);
 } catch {
   const temporary=job.resultPath+'.bootstrap.tmp';
   try {
-    await writeFile(temporary,JSON.stringify({error:'无法运行 MCP 连接。请确认 Node.js 24 或更新版本、插件依赖和进程权限。'}),{flag:'wx',mode:0o600});
+    await writeFile(temporary,JSON.stringify({error:'无法运行本地连接。请确认 Node.js 24 或更新版本、插件依赖和进程权限。'}),{flag:'wx',mode:0o600});
     await rename(temporary,job.resultPath);
   } finally { await unlink(temporary).catch(()=>{}); }
 } finally { await unlink(process.argv[1]).catch(()=>{}); }
@@ -222,7 +235,7 @@ try {
       return true
     end
     source_name=name:gsub("%.cmd$",".mjs")
-    local job=json.encode{extensionRoot=self._options.path,resultPath=attempt.result_path}
+    local job=json.encode{extensionRoot=self._options.path,resultPath=attempt.result_path,accountFile=self._options.accountFile}
     source=[[import {pathToFileURL} from 'node:url';
 import {writeFile,rename,unlink} from 'node:fs/promises';
 const job=]]..job..[[;

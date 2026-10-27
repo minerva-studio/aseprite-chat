@@ -52,7 +52,8 @@ end
 local function data_root()
   local local_data=os.getenv("LOCALAPPDATA")
   if local_data and local_data~="" then return local_data end
-  local home=os.getenv("USERPROFILE") or os.getenv("HOME") or app.fs.userConfigPath
+  local home=os.getenv(package.config:sub(1,1)=="\\" and "USERPROFILE" or "HOME")
+  if not home or home=="" then home=app.fs.userConfigPath end
   return app.fs.joinPath(home,"AppData","Local")
 end
 

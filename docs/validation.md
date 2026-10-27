@@ -2,6 +2,24 @@
 
 Recorded on 2026-10-21. Controlled protocol fixtures and actual authenticated model requests are listed separately.
 
+## Linux internal Chat and MCP registration (0.6.1, 2026-10-27)
+
+Linux now invokes the same startChat and registerMcp operations through the existing private POSIX job. Registration uses the selected absolute home and the native Codex CLI, keeping backups, collision refusal and verification; Connect still performs no registration or login. Chat retains bounded readiness/PID checks and warm reuse, Linux HOME working directories and native Linux sandbox settings. The shared resolver accepts Linux x64/arm64 executable ELF candidates from PATH or native npm platform packages without executing a wrapper. No account migration, startup item or model-provider API was added.
+
+Actual verification used Windows Aseprite 1.3.18.6 and Ubuntu WSL x64 Aseprite 1.3.18.3. Linux Node 24.22.1 was downloaded from the official distribution, verified against its SHA256 manifest and extracted only under work; Codex 0.163.0 used the official Linux package in that same ignored test area. Neither runtime was installed globally. All CLI config operations used temporary CODEX_HOME; no model turn was requested.
+
+- Windows Node: **143 passed, 4 skipped, 0 failed**, out of 147. Skips are the opt-in native Linux tests and Windows-unavailable symlink/POSIX chmod checks.
+- Linux Node: **132 passed, 15 Windows-only skipped, 0 failed**, out of 147, with ASEPRITE_EXE set and native Linux CLI checks explicitly enabled. This includes actual selected-home registration, exact backup/idempotence, production Chat startup and a real app-server initialize response. It sends no turn/start.
+- Windows native Lua: **327 passed**; Linux native Lua: **335 passed** (the actual Windows Chat shell case is skipped on Linux, and 9 POSIX checks are added). POSIX launch fixtures validate Chat/Connect/Register as asynchronous jobs through hostile-character paths, private 0700 directories, explicit account paths and cancellation.
+
+TDD evidence: Node platform cases first failed 20 times before Linux resolver/sandbox/path changes. Controller HOME cases failed before the native cwd change. POSIX registration/Chat initially passed 7/9, then 9/9. An owned symlink probe proved that Aseprite os.remove follows the link and deletes its target; the former POSIX test could therefore delete its shared Node executable. The fixture now copies Node into its owned directory, unlinks only that link and asserts the copied target remains before removing the copy. Its preservation assertion was observed RED 8/9 then GREEN 9/9; the portable shared Node remained intact.
+
+Fresh-context review found one P2: with HOME absent, Lua's account-file fallback differed from Node's os.homedir fallback. Chat now passes the Lua-selected account path explicitly as ASEPRITE_CHAT_ACCOUNT_FILE. A nondefault account file bypasses cold endpoint reuse because the old health metadata does not identify its account; its own Launcher can still reopen a verified cached PID. A regression first reproduced wrong-account service reuse, then verified an owned child receives the selected file. Default account discovery and Windows behavior remain unchanged. The native CLI test's initial fetch-based health check was corrected to use http.get, matching the bridge's intentional rejection of Fetch Metadata rather than weakening that boundary.
+
+The same 0.6.1 package passed extracted-runtime checks outside the development checkout on Windows and Linux: seven MCP tools, disconnected-editor behavior and Chat/native resolver imports. The final native Linux initialization also verifies the explicit account file activates its selected custom home.
+
+No production GUI/IME/permission acceptance or real model inference is claimed. Linux arm64 discovery has fixture coverage only. Source integration is recorded in the plan.
+
 ## Linux external MCP Connect, initial 0.5.1 baseline — 2026-10-26
 
 - Environment: Debian 13 x86_64, official Aseprite 1.3.18.6 Linux build, Node 24.22.1, pinned lockfile dependencies installed with `npm ci --ignore-scripts`.

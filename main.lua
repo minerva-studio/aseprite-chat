@@ -245,7 +245,10 @@ function Controller:_thread_settings()
   local sandbox = ({ canvas = "read-only", read = "read-only",
     workspace = "workspace-write", full = "danger-full-access" })[access] or "read-only"
   local cwd = access == "workspace" and account.workspace or nil
-  if not cwd or cwd == "" then cwd = os.getenv("USERPROFILE") end
+  if not cwd or cwd == "" then
+    cwd = os.getenv(package.config:sub(1,1)=="\\" and "USERPROFILE" or "HOME")
+    if not cwd or cwd=="" then cwd=app.fs.userConfigPath end
+  end
   -- Native json.encode requires a container even for a quoted path string.
   local quoted_cwd=json.encode({cwd}):match("^%[%s*(.-)%s*%]$")
   local access_instructions=({
@@ -342,7 +345,7 @@ function Main.create(options)
   self.Account = dofile(app.fs.joinPath(options.path, "account.lua"))
   self.account, self.account_error = self.Account.load(self.Account.path())
   local Launcher = dofile(app.fs.joinPath(options.path, "launcher.lua"))
-  self.launcher = Launcher.new {path=options.path}
+  self.launcher = Launcher.new {path=options.path,accountFile=self.Account.path()}
   local Chat = dofile(app.fs.joinPath(options.path, "chat.lua"))
   self.executor = self.Executor.new()
   self.view = Chat.new({

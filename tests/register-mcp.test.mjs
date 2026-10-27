@@ -183,7 +183,7 @@ test('bridge errors publish Chinese safe diagnostics atomically', async () => {
   assert.deepEqual(JSON.parse(await readFile(options.resultPath, 'utf8')), result);
 });
 
-for (const source of ['PATH', 'LOCALAPPDATA', 'npm-wrapper']) test(`finds native Codex through ${source} without executing wrappers`, async () => {
+for (const source of ['PATH', 'LOCALAPPDATA', 'npm-wrapper']) test(`finds native Windows Codex through ${source} without executing wrappers`, { skip: process.platform !== 'win32' }, async () => {
   const options = await fixture();
   const bin = path.join(options.directory, 'bin');
   const local = path.join(options.directory, 'local');

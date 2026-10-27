@@ -71,8 +71,12 @@ function windowsSandboxOverride(codexHome) {
   return ['-c', 'windows.sandbox="unelevated"'];
 }
 
-/** Build the Codex app-server argv and child environment for one account. */
-export function launchFor(account, baseEnv) {
+/**
+ * Build the Codex app-server argv and child environment for one account.
+ * The optional platform boundary controls Windows-only sandbox initialization;
+ * other platforms retain Codex's native sandbox configuration.
+ */
+export function launchFor(account, baseEnv, platform = process.platform) {
   const env = { ...baseEnv, CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'aseprite_chat' };
   delete env[providerEnvKey];
   const access = account && account.access || 'canvas';
@@ -84,7 +88,7 @@ export function launchFor(account, baseEnv) {
     `mcp_servers.aseprite_chat={enabled=false,command=${JSON.stringify(process.execPath)},args=[${JSON.stringify(mcpScript)},"--home",${JSON.stringify(mcpHome)}]}`];
   if (!account || account.mode !== 'custom') return { args, env };
   env.CODEX_HOME = account.codexHome;
-  if (access !== 'canvas') args.push(...windowsSandboxOverride(account.codexHome));
+  if (platform === 'win32' && access !== 'canvas') args.push(...windowsSandboxOverride(account.codexHome));
   const baseUrl = (account.baseUrl || '').replace(/\/+$/, '');
   const apiKey = account.apiKey || '';
   if (baseUrl === '' && apiKey === '') return { args, env };

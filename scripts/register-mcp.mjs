@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFile, writeFile, mkdir, rename, unlink, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { readFile, writeFile, mkdir, rename, unlink, stat, open, access, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -13,16 +14,65 @@ async function isFile(file) {
   catch { return false; }
 }
 
+async function linuxExecutable(file, arch) {
+  let handle;
+  try {
+    if (!await isFile(file)) return false;
+    await access(file, constants.X_OK);
+    handle = await open(file, 'r');
+    const header = Buffer.alloc(20);
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    return bytesRead === header.length && header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))
+      && header[4] === 2 && header[5] === 1 && header[6] === 1
+      && header.readUInt16LE(18) === (arch === 'arm64' ? 183 : 62);
+  } catch { return false; }
+  finally { await handle?.close(); }
+}
+
 /**
- * Locate a native Codex executable using PATH and known Windows install layouts.
+ * Locate native Codex on Windows or Linux x64/arm64 using PATH and npm layouts.
  * Shell wrappers are location hints only; lookup never executes a process or
- * reads account/configuration files. Rejects with a safe Chinese installation error.
+ * reads account/configuration files. Linux candidates require an executable,
+ * little-endian ELF64 header matching the selected architecture; only 20 bytes
+ * are read. Linux PATH entries must be absolute. Windows discovery is unchanged.
+ * Rejects with a safe Chinese installation error.
+ * @param {{env?:NodeJS.ProcessEnv, platform?:string, arch?:string}} host Host boundary
+ *   overrides for environment and executable selection. Paths and PATH delimiters
+ *   use the running Node host's filesystem semantics, including in tests.
  * @returns {Promise<string>} Absolute path to an existing native executable.
  */
-export async function nativeCodex() {
-  const directories = (process.env.PATH ?? '').split(path.delimiter).map(value => value.replace(/^"|"$/g, ''));
+export async function nativeCodex({ env = process.env, platform = process.platform, arch = process.arch } = {}) {
+  const directories = (env.PATH ?? '').split(path.delimiter).map(value => value.replace(/^"|"$/g, ''));
+  if (platform === 'linux' && (arch === 'x64' || arch === 'arm64')) {
+    const packageRoots = new Set();
+    for (const directory of directories.filter(value => value && path.isAbsolute(value))) {
+      const entry = path.join(directory, 'codex');
+      if (await linuxExecutable(entry, arch)) return entry;
+      if (!await isFile(entry)) continue;
+      // npm's global symlink points to @openai/codex/bin/codex.js. Resolve only
+      // its location; neither JavaScript nor shell wrapper contents are executed.
+      try {
+        const target = await realpath(entry);
+        if (path.basename(target) === 'codex.js' && path.basename(path.dirname(target)) === 'bin') {
+          const root = path.dirname(path.dirname(target));
+          if (path.basename(root) === 'codex' && path.basename(path.dirname(root)) === '@openai') packageRoots.add(root);
+        }
+      } catch {}
+      packageRoots.add(path.join(directory, 'node_modules/@openai/codex'));
+      packageRoots.add(path.join(directory, '../lib/node_modules/@openai/codex'));
+    }
+    const triple = arch === 'arm64' ? 'aarch64-unknown-linux-musl' : 'x86_64-unknown-linux-musl';
+    for (const root of packageRoots) {
+      for (const vendor of [path.join(root, `node_modules/@openai/codex-linux-${arch}/vendor`),
+        path.join(root, `../codex-linux-${arch}/vendor`), path.join(root, 'vendor')]) {
+        const candidate = path.join(vendor, triple, 'bin/codex');
+        if (await linuxExecutable(candidate, arch)) return candidate;
+      }
+    }
+  }
+  if (platform !== 'win32') throw new RegistrationError('未找到原生 Codex 程序。请安装或修复 Codex CLI 后重试。');
   const candidates = directories.filter(Boolean).map(directory => path.resolve(directory, 'codex.exe'));
-  if (process.env.LOCALAPPDATA) candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe'));
+  if (env.LOCALAPPDATA) candidates.push(path.join(env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe'));
   for (const candidate of candidates) if (await isFile(candidate)) return candidate;
 
   // A wrapper is only a location hint. Never execute .cmd/.ps1 or a shell.
@@ -30,8 +80,8 @@ export async function nativeCodex() {
   for (const directory of directories.filter(Boolean)) {
     if (await isFile(path.join(directory, 'codex.cmd'))) packageRoots.push(path.join(directory, 'node_modules/@openai'));
   }
-  if (process.env.APPDATA) packageRoots.push(path.join(process.env.APPDATA, 'npm/node_modules/@openai'));
-  const architectures = process.arch === 'arm64' ? ['arm64', 'x64'] : ['x64', 'arm64'];
+  if (env.APPDATA) packageRoots.push(path.join(env.APPDATA, 'npm/node_modules/@openai'));
+  const architectures = arch === 'arm64' ? ['arm64', 'x64'] : ['x64', 'arm64'];
   for (const packageRoot of packageRoots) {
     for (const architecture of architectures) {
       const triple = architecture === 'arm64' ? 'aarch64-pc-windows-msvc' : 'x86_64-pc-windows-msvc';
