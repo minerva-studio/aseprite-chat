@@ -1,4 +1,5 @@
 local Launcher = {}
+local windows = package.config:sub(1, 1) == "\\"
 local Instance = {}
 Instance.__index = Instance
 
@@ -27,12 +28,14 @@ local function encoded_command(text)
 end
 
 local function quote(text) return "'" .. text:gsub("'", "''") .. "'" end
+local function shell_quote(text) return "'" .. text:gsub("'", "'\"'\"'") .. "'" end
 local function close_probe(attempt)
   local probe=attempt.probe; attempt.probe=nil
   if probe and probe.socket then pcall(function() probe.socket:close() end) end
 end
 
--- Construct a Windows bootstrap launcher for the extension directory `path`.
+-- Construct a native bootstrap launcher for the extension directory `path`.
+-- POSIX currently supports only MCP Connect, without Codex registration/login.
 -- timer_factory accepts a native Timer spec; execute has os.execute semantics.
 -- pending is the current opaque attempt (or nil), never connection state.
 -- script selects an installed bootstrap; parameters supplies named string/switch
@@ -66,6 +69,7 @@ function Instance:ensure(callback)
     if attempt.command_path then pcall(os.remove, attempt.command_path) end
     if attempt.command_source_path then pcall(os.remove, attempt.command_source_path) end
     pcall(os.remove, attempt.result_path)
+    if attempt.private_dir then pcall(app.fs.removeDirectory,attempt.private_dir) end
     callback(endpoint, error_text)
   end
   local function tick()
@@ -146,7 +150,55 @@ function Instance:ensure(callback)
   end
   local name = "aseprite-chat-" .. tostring(Uuid()) .. ".cmd"
   local source_name,source,command
-  if not self._options.script then
+  if not windows then
+    if self._options.script~="mcp-launch.ps1" or not self._options.parameters or self._options.parameters.ConnectOnly~=true then
+      finish(nil,"Linux 当前仅支持 MCP Connect；请使用 Connect，外部客户端手动配置 stdio。")
+      return true
+    end
+    local node=self._options.node
+    if not node then
+      for directory in (os.getenv("PATH") or ""):gmatch("[^:]+") do
+        local candidate=app.fs.joinPath(directory,"node")
+        if candidate:sub(1,1)=="/" and app.fs.isFile(candidate) then node=candidate; break end
+      end
+    end
+    if type(node)~="string" or node:sub(1,1)~="/" or node:find('[\0\r\n]') or not node:match("/node$") then
+      finish(nil,"未找到原生 Node.js。请安装 Node.js 24 或更新版本，并将 node 加入 Aseprite 的 PATH 后重试。")
+      return true
+    end
+    -- /tmp can be shared between OS users. Establish an exclusive private
+    -- directory before exposing the job/result names; never chmod/reuse an
+    -- existing directory. Native process permission remains required here.
+    local private_dir=app.fs.joinPath(app.fs.tempPath,"aseprite-chat-"..tostring(Uuid()))
+    local made,status=pcall(self._options.execute or os.execute,"umask 077; mkdir -- "..shell_quote(private_dir))
+    if not made or (status~=true and status~=0) then
+      finish(nil,"无法创建私有临时目录。请允许 Aseprite 启动进程，并检查临时目录权限后重试。")
+      return true
+    end
+    attempt.private_dir=private_dir
+    if self.pending~=attempt then pcall(app.fs.removeDirectory,private_dir); return true end
+    attempt.result_path=app.fs.joinPath(private_dir,"result.json")
+    source_name=name:gsub("%.cmd$",".mjs")
+    local job=json.encode{extensionRoot=self._options.path,resultPath=attempt.result_path,
+      home=self._options.parameters.CodexHome,connectOnly=true}
+    source=[[import {pathToFileURL} from 'node:url';
+import {writeFile,rename,unlink} from 'node:fs/promises';
+const job=]]..job..[[;
+try {
+  if (Number(process.versions.node.split('.')[0])<24) throw Error('Unsupported Node');
+  const {registerMcp}=await import(pathToFileURL(job.extensionRoot+'/scripts/register-mcp.mjs'));
+  await registerMcp(job);
+} catch {
+  const temporary=job.resultPath+'.bootstrap.tmp';
+  try {
+    await writeFile(temporary,JSON.stringify({error:'无法运行 MCP 连接。请确认 Node.js 24 或更新版本、插件依赖和进程权限。'}),{flag:'wx',mode:0o600});
+    await rename(temporary,job.resultPath);
+  } finally { await unlink(temporary).catch(()=>{}); }
+} finally { await unlink(process.argv[1]).catch(()=>{}); }
+]]
+    command=shell_quote(node).." "..shell_quote(app.fs.joinPath(attempt.private_dir,source_name))
+      .." </dev/null >/dev/null 2>&1 &"
+  elseif not self._options.script then
     local node=self._options.node
     if not node then
       local candidates={}
@@ -209,9 +261,14 @@ try {
     source=outer
   end
   local written = pcall(function()
-    attempt.command_path = app.fs.joinPath(assert(os.getenv("TEMP")), name)
-    attempt.command_source_path = app.fs.joinPath(os.getenv("TEMP"), source_name)
-    for _, entry in ipairs({{attempt.command_source_path, source}, {attempt.command_path, "@echo off\r\n" .. command .. "\r\n"}}) do
+    local temporary = windows and assert(os.getenv("TEMP")) or attempt.private_dir
+    attempt.command_source_path = app.fs.joinPath(temporary, source_name)
+    local entries={{attempt.command_source_path,source}}
+    if windows then
+      attempt.command_path = app.fs.joinPath(temporary, name)
+      entries[#entries+1]={attempt.command_path, "@echo off\r\n" .. command .. "\r\n"}
+    end
+    for _, entry in ipairs(entries) do
       local file = assert(io.open(entry[1], "wb"))
       local ok, result = pcall(file.write, file, entry[2])
       local closed, close_result = pcall(file.close, file)
@@ -224,11 +281,12 @@ try {
   end
   if self.pending ~= attempt then
     pcall(os.remove, attempt.command_path); pcall(os.remove, attempt.command_source_path)
+    if attempt.private_dir then pcall(app.fs.removeDirectory,attempt.private_dir) end
     return true
   end
-  local execute_ok, status = pcall(self._options.execute or os.execute, '"%TEMP%\\' .. name .. '"')
+  local execute_ok, status = pcall(self._options.execute or os.execute, windows and '"%TEMP%\\' .. name .. '"' or command)
   pcall(os.remove, attempt.command_path)
-  if self._options.script then pcall(os.remove, attempt.command_source_path) end
+  if windows and self._options.script then pcall(os.remove, attempt.command_source_path) end
   if self.pending ~= attempt then return true end
   if not execute_ok or (status ~= true and status ~= 0) then
     finish(nil, "无法启动本机连接。请在 Aseprite 的安全提示中允许脚本访问文件和启动进程，再点击重试。")
@@ -287,6 +345,7 @@ function Instance:cancel()
   if attempt.command_path then pcall(os.remove, attempt.command_path) end
   if attempt.command_source_path then pcall(os.remove, attempt.command_source_path) end
   pcall(os.remove, attempt.result_path)
+  if attempt.private_dir then pcall(app.fs.removeDirectory,attempt.private_dir) end
 end
 
 return Launcher

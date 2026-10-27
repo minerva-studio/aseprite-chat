@@ -2,6 +2,25 @@
 
 Recorded on 2026-10-21. Controlled protocol fixtures and actual authenticated model requests are listed separately.
 
+## Linux external MCP Connect, initial 0.5.1 baseline — 2026-10-26
+
+- Environment: Debian 13 x86_64, official Aseprite 1.3.18.6 Linux build, Node 24.22.1, pinned lockfile dependencies installed with `npm ci --ignore-scripts`.
+- Scope: external MCP **Connect only**. No Linux internal-chat, Codex registration/login, Windows native-process rerun, or Linux GUI acceptance is claimed by these batch checks.
+- `npm test`: 121 total, **114 passed, 7 Windows-only skipped, 0 failed**. Includes the SDK stdio → isolated hub → persistent native batch document test, native PNG/GIF/sheet exports, cleanup and one Undo. The native fixture's controlled approval is not a GUI approval test.
+- `npm run test:native -- <Aseprite>`: protocol 71, export 13, executor 61, chat 62, controller 53, Windows-branch launcher 27, timeline 9, account 7, MCP 7, Linux 8 — **318 passed**. One actual Windows Chat launch case is explicitly skipped on Linux. The runner requires complete pass markers even when Aseprite exits zero after Lua errors.
+- Linux regressions were observed failing before the fix: relative account defaults, POSIX home rejection, unavailable process launch; review regressions reproduced wrong-platform home acceptance and non-private shared-temp startup. Final Linux tests run an asynchronous native Node fixture through Unicode, apostrophe, backtick and shell-metacharacter extension/home/executable/temp paths, enforce `0700` startup storage, check connect-only behavior, reject wrong-platform homes, and retire cancelled callbacks. Existing Windows simulated behavior is retained.
+- A late already-running child is not forcibly terminated by Cancel. Cancellation retires callbacks and attempts to remove owned startup files and the private directory; a child publication racing cleanup can leave a private artifact, but cannot reconnect the cancelled attempt. A hub already started by it retains the existing idle timeout. Real late-publication cleanup and every native permission-dialog timing race are not claimed as tested.
+- Linux GUI connection, visible edit approval and Undo require separate interactive acceptance. Historical Windows GUI evidence below remains unchanged.
+
+## Linux + focused sprite tools 0.6.0 integration — 2026-10-26
+
+The Linux Connect-only changes were reapplied in an independent directory on commit `45c83754cf6409073138a9b7ccfe370262b56d78`, without replacing the running editor's source. All 29 upstream changed files were verified against their pinned Git blob hashes before applying the Linux patch. Six files overlap by name (README, validation evidence, MCP controller, package manifest and controller/MCP test harnesses); the patch applied without rejected hunks or fuzz. The new seven-tool API and version 0.6.0 in both manifests are retained; `read_sprite` is not restored.
+
+- Native aggregate: protocol 71, export 13, executor 70, chat 62, controller 56, Windows-branch launcher 27, timeline 10, account 7, MCP 8, Linux 8 — **332 passed**, with the actual Windows Chat process case skipped on Linux.
+- Full Node aggregate: **114 passed, 7 Windows-only skipped, 0 failed**. This includes the new list/inspect/view SDK-to-native batch flow, PNG/GIF/sheet export, native-approved fixture edit, cleanup and Undo. Test hubs use disposable homes and independent ports, not any active GUI's home.
+- No GUI switch, editor restart, production hub, installation, model request or remote publication was performed for this integration. Earlier GUI observations from another loaded runtime do not validate this combined snapshot.
+- A home is bound to the hub's installed extension root. To switch source directories, first save work, close the old MCP controller and stdio client, then use a separate explicit home for the new root (or orderly stop the verified old owned hub before reusing its home). Reload the complete Lua controller and restart the stdio client to refresh all seven tool definitions; do not mix old Lua or an old client with a new `tools.json`.
+
 ## Environment and authentication
 
 - Windows, Aseprite 1.3.18.6-x64, Codex CLI 0.163.0, Node 24.18.0, ws 8.22.0.

@@ -1,4 +1,5 @@
 local Mcp={}
+local windows=package.config:sub(1,1)=="\\"
 local Session={}
 Session.__index=Session
 
@@ -25,7 +26,7 @@ function Session:_status(state,detail)
     self.dialog:modify{id="detail",text=self.detail}
     local idle=not self.startup and not self.connection
     self.dialog:modify{id="home",enabled=idle}
-    self.dialog:modify{id="register",enabled=idle}
+    self.dialog:modify{id="register",enabled=idle and windows}
     self.dialog:modify{id="connect",enabled=idle}
     self.dialog:modify{id="disconnect",enabled=not idle}
   end
@@ -167,7 +168,10 @@ function Session:start(home,register)
   if self.startup or self.connection then return false,"请先断开当前 MCP 连接。" end
   if type(home)~="string" then return false,"请填写 Codex home。" end
   home=home:match("^%s*(.-)%s*$")
-  if not home:match("^%a:[\\/]") and not home:match("^\\\\") then return false,"Codex home 必须是绝对路径。" end
+  local absolute=windows and (home:match("^%a:[\\/]") or home:match("^\\\\"))
+    or (not windows and home:match("^/"))
+  if not absolute then return false,"Codex home 必须是绝对路径。" end
+  if not windows and register then return false,"Linux 当前仅支持 Connect；请在外部客户端手动配置 stdio。" end
   self.closed=false
   self.preferences.mcp_home=home
   local attempt={}
@@ -245,7 +249,8 @@ function Session:show()
   dialog:entry{id="home",text=home,hexpand=true}
   dialog:newrow(); dialog:label{id="status",text=self.state}
   dialog:newrow(); dialog:label{id="detail",text=self.detail or "Edits require approval in Aseprite."}
-  dialog:newrow(); dialog:label{text="Register backs up config.toml and adds only aseprite_chat."}
+  dialog:newrow(); dialog:label{text=windows and "Register backs up config.toml and adds only aseprite_chat."
+    or "Linux: use Connect and configure stdio in the external client."}
   dialog:newrow()
   local function start(register)
     local ok,err=self:start(dialog.data.home,register)

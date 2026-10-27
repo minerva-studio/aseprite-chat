@@ -9,7 +9,8 @@
   },
   "scripts": {
     "start": "node scripts/server.mjs",
-    "test": "node --test --test-isolation=none tests/*.test.mjs"
+    "test": "node --test --test-isolation=none tests/*.test.mjs",
+    "test:native": "node tests/run-native.mjs"
   },
   "categories": [
     "Scripts"

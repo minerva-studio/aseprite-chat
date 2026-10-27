@@ -1,6 +1,12 @@
 local root = app.fs.filePath(app.fs.filePath(debug.getinfo(1, "S").source:sub(2)))
 assert(app.fs.isFile(app.fs.joinPath(root, "launcher.lua")), "automatic launcher is not implemented")
-local Launcher = dofile(app.fs.joinPath(root, "launcher.lua"))
+-- These existing cases exercise the Windows branch on every host. Linux's real
+-- process boundary and Connect-only behavior are covered by tests/linux.lua.
+local windows_env=setmetatable({package={config="\\"},os=setmetatable({getenv=function(name)
+  if name=="TEMP" then return os.getenv("TEMP") or app.fs.tempPath end
+  return os.getenv(name)
+end},{__index=os})},{__index=_G})
+local Launcher = assert(loadfile(app.fs.joinPath(root, "launcher.lua"),"t",windows_env))()
 local tests, passed = {}, 0
 local function test(name, fn) tests[#tests + 1] = {name, fn} end
 local function eq(actual, expected)
@@ -147,7 +153,7 @@ test("missing native Node fails before executing a startup command",function()
   local env=setmetatable({os=setmetatable({getenv=function(name)
     if name=="TEMP" then return original_getenv(name) end
     return nil
-  end},{__index=os})},{__index=_G})
+  end},{__index=os})},{__index=windows_env})
   local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
   local h=harness(nil,nil,module); h.launcher._options.node=nil
   h:ensure(); eq(#h.commands,0); eq(h.launcher.pending,nil)
@@ -280,7 +286,7 @@ test("missing result does not request file-open permission while startup is pend
   local env=setmetatable({io={open=function(path,mode)
     if mode=="wb" then return io.open(path,mode) end
     opens=opens+1; error("unexpected permission request")
-  end}}, {__index=_G})
+  end}}, {__index=windows_env})
   local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
   local h=harness(nil,nil,module); h:ensure()
   h:tick(3); eq(opens,0); eq(#h.calls,0); assert(h.launcher.pending)
@@ -311,7 +317,7 @@ test("file permission and read failures report once and retire polling", functio
             return true
           end,
         }
-      end}}, {__index=_G})
+      end}}, {__index=windows_env})
     local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
     local h=harness(nil,nil,module); h:ensure(); write(h.result_path,'{}')
     h:tick(2); eq(#h.calls,1); eq(h.calls[1].endpoint,nil)
@@ -323,6 +329,7 @@ end)
 
 -- Run the native os.execute boundary against a gated Node bootstrap. The
 -- launcher must return while that bootstrap is still waiting for the fixture.
+if package.config:sub(1,1)=="\\" then
 test("native Node launch returns before readiness and preserves special paths", function()
   local directory = app.fs.joinPath(app.fs.tempPath, "launcher 中文 ' 100% & $() " .. tostring(Uuid()))
   local scripts = app.fs.joinPath(directory, "scripts")
@@ -364,6 +371,8 @@ export async function startChat({resultPath}) {
   eq(result.endpoint, "ws://127.0.0.1:45123")
 end)
 
+else print("SKIP native Windows Chat launch (covered separately on Windows)") end
+
 test("permission dialogs cannot reenter an in-progress result read", function()
   local h, opens
   opens=0
@@ -373,7 +382,7 @@ test("permission dialogs cannot reenter an in-progress result read", function()
     assert(opens==1, "result read reentered while a native permission dialog was open")
     h:tick()
     return io.open(path,mode)
-  end}}, {__index=_G})
+  end}}, {__index=windows_env})
   local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
   h=harness(nil,nil,module); h:ensure()
   write(h.result_path,'{"endpoint":"ws://127.0.0.1:4501","pid":123}')
@@ -390,7 +399,7 @@ end)
 
 test("initial native permission decisions do not consume the background startup deadline", function()
   local now=0
-  local env=setmetatable({os=setmetatable({time=function() return now end}, {__index=os})}, {__index=_G})
+  local env=setmetatable({os=setmetatable({time=function() return now end}, {__index=windows_env.os})}, {__index=windows_env})
   local module=assert(loadfile(app.fs.joinPath(root,"launcher.lua"),"t",env))()
   local h=harness(function() now=60; return true end,nil,module)
   h:ensure(); h:tick()

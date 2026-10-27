@@ -86,7 +86,13 @@ local function scenario(name, body, configuration)
       return view
     end }
   }
-  local env = setmetatable({ Timer = function(spec)
+  local env = setmetatable({
+    -- Internal Chat's Windows cwd default is independent of this native test host.
+    os=setmetatable({getenv=function(name)
+      if name=="USERPROFILE" then return os.getenv(name) or os.getenv("HOME") end
+      return os.getenv(name)
+    end},{__index=os}),
+    Timer = function(spec)
     if not configuration.timers then return Timer(spec) end
     local timer={ontick=spec.ontick,running=false}
     function timer:start() self.running=true end
@@ -388,7 +394,12 @@ do
   assert(loadfile(app.fs.joinPath(root, "main.lua"), "t", env))()
   local registered={}
   env.init { newCommand = function(_, command) registered[command.id] = command end }
-  local file = assert(io.open(app.fs.joinPath(app.fs.filePath(app.fs.appPath), "data", "gui.xml"), "r"))
+  local executable_dir=app.fs.filePath(app.fs.appPath)
+  local gui=app.fs.joinPath(executable_dir,"data","gui.xml")
+  if not app.fs.isFile(gui) then
+    gui=app.fs.joinPath(app.fs.filePath(executable_dir),"share","aseprite","data","gui.xml")
+  end
+  local file = assert(io.open(gui, "r"))
   local xml = file:read("*a"); file:close()
   local groups = {}
   for group in xml:gmatch('group="([^"]+)"') do groups[group] = true end

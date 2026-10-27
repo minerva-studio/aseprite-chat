@@ -5,6 +5,8 @@ local function scenario(name,body)
   local h={sockets={},launchers={},dialogs={},timers={},owned={}}
   local real_dofile=dofile
   local env=setmetatable({
+    -- Registration scenarios retain the Windows contract; POSIX is tested in linux.lua.
+    package={config="\\"},
     Timer=function(spec)
       local timer={spec=spec,running=false}; function timer:start() self.running=true end; function timer:stop() self.running=false end
       h.timers[#h.timers+1]=timer; return timer

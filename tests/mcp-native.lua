@@ -33,7 +33,7 @@ local steps,filename,dirty=sprite.undoHistory.undoSteps,sprite.filename,sprite.i
 local m=Mcp.new{path=root,preferences={}}
 -- Explicit fixture decision; no GUI is opened and production always asks the user.
 function m.approval:request_approval(_,decision) decision(true) end
-assert(m:start("C:\\native-fixture",false))
+assert(m:start(app.fs.joinPath(app.fs.tempPath,"aseprite-mcp-native-fixture"),false))
 io.stdout:write("NATIVE_MCP_READY\n"); io.stdout:flush()
 for line in io.stdin:lines() do
   local packet=json.decode(line)

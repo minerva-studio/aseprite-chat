@@ -48,16 +48,24 @@ local function absolute(path)
     and (path:match("^%a:[/\\]") ~= nil or path:match("^[/\\][/\\]") ~= nil or path:match("^/") ~= nil)
 end
 
+-- Match scripts/server.mjs when LOCALAPPDATA is absent (including Linux).
+local function data_root()
+  local local_data=os.getenv("LOCALAPPDATA")
+  if local_data and local_data~="" then return local_data end
+  local home=os.getenv("USERPROFILE") or os.getenv("HOME") or app.fs.userConfigPath
+  return app.fs.joinPath(home,"AppData","Local")
+end
+
 --- The account file lives beside the bridge's discovery metadata. The bridge
 --- reads the same override so tests never touch the user's real file.
 function Account.path()
   local override = os.getenv("ASEPRITE_CHAT_ACCOUNT_FILE")
   if override and override ~= "" then return override end
-  return app.fs.joinPath(os.getenv("LOCALAPPDATA") or "", "AsepriteChat", "providers.json")
+  return app.fs.joinPath(data_root(), "AsepriteChat", "providers.json")
 end
 
 function Account.default_home()
-  return app.fs.joinPath(os.getenv("LOCALAPPDATA") or "", "AsepriteChat", "codex-home")
+  return app.fs.joinPath(data_root(), "AsepriteChat", "codex-home")
 end
 
 local function defaults()

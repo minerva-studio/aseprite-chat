@@ -6,7 +6,7 @@ The editor extension is Lua. Opening the chat automatically finds or starts a sm
 
 ## Requirements
 
-- Windows, Aseprite 1.3.18.6, and Codex CLI 0.163.0 are the initial verification environment. Other versions/platforms are not claimed as tested.
+- Windows, Aseprite 1.3.18.6, and Codex CLI 0.163.0 are the initial full-chat verification environment. Linux supports **external MCP Connect only** with Aseprite 1.3.18.6 and Node.js 24 or later; see the Linux instructions below. Linux internal Chat and automatic Codex registration are not supported by this change.
 - Codex must already be signed in (`codex login`) for the default account. The plugin uses that login through app-server. A **Custom Codex home** account (below) can instead use an API key or a compatible Responses endpoint, in which case a Codex login is not required.
 - Node.js 24 or later is required for the local communication bridge. The plugin locates it and the Codex executable automatically; pinned JavaScript runtime dependencies are included in the extension.
 - The installed Codex version must support the experimental dynamic-tool API. The plugin opts into the experimental protocol during initialization.
@@ -23,7 +23,7 @@ The bridge launches `codex app-server --stdio` for each chat client connection, 
 
 **Settings... > Manual server (advanced)** is an explicit opt-in for a separately managed compatible bridge. Developer-only manual startup remains available with `npm start`, `CODEX_CLI` and `ASEPRITE_CHAT_PORT`; these are not required in the normal plugin flow.
 
-Chat's cold bootstrap starts native Node through a short detached cmd entry, without invoking PowerShell. Installed paths and job parameters remain JSON data in an owned temporary JavaScript entry, which survives until background completion/cancellation. Discovery, Codex lookup and bridge readiness run in Node; the Lua timer consumes only the final result. The same launcher remembers its last verified endpoint/PID and first rechecks it through a one-second native WebSocket health probe on reopening. This probe starts no Codex process, reserves no chat session and does not extend the bridge's idle lifetime. An idle protocol-4 match skips the startup command; a dead, busy, mismatched or timed-out service requires cold startup again. First-use native network permission can apply to this probe. The explicit MCP registration/connect bootstrap keeps its existing PowerShell path. Cold `os.execute` still has measurable synchronous overhead; the user chose to accept that first/cold-start pause rather than install a Windows login background component. No login startup item is installed.
+Chat's cold bootstrap starts native Node through a short detached cmd entry, without invoking PowerShell. Installed paths and job parameters remain JSON data in an owned temporary JavaScript entry, which survives until background completion/cancellation. Discovery, Codex lookup and bridge readiness run in Node; the Lua timer consumes only the final result. The same launcher remembers its last verified endpoint/PID and first rechecks it through a one-second native WebSocket health probe on reopening. This probe starts no Codex process, reserves no chat session and does not extend the bridge's idle lifetime. An idle protocol-4 match skips the startup command; a dead, busy, mismatched or timed-out service requires cold startup again. First-use native network permission can apply to this probe. On Windows, the explicit MCP registration/connect bootstrap keeps its existing PowerShell path. Linux MCP Connect uses a private temporary Node job instead. Cold `os.execute` still has measurable synchronous overhead; the user chose to accept that first/cold-start pause rather than install a Windows login background component. No login startup item is installed.
 
 Aseprite may ask permission to connect to localhost and create/read a temporary PNG preview. Grant those permissions only for this installed extension. The preview is an independent render; the original sprite is not saved or flattened.
 
@@ -56,6 +56,29 @@ MCP export paths survive individual calls but expire when that external client d
 
 Registration uses [Codex's documented MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli). A local Codex home registration does not configure ChatGPT web, which does not read local Codex configuration files. The new MCP transport is first verified with SDK clients, isolated native Codex CLI registration and batch Aseprite documents; production GUI/WebSocket approval timing and real model selection remain separate manual checks.
 
+### Linux: connect an external MCP client
+
+Install the same extension package, or install lockfile dependencies in the source checkout with `npm ci --ignore-scripts`. Make sure **the Aseprite process** inherits a PATH containing Node.js 24+; desktop launchers do not necessarily inherit a terminal's PATH. Restart Aseprite from that terminal if needed.
+
+1. Open **View > Aseprite MCP**, enter an absolute Linux home such as `/home/me/aseprite-mcp-home`, and click **Connect**. Use a dedicated home for isolated testing rather than your normal Codex account. Windows drive paths, relative paths and literal `~` are not accepted on Linux.
+2. Configure your external MCP client's **stdio** command as an absolute Node executable, with these arguments (replace all example paths):
+
+   ```json
+   {
+     "command": "/absolute/path/to/node",
+     "args": ["/absolute/path/to/aseprite-chat/scripts/mcp-server.mjs", "--home", "/home/me/aseprite-mcp-home"]
+   }
+   ```
+
+   This is the server entry to put inside your client's MCP configuration format. It is not an HTTP URL. A local Codex CLI client may use the equivalent `[mcp_servers.aseprite_chat]` `command` and `args` fields in its own configuration.
+3. Keep the panel and external client on the same machine/network namespace and use exactly the same home. Ask the client to inspect the active sprite, then approve any proposed edit in Aseprite. Reads, previews, revision checks, native approval, Undo and export cleanup use the existing implementation.
+
+**Connect does not discover/run Codex, register MCP, read its `config.toml`, or log in.** The external client owns its own model/login. **Register & connect** is unavailable on Linux; configure the client explicitly. Internal **Aseprite Chat** startup is still Windows-only.
+
+Linux startup creates an exclusive `0700` temporary directory before writing its job and result, quotes shell paths, and preserves Aseprite's native file/process/network permission prompts. The hub remains authenticated and bound to `127.0.0.1`; its private capability descriptor under `<home>/.aseprite-chat` must not be shared. Disconnect does not kill another editor or a shared hub; a no-peer hub exits after two idle minutes.
+
+For compatibility with the existing Node bridge, account defaults without `LOCALAPPDATA` use `$HOME/AppData/Local/AsepriteChat`; the panel can instead use any explicit absolute home. The `ASEPRITE_CHAT_ACCOUNT_FILE` override is preserved. No account file is required for Connect.
+
 ## Canvas tools
 
 The model works through the extension's own tools:
@@ -84,6 +107,8 @@ inspect_sprite({sections: ["palette"], frame: 3, offset: 0, limit: 32})
 Ordinary Chat sends/steers attach only `{hasSprite,spriteId?,frame?,layerId?,revision?}`; they never automatically send a palette, image or full structure. Chat works with no canvas. Document operations return a failed tool result with `{error:{code:"NO_OPEN_SPRITE",message:...}}` when no document is open; the MCP connection stays online. Internal revision observations remain complete, so this is a payload reduction, not a promise of faster document scanning.
 
 This release deliberately breaks the previous tool contract. `read_sprite` is removed. Codex fixes dynamic tools when a thread starts, so start a new conversation to use these tools; previous tool definitions are not translated or supported. Reconnect external MCP clients to refresh their catalogs. Existing transcripts remain readable.
+
+**Upgrading a running MCP installation:** the hub caches its tool catalog when it starts. Reconnecting only the external client can leave an old five-tool hub alive, even when the files were updated in place. Reload the complete native Lua controller and restart the stdio client using a fresh dedicated home, or first disconnect every old editor/client and verify that the old owned hub has exited. A hub with no peers exits after two idle minutes. Preserve unsaved work before any editor restart; a transport-only switch does not require closing Aseprite. Never mix old Lua, an old hub or an old client with the new tool definitions.
 
 ### Export parameters
 
@@ -178,7 +203,15 @@ npm test
 ./tests/package.ps1
 ```
 
-The test runner checks printed pass markers as well as exit codes because Aseprite can print a Lua error while returning zero.
+The test runners check printed pass markers as well as exit codes because Aseprite can print a Lua error while returning zero. A cross-platform runner creates an isolated Aseprite profile automatically:
+
+```sh
+npm run test:native -- /absolute/path/to/aseprite
+# SDK/native integration also needs an executable and a writable disposable profile:
+ASEPRITE_EXE=/absolute/path/to/aseprite ASEPRITE_USER_FOLDER=/absolute/disposable/profile npm test
+```
+
+On Linux, Windows launcher/controller branches run with explicit test platform/environment fixtures; the actual Windows Chat process test is skipped. `tests/linux.lua` exercises the real POSIX process boundary without starting a hub or model. These batch checks do not establish visible GUI/WebSocket permission timing.
 
 For native GUI integration, start `node tests/fixture.mjs`, then launch a **separate disposable** Aseprite process with `--script tests/gui.lua`. This driver creates its own unsaved sprite, exercises approvals/rejection/stale edits/stop/reconnect, and writes `work/gui-fixture.txt` before closing its own editor. Do not run the driver inside an editor containing your work.
 
