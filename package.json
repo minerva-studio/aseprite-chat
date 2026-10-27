@@ -3,6 +3,7 @@
   "displayName": "Aseprite Chat",
   "description": "Chat with Codex and edit the current unsaved sprite through a native Lua interface.",
   "version": "0.6.1",
+  "license": "MIT",
   "private": true,
   "engines": {
     "node": ">=24"

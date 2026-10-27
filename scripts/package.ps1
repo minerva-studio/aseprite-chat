@@ -1,7 +1,7 @@
 param([string]$OutputPath)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$runtimeFiles = @('package.json', 'package-lock.json', 'main.lua', 'chat.lua', 'chat.aseprite-keys', 'codex.lua', 'executor.lua', 'export.lua', 'mcp.lua', 'tools.json', 'launcher.lua', 'timeline.lua', 'account.lua', 'scripts/server.mjs', 'scripts/start-chat.mjs', 'scripts/mcp-server.mjs', 'scripts/mcp-bridge.mjs', 'scripts/register-mcp.mjs', 'scripts/mcp-launch.ps1', 'README.md', 'docs/validation.md')
+$runtimeFiles = @('package.json', 'package-lock.json', 'LICENSE', 'main.lua', 'chat.lua', 'chat.aseprite-keys', 'codex.lua', 'executor.lua', 'export.lua', 'mcp.lua', 'tools.json', 'launcher.lua', 'timeline.lua', 'account.lua', 'scripts/server.mjs', 'scripts/start-chat.mjs', 'scripts/mcp-server.mjs', 'scripts/mcp-bridge.mjs', 'scripts/register-mcp.mjs', 'scripts/mcp-launch.ps1', 'README.md', 'docs/validation.md')
 foreach ($file in $runtimeFiles) {
   if (-not (Test-Path -LiteralPath (Join-Path $projectRoot $file) -PathType Leaf)) { throw "Missing runtime file: $file" }
 }

@@ -240,3 +240,7 @@ The authenticated integration variant is `--script-param mode=live --script test
 `tests/gui-steering-live.lua` accepts `--script-param endpoint=ws://127.0.0.1:<test bridge port>` and must run in a disposable editor/profile. It creates its own unsaved sprite, waits for a real edit approval, steers to a no-edit answer, checks the old approval cannot execute, and closes its own editor after writing `work/steering-live-result.json`.
 
 See [validation evidence](docs/validation.md) for actual results and limitations. `main.lua` owns internal chat lifecycle; `chat.lua` owns its UI; `codex.lua` handles app-server; `executor.lua` implements the shared `tools.json` definitions; `export.lua` owns encoders/artifacts. `mcp.lua` owns external native control, `scripts/mcp-bridge.mjs` its loopback hub, `scripts/mcp-server.mjs` the SDK stdio surface, and `scripts/register-mcp.mjs` plus `scripts/mcp-launch.ps1` selected-home registration. `account.lua` stores account settings; `launcher.lua` supplies asynchronous native bootstrapping. `tests/live-account.mjs` remains an opt-in app-server check using a disposable home/local mock (or an actual default-account turn with `--default-live`).
+
+## License
+
+Licensed under the [MIT License](LICENSE). Bundled third-party dependencies retain their own licenses and copyright notices, included in the extension package.

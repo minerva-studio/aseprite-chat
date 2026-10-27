@@ -12,7 +12,8 @@ try {
   if ($firstManifest.FullName -ne 'package.json' -or $manifest.name -ne 'aseprite-chat') {
     throw "Aseprite would install '$($manifest.name)' from '$($firstManifest.FullName)' instead of Aseprite Chat"
   }
-  foreach ($file in @('main.lua','executor.lua','export.lua','mcp.lua','tools.json','launcher.lua','timeline.lua','scripts/start-chat.mjs','scripts/server.mjs','scripts/mcp-server.mjs','scripts/mcp-bridge.mjs','scripts/register-mcp.mjs','scripts/mcp-launch.ps1','node_modules/@modelcontextprotocol/sdk/package.json','node_modules/ws/package.json','node_modules/ws/wrapper.mjs','node_modules/ws/LICENSE')) {
+  if ($manifest.license -ne 'MIT') { throw 'Missing packaged MIT license declaration' }
+  foreach ($file in @('LICENSE','main.lua','executor.lua','export.lua','mcp.lua','tools.json','launcher.lua','timeline.lua','scripts/start-chat.mjs','scripts/server.mjs','scripts/mcp-server.mjs','scripts/mcp-bridge.mjs','scripts/register-mcp.mjs','scripts/mcp-launch.ps1','node_modules/@modelcontextprotocol/sdk/package.json','node_modules/@modelcontextprotocol/sdk/LICENSE','node_modules/ws/package.json','node_modules/ws/wrapper.mjs','node_modules/ws/LICENSE')) {
     if (-not $archive.GetEntry($file)) { throw "Missing installed runtime: $file" }
   }
   $keys = @($manifest.contributes.keys)
