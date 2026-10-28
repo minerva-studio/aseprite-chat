@@ -171,13 +171,13 @@ test("MCP retains its explicit PowerShell bootstrap",function()
   h.launcher:cancel()
 end)
 
-test("MCP bootstrap accepts only its authenticated editor endpoint",function()
+test("MCP bootstrap accepts registration without starting a hub",function()
   local h=harness()
   h.launcher._options.script="mcp-launch.ps1"
-  h.launcher._options.parameters={CodexHome="C:\\Codex 中文 ' & $()",ConnectOnly=true}
+  h.launcher._options.parameters={CodexHome="C:\\Codex 中文 ' & $()"}
   h:ensure()
-  write(h.result_path,'{"endpoint":"ws://127.0.0.1:45123/editor/test_nonce-123"}')
-  h:tick(); eq(h.calls[1].endpoint,"ws://127.0.0.1:45123/editor/test_nonce-123")
+  write(h.result_path,'{"registered":true}')
+  h:tick(); eq(h.calls[1].endpoint,true)
   local bad=harness(); bad.launcher._options.script="mcp-launch.ps1"; bad:ensure()
   write(bad.result_path,'{"endpoint":"ws://127.0.0.1:45123/client/secret"}')
   bad:tick(); assert(bad.calls[1].error)

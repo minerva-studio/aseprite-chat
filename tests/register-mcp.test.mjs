@@ -7,7 +7,6 @@ import { spawn } from 'node:child_process';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const implementation = await import('../scripts/register-mcp.mjs').catch(() => ({}));
-const endpoint = 'ws://127.0.0.1:45678/editor/secret';
 const seed = '# keep this comment\nmodel_provider = "fixture"\n\n[model_providers.fixture]\nname = "Fixture"\nbase_url = "https://example.invalid/v1"\n\n[mcp_servers.unrelated]\ncommand = "unrelated-command"\nargs = ["keep-me"]\n';
 
 async function fixture() {
@@ -33,11 +32,7 @@ function owned(options, overrides = {}) {
 function boundary(options, initial = [], behavior = {}) {
   const calls = [];
   let entries = initial;
-  return { calls, ensureBridge: async parameters => {
-    assert.deepEqual(parameters, { home: options.home, extensionRoot: options.extensionRoot });
-    if (behavior.ensureError) throw Error('private-key-content');
-    return { endpoint, clientEndpoint: 'ws://127.0.0.1:45678/client/private' };
-  }, runCodex: async (executable, args, childOptions) => {
+  return { calls, runCodex: async (executable, args, childOptions) => {
     calls.push(args);
     assert.equal(executable, options.codexPath);
     assert.equal(childOptions.env.CODEX_HOME, options.home);
@@ -65,13 +60,21 @@ function boundary(options, initial = [], behavior = {}) {
 
 test('exports registerMcp', () => assert.equal(typeof implementation.registerMcp, 'function'));
 
-test('backs up bytes, uses native argv and publishes only editor endpoint', async () => {
+test('registration publishes success without starting a bridge', async () => {
+  const options = await fixture();
+  const deps = boundary(options);
+  deps.ensureBridge = () => assert.fail('Registration must never start the hub');
+  assert.deepEqual(await implementation.registerMcp(options, deps), { registered: true });
+  assert.equal((await readdir(options.home)).includes('mcp-bridge.json'), false);
+});
+
+test('backs up bytes, uses native argv and publishes registration only', async () => {
   const options = await fixture();
   await writeFile(path.join(options.home, 'config.toml'), seed);
   const previousHome = process.env.CODEX_HOME;
   const deps = boundary(options);
   const result = await implementation.registerMcp(options, deps);
-  assert.equal(result.endpoint, endpoint);
+  assert.equal(result.endpoint, undefined);
   assert.equal(result.registered, true);
   assert.match(result.backup, /config-backup-[\da-f-]+\.toml$/);
   assert.equal(await readFile(result.backup, 'utf8'), seed);
@@ -90,7 +93,7 @@ test('exact existing registration is idempotent without touching config or makin
   const before = await stat(config);
   const deps = boundary(options, [owned(options)]);
   const result = await implementation.registerMcp(options, deps);
-  assert.deepEqual(result, { endpoint, registered: true });
+  assert.deepEqual(result, { registered: true });
   assert.deepEqual(deps.calls.map(args => args[1]), ['list', 'get']);
   assert.equal((await stat(config)).mtimeMs, before.mtimeMs);
   assert.equal(await readFile(config, 'utf8'), seed);
@@ -116,15 +119,6 @@ for (const change of [
   assert.equal(JSON.stringify(result).includes('private-key-content'), false);
 });
 
-test('connect-only does not find or invoke Codex or create config', async () => {
-  const options = { ...await fixture(), connectOnly: true, codexPath: 'not-an-executable' };
-  const deps = boundary(options);
-  const result = await implementation.registerMcp(options, deps);
-  assert.deepEqual(result, { endpoint, registered: false });
-  assert.deepEqual(deps.calls, []);
-  assert.deepEqual(await readdir(options.home), []);
-});
-
 test('failed add keeps backup and concurrent config changes without blind rollback', async () => {
   const options = await fixture();
   await writeFile(path.join(options.home, 'config.toml'), seed);
@@ -148,7 +142,7 @@ test('refuses stale list when config changed before mutation', async () => {
   assert.equal(await readFile(config, 'utf8'), 'concurrent change\n');
 });
 
-test('verifies get command and args before starting bridge', async () => {
+test('rejects unexpected verified command and args', async () => {
   const options = await fixture();
   const deps = boundary(options, [], { getValue: owned(options, { transport: { type: 'stdio', command: 'wrong', args: [] } }) });
   deps.ensureBridge = () => assert.fail('must not start bridge after failed verification');
@@ -167,20 +161,11 @@ for (const home of ['', '   ', 'relative/home']) test(`rejects invalid home ${JS
 
 test('trims selected home and rejects wrong root identity with safe error', async () => {
   const options = await fixture();
-  const result = await implementation.registerMcp({ ...options, home: `  ${options.home}  `, connectOnly: true }, boundary(options));
-  assert.equal(result.endpoint, endpoint);
+  const result = await implementation.registerMcp({ ...options, home: `  ${options.home}  ` }, boundary(options));
+  assert.equal(result.endpoint, undefined);
   await writeFile(path.join(options.extensionRoot, 'package.json'), '{"name":"wrong"}');
   const failed = await implementation.registerMcp(options, boundary(options));
   assert.match(failed.error, /扩展/);
-});
-
-test('bridge errors publish Chinese safe diagnostics atomically', async () => {
-  const options = { ...await fixture(), connectOnly: true };
-  await writeFile(options.resultPath, '{"old":true}');
-  const result = await implementation.registerMcp(options, boundary(options, [], { ensureError: true }));
-  assert.match(result.error, /连接/);
-  assert.equal(result.error.includes('private-key-content'), false);
-  assert.deepEqual(JSON.parse(await readFile(options.resultPath, 'utf8')), result);
 });
 
 for (const source of ['PATH', 'LOCALAPPDATA', 'npm-wrapper']) test(`finds native Windows Codex through ${source} without executing wrappers`, { skip: process.platform !== 'win32' }, async () => {
@@ -202,7 +187,7 @@ for (const source of ['PATH', 'LOCALAPPDATA', 'npm-wrapper']) test(`finds native
     const deps = boundary({ ...options, codexPath: candidate });
     const result = await implementation.registerMcp({ ...options, codexPath: undefined }, deps);
     assert.equal(result.error, undefined, result.error);
-    assert.equal(result.endpoint, endpoint);
+    assert.equal(result.endpoint, undefined);
   } finally {
     for (const [name, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[name]; else process.env[name] = value;
@@ -227,14 +212,14 @@ test('real native Codex preserves unrelated settings and registers special-chara
   options.codexPath = path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe');
   await writeFile(path.join(options.home, 'config.toml'), seed);
   await writeFile(path.join(options.home, 'providers.json'), '{"sentinel":"unchanged"}');
-  const deps = { ensureBridge: boundary(options).ensureBridge };
+  const deps = {};
   const result = await implementation.registerMcp(options, deps);
   assert.equal(result.error, undefined, result.error);
   assert.equal(await readFile(result.backup, 'utf8'), seed);
   const config = await readFile(path.join(options.home, 'config.toml'), 'utf8');
   assert.ok(config.startsWith(seed));
   assert.equal(await readFile(path.join(options.home, 'providers.json'), 'utf8'), '{"sentinel":"unchanged"}');
-  assert.deepEqual(await implementation.registerMcp(options, deps), { endpoint, registered: true });
+  assert.deepEqual(await implementation.registerMcp(options, deps), { registered: true });
   assert.equal(await readFile(path.join(options.home, 'config.toml'), 'utf8'), config);
   assert.equal((await readdir(path.join(options.home, '.aseprite-chat'))).length, 1);
 });
@@ -243,13 +228,13 @@ test('real native Codex registers a new home directory without an existing confi
   const options = await fixture();
   options.home = path.join(options.directory, 'new home', 'not created yet');
   options.codexPath = path.join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe');
-  const deps = { ensureBridge: boundary(options).ensureBridge };
+  const deps = {};
   const result = await implementation.registerMcp(options, deps);
   assert.equal(result.error, undefined, result.error);
   assert.equal(result.registered, true);
   assert.equal(result.backup, undefined);
   assert.match(await readFile(path.join(options.home, 'config.toml'), 'utf8'), /\[mcp_servers\.aseprite_chat\]/);
-  assert.deepEqual(await implementation.registerMcp(options, deps), { endpoint, registered: true });
+  assert.deepEqual(await implementation.registerMcp(options, deps), { registered: true });
 });
 
 test('real native Codex refuses foreign collision without changing config or creating backup', { skip: process.platform !== 'win32', timeout: 30000 }, async () => {
@@ -278,7 +263,7 @@ const timer = setInterval(() => { if (existsSync(result + '.release')) {
 } }, 50);`);
   const before = Date.now();
   const bootstrap = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-Command',
-    '$text = [IO.File]::ReadAllText($env:MCP_TEST_SCRIPT); $block = [ScriptBlock]::Create($text); & $block -ResultPath $env:MCP_TEST_RESULT -ExtensionRoot $env:MCP_TEST_ROOT -CodexHome $env:MCP_TEST_HOME -ConnectOnly'],
+    '$text = [IO.File]::ReadAllText($env:MCP_TEST_SCRIPT); $block = [ScriptBlock]::Create($text); & $block -ResultPath $env:MCP_TEST_RESULT -ExtensionRoot $env:MCP_TEST_ROOT -CodexHome $env:MCP_TEST_HOME'],
   { env: { ...process.env, CODEX_HOME: options.home, MCP_TEST_SCRIPT: path.join(options.extensionRoot, 'scripts/mcp-launch.ps1'),
     MCP_TEST_RESULT: options.resultPath, MCP_TEST_ROOT: options.extensionRoot, MCP_TEST_HOME: options.home }, timeout: 12000 });
   assert.equal(bootstrap.code, 0, bootstrap.stderr);
@@ -289,50 +274,32 @@ const timer = setInterval(() => { if (existsSync(result + '.release')) {
     try { published = JSON.parse(await readFile(options.resultPath, 'utf8')); break; }
     catch { await new Promise(resolve => setTimeout(resolve, 100)); }
   }
-  assert.deepEqual(published, { args: ['--home', options.home, '--root', options.extensionRoot, '--result', options.resultPath, '--connect-only'], home: options.home });
+  assert.deepEqual(published, { args: ['--home', options.home, '--root', options.extensionRoot, '--result', options.resultPath], home: options.home });
 });
 
-test('real PowerShell to helper to native Codex to hub bootstrap uses selected home only', { skip: process.platform !== 'win32', timeout: 30000 }, async () => {
+test('real PowerShell registration creates no hub descriptor', { skip: process.platform !== 'win32', timeout: 30000 }, async () => {
   const options = await fixture();
-  for (const name of ['register-mcp.mjs', 'mcp-launch.ps1', 'mcp-bridge.mjs']) {
+  for (const name of ['register-mcp.mjs', 'mcp-launch.ps1']) {
     await cp(path.join(root, 'scripts', name), path.join(options.extensionRoot, 'scripts', name));
   }
-  await cp(path.join(root, 'tools.json'), path.join(options.extensionRoot, 'tools.json'));
   await writeFile(path.join(options.home, 'config.toml'), seed);
   const bootstrap = await run('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Restricted', '-Command',
     '$block = [ScriptBlock]::Create([IO.File]::ReadAllText($env:MCP_TEST_SCRIPT)); & $block -ResultPath $env:MCP_TEST_RESULT -ExtensionRoot $env:MCP_TEST_ROOT -CodexHome $env:MCP_TEST_HOME'],
   { env: { ...process.env, CODEX_HOME: options.home, MCP_TEST_SCRIPT: path.join(options.extensionRoot, 'scripts/mcp-launch.ps1'),
     MCP_TEST_RESULT: options.resultPath, MCP_TEST_ROOT: options.extensionRoot, MCP_TEST_HOME: options.home }, timeout: 12000 });
   assert.equal(bootstrap.code, 0, bootstrap.stderr);
-  let descriptor;
-  try {
-    let result;
-    for (let i = 0; i < 150; i++) {
-      try { result = JSON.parse(await readFile(options.resultPath, 'utf8')); break; }
-      catch { await new Promise(resolve => setTimeout(resolve, 100)); }
-    }
-    assert.ok(result, 'helper must publish a result');
-    assert.equal(result.error, undefined, result.error);
-    assert.equal(result.registered, true);
-    descriptor = JSON.parse(await readFile(path.join(options.home, '.aseprite-chat/mcp-bridge.json'), 'utf8'));
-    assert.equal(result.endpoint, descriptor.endpoint);
-    assert.equal(descriptor.home, options.home);
-    assert.equal('clientEndpoint' in result, false);
-    assert.equal(await readFile(result.backup, 'utf8'), seed);
-    const config = await readFile(path.join(options.home, 'config.toml'), 'utf8');
-    assert.ok(config.startsWith(seed));
-    assert.ok(config.includes('aseprite_chat'));
-    const { default: WebSocket } = await import('ws');
-    const editor = new WebSocket(result.endpoint);
-    await new Promise((resolve, reject) => { editor.once('open', resolve); editor.once('error', reject); });
-    editor.close();
-    const connected = await implementation.registerMcp({ ...options, connectOnly: true });
-    assert.deepEqual(connected, { endpoint: descriptor.endpoint, registered: false });
-    assert.equal(await readFile(path.join(options.home, 'config.toml'), 'utf8'), config);
-  } finally {
-    // Only the daemon identity from this unique test home is eligible for cleanup.
-    if (descriptor?.home === options.home && descriptor.pid !== process.pid) {
-      try { process.kill(descriptor.pid); } catch (error) { if (error.code !== 'ESRCH') throw error; }
-    }
+  let result;
+  for (let i = 0; i < 150; i++) {
+    try { result = JSON.parse(await readFile(options.resultPath, 'utf8')); break; }
+    catch { await new Promise(resolve => setTimeout(resolve, 100)); }
   }
+  assert.ok(result, 'helper must publish a result');
+  assert.equal(result.error, undefined, result.error);
+  assert.equal(result.registered, true);
+  assert.equal(result.endpoint, undefined);
+  assert.equal(await readFile(result.backup, 'utf8'), seed);
+  const config = await readFile(path.join(options.home, 'config.toml'), 'utf8');
+  assert.ok(config.startsWith(seed));
+  assert.ok(config.includes('aseprite_chat'));
+  assert.deepEqual(await readdir(path.join(options.home, '.aseprite-chat')), [path.basename(result.backup)]);
 });

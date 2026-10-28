@@ -6,9 +6,9 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket, { WebSocketServer } from 'ws';
 
-const protocol = 'aseprite-chat-mcp/1';
+const protocol = 'aseprite-chat-mcp/2';
 const maxBytes = 16 * 1024 * 1024;
-const offline = 'Open Aseprite MCP and connect';
+const offline = 'Enable Aseprite MCP for this home and keep the editor running';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failure = text => ({ success: false, contentItems: [{ type: 'inputText', text }] });
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -152,16 +152,16 @@ function validResult(result) {
 
 /**
  * Start an owned loopback hub. Returns {descriptor, descriptorPath, close()}.
- * Timeouts default to 90s per active operation and 120s with no connected peers.
+ * Timeouts default to 5s for editor attachment, 90s per active operation, and
+ * 120s without operations. Connected peers do not prevent idle retirement.
  * A matching result acknowledges cancellation; no new native work starts earlier.
  */
-export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 90000, idleTimeoutMs = 120000 }) {
-  if (!(activeTimeoutMs > 0) || !(idleTimeoutMs > 0)) throw Error('Timeouts must be positive');
+export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 90000, idleTimeoutMs = 120000, editorTimeoutMs = 5000 }) {
+  if (!(activeTimeoutMs > 0) || !(idleTimeoutMs > 0) || !(editorTimeoutMs > 0)) throw Error('Timeouts must be positive');
   const loc = await locations(home, extensionRoot);
   const tools = new Set(JSON.parse(await readFile(path.join(loc.extensionRoot, 'tools.json'), 'utf8')).map(tool => tool.name));
   const descriptor = { protocol, identity: randomUUID(), pid: process.pid, home: loc.home,
     extensionRoot: loc.extensionRoot, token: randomBytes(32).toString('hex') };
-  const clients = new Map();
   let editor = null;
   let active = null;
   let idleTimer;
@@ -180,18 +180,32 @@ export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 9
     clearTimeout(active.timer);
     if (!active.cancelled) reply(active.client, active.requestId, result);
     active = null;
+    idle();
   };
   const cancel = () => {
     if (!active || active.cancelled) return;
     active.cancelled = true;
     reply(active.client, active.requestId, failure('Operation cancelled'));
-    send(editor, { type: 'cancel', id: active.id });
+    if (active.dispatched) send(editor, { type: 'cancel', id: active.id });
+    else finish(failure('Operation cancelled'));
   };
   const idle = () => {
     clearTimeout(idleTimer);
-    if (!closed && !editor && clients.size === 0) idleTimer = setTimeout(() => {
+    if (!closed && !active) idleTimer = setTimeout(() => {
       close().catch(error => console.error(error.message));
     }, idleTimeoutMs);
+  };
+  const dispatch = () => {
+    if (!active || active.dispatched || !editor) return;
+    clearTimeout(active.timer);
+    active.dispatched = true;
+    active.timer = setTimeout(() => {
+      const staleEditor = editor;
+      editor = null;
+      finish(failure('Aseprite operation timed out; reconnect the editor'));
+      staleEditor?.terminate();
+    }, activeTimeoutMs);
+    send(editor, { type: 'call', id: active.id, clientId: active.clientId, tool: active.tool, arguments: active.arguments });
   };
   function nativeRequest(req, role) {
     if (req.headers.host !== `127.0.0.1:${server.address()?.port}`) return false;
@@ -218,10 +232,8 @@ export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 9
       socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return;
     }
     peers.handleUpgrade(req, socket, head, ws => {
-      clearTimeout(idleTimer);
       const clientId = role === 'client' ? randomUUID() : null;
-      if (role === 'editor') editor = ws;
-      else clients.set(ws, clientId);
+      if (role === 'editor') { editor = ws; dispatch(); }
       ws.on('error', () => {});
       ws.on('message', (data, binary) => {
         let message;
@@ -229,7 +241,7 @@ export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 9
         catch { ws.close(1008, 'Invalid JSON message'); return; }
         if (!object(message)) { ws.close(1008, 'Invalid message'); return; }
         if (role === 'editor') {
-          if (editor !== ws || message.type !== 'result' || message.id !== active?.id) return;
+          if (editor !== ws || !active?.dispatched || message.type !== 'result' || message.id !== active?.id) return;
           finish(validResult(message.result) ? message.result : failure('Malformed native tool result'));
           return;
         }
@@ -246,27 +258,20 @@ export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 9
           reply(ws, message.id, failure('Malformed or unknown tool call')); return;
         }
         if (active) { reply(ws, message.id, failure('Aseprite is busy; retry after the current operation completes')); return; }
-        if (!editor) { reply(ws, message.id, failure(offline)); return; }
+        clearTimeout(idleTimer);
         const id = randomUUID();
-        active = { id, client: ws, clientId, requestId: message.id, cancelled: false,
-          timer: setTimeout(() => {
-            const staleEditor = editor;
-            editor = null;
-            finish(failure('Aseprite operation timed out; reconnect the editor'));
-            staleEditor?.terminate();
-            idle();
-          }, activeTimeoutMs) };
-        send(editor, { type: 'call', id, clientId, tool: message.tool, arguments: message.arguments });
+        active = { id, client: ws, clientId, requestId: message.id, cancelled: false, dispatched: false,
+          tool: message.tool, arguments: message.arguments,
+          timer: setTimeout(() => finish(failure(offline)), editorTimeoutMs) };
+        dispatch();
       });
       ws.on('close', () => {
         if (role === 'editor') {
           if (editor === ws) { editor = null; finish(failure(`${offline}: editor disconnected`)); }
         } else {
-          clients.delete(ws);
           if (active?.client === ws) cancel();
           send(editor, { type: 'client_closed', clientId });
         }
-        idle();
       });
     });
   });
@@ -276,11 +281,13 @@ export async function createMcpBridge({ home, extensionRoot, activeTimeoutMs = 9
     closing = (async () => {
       clearTimeout(idleTimer);
       finish(failure('MCP bridge closed'));
+      // Publish retirement before notifying peers, so their next call can start
+      // a replacement instead of rediscovering this closing owner's descriptor.
+      await removeOwned(loc.descriptorPath, descriptor.identity);
       for (const ws of peers.clients) ws.terminate();
       await new Promise(resolve => peers.close(resolve));
       server.closeAllConnections();
       await new Promise(resolve => server.close(resolve));
-      await removeOwned(loc.descriptorPath, descriptor.identity);
     })();
     return closing;
   }

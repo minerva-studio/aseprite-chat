@@ -1,4 +1,4 @@
--- Linux Connect-only regressions. No real hub, Codex config or login is used.
+-- Linux startup and on-demand discovery regressions. No real hub, Codex config or login is used.
 local root=app.fs.filePath(app.fs.filePath(debug.getinfo(1,"S").source:sub(2)))
 local passed,total=0,0
 local function test(name,body)
@@ -38,11 +38,10 @@ local function controller(platform)
   return m,calls
 end
 
-test("MCP accepts an absolute POSIX home and connects without registration",function()
+test("MCP accepts an absolute POSIX home and enables process-free discovery",function()
   local m,calls=controller()
   assert(m:start("  /home/artist/账户 ' $()  ",false))
-  assert(calls[1].parameters.CodexHome=="/home/artist/账户 ' $()")
-  assert(calls[1].parameters.ConnectOnly==true)
+  assert(#calls==0 and m.watch_timer and m.preferences.mcp_enabled)
   m:close()
 end)
 
@@ -56,7 +55,7 @@ test("MCP registers into an absolute Linux Codex home",function()
   local m,calls=controller()
   assert(m:start("/home/artist/.codex",true))
   assert(calls[1].parameters.CodexHome=="/home/artist/.codex")
-  assert(calls[1].parameters.ConnectOnly==false)
+  assert(calls[1].parameters.ConnectOnly==nil)
   m:close()
 end)
 
@@ -73,7 +72,7 @@ local function launcher(options,env,chat)
   options=options or {}
   options.path=options.path or root
   if not chat then options.script=options.script or "mcp-launch.ps1" end
-  options.parameters=options.parameters or {CodexHome="/home/artist/账户 ' $()",ConnectOnly=true}
+  options.parameters=options.parameters or {CodexHome="/home/artist/账户 ' $()"}
   options.timer_factory=function(spec)
     local timer={spec=spec}; function timer:start() self.running=true end; function timer:stop() self.running=false end
     h.timers[#h.timers+1]=timer; return timer
@@ -90,12 +89,12 @@ local function launcher(options,env,chat)
   return h
 end
 
-test("POSIX launcher polls authenticated results and retires cancelled attempts",function()
+test("POSIX launcher polls registration results and retires cancelled attempts",function()
   local h=launcher(); h:start()
   local attempt=assert(h.instance.pending,h.calls[1] and h.calls[1].error)
   assert(#h.commands==2 and not h.commands[2]:find("powershell",1,true))
-  write(attempt.result_path,'{"endpoint":"ws://127.0.0.1:45123/editor/test_nonce-123"}')
-  h:tick(); assert(h.calls[1].endpoint=="ws://127.0.0.1:45123/editor/test_nonce-123")
+  write(attempt.result_path,'{"registered":true}')
+  h:tick(); assert(h.calls[1].endpoint==true)
   assert(not app.fs.isFile(attempt.command_source_path))
   h:start(); local old=h.instance.pending; h.instance:cancel(); h:tick()
   assert(#h.calls==1 and not app.fs.isFile(old.command_source_path))
@@ -115,7 +114,7 @@ test("POSIX launcher rejects unknown bootstraps",function()
   h:start(); assert(#h.commands==0 and not h.instance.pending and h.calls[1].error)
 end)
 
-test("native POSIX Chat Connect and registration launch asynchronously with private quoted paths",function()
+test("native POSIX Chat and registration launch asynchronously with private quoted paths",function()
   local directory=app.fs.joinPath(app.fs.tempPath,"mcp 中文 ' % & $() ` ; "..tostring(Uuid()))
   local scripts=app.fs.joinPath(directory,"scripts")
   assert(app.fs.makeAllDirectories(scripts))
@@ -132,9 +131,9 @@ async function complete(job,operation) {
   writeFileSync(job.resultPath+'.job',JSON.stringify({...job,operation}));
   writeFileSync(job.resultPath,JSON.stringify(operation==='chat'
     ? {endpoint:'ws://127.0.0.1:45123',pid:process.pid}
-    : {endpoint:'ws://127.0.0.1:45123/editor/fixture-token'}));
+    : {registered:true}));
 }
-export async function registerMcp(job) {return complete(job,job.connectOnly?'connect':'register');}
+export async function registerMcp(job) {return complete(job,'register');}
 export async function startChat(job) {
   if('home' in job || 'connectOnly' in job) throw Error('Chat received MCP-only parameters');
   if(!job.accountFile) throw Error('Chat lost its native account path');
@@ -159,10 +158,10 @@ export async function startChat(job) {
   assert(os.execute("ln -s "..quoted(native).." "..quoted(node)))
   -- Both actual shell operands now contain hostile characters, not only JSON data.
   local fs=setmetatable({tempPath=directory},{__index=app.fs})
-  for _,operation in ipairs {"connect","register","chat"} do
+  for _,operation in ipairs {"register","chat"} do
   local account_file=directory.."/native-account/providers.json"
   local h=launcher({path=directory,node=node,accountFile=account_file,execute=os.execute,
-    parameters={CodexHome=home,ConnectOnly=operation=="connect"}},
+    parameters={CodexHome=home,}},
     {app={fs=fs}},operation=="chat")
   h:start(); local attempt=assert(h.instance.pending,h.calls[1] and h.calls[1].error)
   assert(not app.fs.isFile(attempt.result_path),"launcher waited for readiness")
@@ -174,12 +173,12 @@ export async function startChat(job) {
   end
   local result=h.calls[1]
   h.instance:cancel()
-  local endpoint=operation=="chat" and "ws://127.0.0.1:45123" or "ws://127.0.0.1:45123/editor/fixture-token"
+  local endpoint=operation=="chat" and "ws://127.0.0.1:45123" or true
   assert(result and result.endpoint==endpoint,result and result.error or "no result")
   local job=json.decode(read(attempt.result_path..".job"))
   assert(job.operation==operation and job.extensionRoot==directory)
   if operation=="chat" then assert(job.home==nil and job.connectOnly==nil and job.accountFile==account_file)
-  else assert(job.home==home and job.connectOnly==(operation=="connect")) end
+  else assert(job.home==home and job.connectOnly==nil) end
   for _,file in ipairs({attempt.result_path..".release",attempt.result_path..".job"}) do os.remove(file) end
   app.fs.removeDirectory(attempt.private_dir)
   end

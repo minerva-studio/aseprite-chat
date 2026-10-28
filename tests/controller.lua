@@ -401,7 +401,7 @@ do
   local env = setmetatable({}, { __index = _G })
   assert(loadfile(app.fs.joinPath(root, "main.lua"), "t", env))()
   local registered={}
-  env.init { newCommand = function(_, command) registered[command.id] = command end }
+  env.init { preferences={},newCommand = function(_, command) registered[command.id] = command end }
   local executable_dir=app.fs.filePath(app.fs.appPath)
   local gui=app.fs.joinPath(executable_dir,"data","gui.xml")
   if not app.fs.isFile(gui) then
@@ -414,6 +414,31 @@ do
   assert(registered.AsepriteChat and groups[registered.AsepriteChat.group], "chat command must use an existing native menu group")
   passed = passed + 1
   print("PASS extension command targets an existing native menu group")
+end
+do
+  for _,enabled in ipairs {true,false} do
+    local started,closed,shown=0,0,0
+    local preferences={mcp_home="C:\\fixture-home",mcp_enabled=enabled}
+    local session={approval={}}
+    function session:start(home,register)
+      assert(home==preferences.mcp_home and not register)
+      started=started+1; return true
+    end
+    function session:close() closed=closed+1 end
+    function session:show() shown=shown+1 end
+    local env=setmetatable({dofile=function(path)
+      assert(app.fs.fileName(path)=="mcp.lua")
+      return {new=function(options) assert(options.preferences==preferences); return session end}
+    end},{__index=_G})
+    assert(loadfile(app.fs.joinPath(root,"main.lua"),"t",env))()
+    local commands={}
+    env.init {path=root,preferences=preferences,newCommand=function(_,spec) commands[spec.id]=spec end}
+    assert(started==(enabled and 1 or 0),"startup did not respect persisted MCP preference")
+    commands.AsepriteMCP.onclick(); assert(shown==1)
+    env.exit(); assert(closed==1 and preferences.mcp_enabled==enabled)
+  end
+  passed=passed+1
+  print("PASS extension restores enabled MCP discovery without opening its panel")
 end
 do
   local refreshed,animated,sent=0,0,0

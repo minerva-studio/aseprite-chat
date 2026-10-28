@@ -1,8 +1,7 @@
 param(
   [Parameter(Mandatory = $true)][string]$ResultPath,
   [string]$ExtensionRoot = (Split-Path -Parent $PSScriptRoot),
-  [Parameter(Mandatory = $true)][string]$CodexHome,
-  [switch]$ConnectOnly
+  [Parameter(Mandatory = $true)][string]$CodexHome
 )
 $ErrorActionPreference = 'Stop'
 
@@ -50,7 +49,6 @@ try {
   }
   $helper = Join-Path $ExtensionRoot 'scripts/register-mcp.mjs'
   $nativeArguments = @($helper, '--home', $CodexHome, '--root', $ExtensionRoot, '--result', $ResultPath)
-  if ($ConnectOnly) { $nativeArguments += '--connect-only' }
   $argumentLine = ($nativeArguments | ForEach-Object { ConvertTo-NativeArgument $_ }) -join ' '
   # No cmd/PowerShell interpolation receives user paths. The helper selects
   # CODEX_HOME only for its Codex children; this process environment is untouched.

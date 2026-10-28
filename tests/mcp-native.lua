@@ -2,8 +2,11 @@
 -- delivery; the production MCP controller, executor and native encoders run here.
 local root=app.fs.filePath(app.fs.filePath(debug.getinfo(1,"S").source:sub(2)))
 local native_dofile=dofile
-local socket
+local socket,timer
 local env=setmetatable({
+  Timer=function(spec)
+    timer={spec=spec,start=function() end,stop=function() end}; return timer
+  end,
   WebSocket=function(spec)
     socket={spec=spec}
     function socket:connect() spec.onreceive(WebSocketMessageType.OPEN) end
@@ -33,12 +36,19 @@ local steps,filename,dirty=sprite.undoHistory.undoSteps,sprite.filename,sprite.i
 local m=Mcp.new{path=root,preferences={}}
 -- Explicit fixture decision; no GUI is opened and production always asks the user.
 function m.approval:request_approval(_,decision) decision(true) end
-assert(m:start(app.fs.joinPath(app.fs.tempPath,"aseprite-mcp-native-fixture"),false))
+assert(m:start(assert(app.params.mcpHome),false))
+assert(timer and not socket,"enabling discovery started a transport")
+timer.spec.ontick()
+assert(not socket,"dormant editor found a hub before first use")
 io.stdout:write("NATIVE_MCP_READY\n"); io.stdout:flush()
 for line in io.stdin:lines() do
   local packet=json.decode(line)
   if packet.type=="fixture_shutdown" then break end
-  socket.spec.onreceive(WebSocketMessageType.TEXT,line)
+  if packet.type=="fixture_discover" then
+    timer.spec.ontick()
+    assert(socket,"first use descriptor was not discovered")
+    io.stdout:write("NATIVE_MCP_ATTACHED\n"); io.stdout:flush()
+  else socket.spec.onreceive(WebSocketMessageType.TEXT,line) end
 end
 m:close()
 assert(sprite.layers[1].name=="MCP Native","MCP edit never reached native document")

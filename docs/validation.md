@@ -2,6 +2,25 @@
 
 Recorded on 2026-10-21. Controlled protocol fixtures and actual authenticated model requests are listed separately.
 
+## On-demand MCP lifecycle (0.6.2, 2026-10-28)
+
+MCP initialization and catalog requests now read only tools.json. The first valid tool call starts the authenticated protocol-2 hub; subsequent calls reuse its connection. Shared startup, cancelled/closed startup, retry after startup failure and sleep/reconnect use one client lifecycle. Dispatched calls are never replayed. The first call can wait five seconds for its editor; concurrent calls fail busy. The idle deadline is two minutes without operations even with connected peers, but never runs during active execution or approval.
+
+Aseprite restores an enabled home at extension initialization and uses a 500 ms native Timer to discover its capability file without launching Node. Register & enable writes/verifies Codex configuration and starts only that timer. Enable performs no registration or process startup. Closing the panel retains discovery; Disable cancels it and records the preference. Plugin shutdown stops callbacks while preserving enablement. Hub disconnect or result-send failure retires native scopes and exports but keeps discovery enabled. No OS login service was added. A host may still start its stdio Node adapter while loading MCP; that adapter remains dormant until a tool call.
+
+Fresh-context review found two P2s: lexical home comparison rejected a canonical descriptor read through a junction, and send failure accidentally persisted disabled state. Both are corrected and regression-tested locally; no second independent review of these small fixes is claimed. The home capability is read from the explicitly selected directory; Node retains canonical root/home isolation. Lua accepts equivalent runtime aliases/copies only when its bounded runtime-file comparison matches byte for byte. A real Windows junction probe now creates one socket instead of zero. An additional native-constructor permission reentry regression was observed RED before preventing a late socket from connecting after Disable.
+
+Verification:
+
+- Windows complete Node run: **147 passed, 4 skipped, 0 failed**, out of 151. After final protocol/path/lifecycle corrections, the focused MCP/registration/native SDK run passed **47/47**.
+- Linux final focused Node run: **41 passed, 8 Windows-only skipped, 0 failed**, out of 49. Includes real selected-home Codex CLI registration and isolated app-server initialize, with no model turn.
+- Final native Lua: Windows **335 passed**, Linux **343 passed**. Protocol 71, Export 13, Executor 70, Chat 62, Controller 59, Launcher 28 Windows/27 Linux, Timeline 10, Account 7, MCP 15; Linux adds 9 POSIX checks.
+- The persistent native MCP fixture now starts without a hub, verifies catalog loading creates no descriptor, then starts the hub via the first SDK call. The production Lua discovery callback reads its descriptor before native list/inspect/view, PNG/GIF/sheet export, approved editing, artifact cleanup and Undo. Stdin substitutes editor WebSocket delivery and explicitly ticks discovery in batch; this is not OS GUI timer or permission acceptance.
+
+Tests use owned temporary homes/profiles and do not modify the user's Codex config. Initial registration and native tests were observed failing before their implementations. Later review regressions and permission reentry were also observed failing. Native test-daemon cleanup was corrected after a test hook removed its home before resolving the owned PID; a final single-hook cleanup retains identity until termination. An old review probe descriptor collision was avoided with a fresh owned probe directory rather than deleting another run's records.
+
+The 0.6.2 package is validated outside the checkout on Windows and Linux. Production GUI/IME/network permission timing and model inference remain unverified. Upgrades require reloading the extension and restarting external clients to retire protocol-1 peers; no live old/foreign daemon is terminated automatically. Export paths expire at idle retirement as well as client/editor disconnect, so clients must copy needed files promptly and inspect again after waking a new scope.
+
 ## Linux internal Chat and MCP registration (0.6.1, 2026-10-27)
 
 Linux now invokes the same startChat and registerMcp operations through the existing private POSIX job. Registration uses the selected absolute home and the native Codex CLI, keeping backups, collision refusal and verification; Connect still performs no registration or login. Chat retains bounded readiness/PID checks and warm reuse, Linux HOME working directories and native Linux sandbox settings. The shared resolver accepts Linux x64/arm64 executable ELF candidates from PATH or native npm platform packages without executing a wrapper. No account migration, startup item or model-provider API was added.

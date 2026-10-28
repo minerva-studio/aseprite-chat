@@ -10,6 +10,8 @@ import http from 'node:http';
 import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { createMcpServer } from '../scripts/mcp-server.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
@@ -126,7 +128,7 @@ test('busy never queues operations, cancellation waits for acknowledgement and c
 });
 
 test('client disconnect cancels and closes its native scope; editor disconnect permits reconnect without replay', { timeout: 10000 }, async t => {
-  const b = await hub(t);
+  const b = await hub(t, { editorTimeoutMs: 100 });
   const editor = await socket(t, b.descriptor.endpoint);
   const a = await socket(t, b.descriptor.clientEndpoint);
   const c = await socket(t, b.descriptor.clientEndpoint);
@@ -138,7 +140,7 @@ test('client disconnect cancels and closes its native scope; editor disconnect p
   editor.ws.terminate();
   await pause(30);
   c.send({ type: 'call', id: 'offline', tool: 'view_sprite', arguments: {} });
-  assert.match((await c.next('result')).result.contentItems[0].text, /Open Aseprite MCP and connect/);
+  assert.match((await c.next('result')).result.contentItems[0].text, /Enable Aseprite MCP/);
   const reconnected = await socket(t, b.descriptor.endpoint);
   assert.equal(reconnected.messages.length, 0);
   c.send({ type: 'call', id: 'online', tool: 'view_sprite', arguments: {} });
@@ -148,7 +150,7 @@ test('client disconnect cancels and closes its native scope; editor disconnect p
   assert.equal(c.ws.readyState, WebSocket.OPEN);
 });
 
-test('timeout revokes editor and idle shutdown waits until all peers leave', { timeout: 10000 }, async t => {
+test('timeout revokes editor and idle shutdown retires connected peers', { timeout: 10000 }, async t => {
   const b = await hub(t, { activeTimeoutMs: 100, idleTimeoutMs: 100 });
   const editor = await socket(t, b.descriptor.endpoint);
   const client = await socket(t, b.descriptor.clientEndpoint);
@@ -156,10 +158,8 @@ test('timeout revokes editor and idle shutdown waits until all peers leave', { t
   await editor.next('call');
   assert.match((await client.next('result')).result.contentItems[0].text, /timed out/i);
   await until(() => editor.ws.readyState === WebSocket.CLOSED);
-  await pause(160);
-  await access(b.descriptorPath);
-  client.ws.terminate();
   await until(async () => { try { await access(b.descriptorPath); return false; } catch { return true; } });
+  await until(() => client.ws.readyState === WebSocket.CLOSED);
 });
 
 test('malformed requests and native results fail safely without unblocking a foreign ID', { timeout: 10000 }, async t => {
@@ -182,7 +182,7 @@ test('malformed requests and native results fail safely without unblocking a for
 });
 
 test('stdio SDK initializes offline and lists canonical tools with truthful annotations', { timeout: 15000 }, async t => {
-  const b = await hub(t);
+  const b = await hub(t, { editorTimeoutMs: 100 });
   const { client } = await sdk(t, b.descriptor.home);
   assert.match(client.getInstructions(), /Aseprite/);
   const { tools } = await client.listTools();
@@ -199,7 +199,7 @@ test('stdio SDK initializes offline and lists canonical tools with truthful anno
   assert.equal(tools.find(x => x.name === 'execute_lua').annotations.destructiveHint, true);
   const result = await client.callTool({ name: 'view_sprite', arguments: {} });
   assert.equal(result.isError, true);
-  assert.match(result.content[0].text, /Open Aseprite MCP and connect/);
+  assert.match(result.content[0].text, /Enable Aseprite MCP/);
 });
 
 test('real stdio SDK maps text, PNG and failures and rejects unsafe image data URLs', { timeout: 15000 }, async t => {
@@ -301,7 +301,7 @@ test('health has a total deadline even when a stale service keeps streaming byte
   const base = `ws://127.0.0.1:${server.address().port}`;
   await mkdir(path.join(dir, '.aseprite-chat'));
   await writeFile(path.join(dir, '.aseprite-chat', 'mcp-bridge.json'), JSON.stringify({
-    protocol: 'aseprite-chat-mcp/1', identity: 'stale', pid: process.pid, token,
+    protocol: 'aseprite-chat-mcp/2', identity: 'stale', pid: process.pid, token,
     home: await realpath(dir), extensionRoot: await realpath(root),
     endpoint: `${base}/editor/${token}`, clientEndpoint: `${base}/client/${token}`,
   }));
@@ -323,11 +323,9 @@ test('16 MiB websocket limit revokes an oversized native editor and fails its ac
   assert.equal(client.ws.readyState, WebSocket.OPEN);
 });
 
-test('idle editor keeps hub alive; duplicate active ID retires only that client', { timeout: 10000 }, async t => {
-  const b = await hub(t, { idleTimeoutMs: 100 });
+test('duplicate active ID retires only that client', { timeout: 10000 }, async t => {
+  const b = await hub(t);
   const editor = await socket(t, b.descriptor.endpoint);
-  await pause(150);
-  await access(b.descriptorPath);
   const a = await socket(t, b.descriptor.clientEndpoint);
   a.send({ type: 'call', id: 'duplicate', tool: 'view_sprite', arguments: {} });
   const call = await editor.next('call');
@@ -364,10 +362,15 @@ test('live startup lock is preserved; proven-dead owner and descriptor recover w
   await socket(t, descriptor.clientEndpoint);
 });
 
-test('stdio first initialization bootstraps daemon; two SDK clients retain independent native scopes', { timeout: 15000 }, async t => {
+test('stdio initialization and listing stay dormant; first call bootstraps once for independent SDK clients', { timeout: 15000 }, async t => {
   const dir = await home(t);
   const first = await sdk(t, dir);
-  const descriptor = JSON.parse(await readFile(path.join(dir, '.aseprite-chat', 'mcp-bridge.json'), 'utf8'));
+  const descriptorPath = path.join(dir, '.aseprite-chat', 'mcp-bridge.json');
+  assert.equal((await first.client.listTools()).tools.length, 7);
+  await assert.rejects(access(path.join(dir, '.aseprite-chat')), { code: 'ENOENT' });
+  const one = first.client.callTool({ name: 'view_sprite', arguments: {} });
+  await until(async () => { try { await access(descriptorPath); return true; } catch { return false; } });
+  const descriptor = JSON.parse(await readFile(descriptorPath, 'utf8'));
   t.after(async () => {
     try { process.kill(descriptor.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; }
     await until(() => { try { process.kill(descriptor.pid, 0); return false; } catch { return true; } });
@@ -375,7 +378,6 @@ test('stdio first initialization bootstraps daemon; two SDK clients retain indep
   assert.equal((await first.client.listTools()).tools.length, 7);
   const editor = await socket(t, descriptor.endpoint);
   const second = await sdk(t, dir);
-  const one = first.client.callTool({ name: 'view_sprite', arguments: {} });
   const a = await editor.next('call');
   editor.send({ type: 'result', id: a.id, result: success('first') });
   assert.equal((await one).content[0].text, 'first');
@@ -394,4 +396,133 @@ test('hub cleanup preserves a descriptor whose identity was replaced', { timeout
   await writeFile(b.descriptorPath, JSON.stringify({ ...b.descriptor, identity: 'another-owner' }));
   await b.close();
   assert.equal(JSON.parse(await readFile(b.descriptorPath, 'utf8')).identity, 'another-owner');
+});
+
+
+test('first call waits for editor attachment and cancelled waiting work never dispatches', { timeout: 10000 }, async t => {
+  const b = await hub(t, { editorTimeoutMs: 500 });
+  const client = await socket(t, b.descriptor.clientEndpoint);
+  client.send({ type: 'call', id: 'cancel-before-editor', tool: 'execute_lua', arguments: {} });
+  await pause(30);
+  assert.equal(client.messages.length, 0);
+  client.send({ type: 'cancel', id: 'cancel-before-editor' });
+  assert.match((await client.next('result')).result.contentItems[0].text, /cancel/i);
+  const editor = await socket(t, b.descriptor.endpoint);
+  await pause(40);
+  assert.equal(editor.messages.length, 0);
+  client.send({ type: 'call', id: 'actual', tool: 'view_sprite', arguments: {} });
+  const call = await editor.next('call');
+  editor.send({ type: 'result', id: call.id, result: success('after enable') });
+  assert.equal((await client.next('result')).result.contentItems[0].text, 'after enable');
+});
+
+test('idle peers do not keep hub alive; active approval suspends idle shutdown', { timeout: 10000 }, async t => {
+  const b = await hub(t, { idleTimeoutMs: 150 });
+  const editor = await socket(t, b.descriptor.endpoint);
+  const client = await socket(t, b.descriptor.clientEndpoint);
+  client.send({ type: 'call', id: 'approval', tool: 'execute_lua', arguments: {} });
+  const call = await editor.next('call');
+  await pause(210);
+  await access(b.descriptorPath);
+  editor.send({ type: 'result', id: call.id, result: success('approved') });
+  await client.next('result');
+  await until(async () => { try { await access(b.descriptorPath); return false; } catch { return true; } });
+  await until(() => editor.ws.readyState === WebSocket.CLOSED && client.ws.readyState === WebSocket.CLOSED);
+});
+
+
+async function embedded(t, home, dependencies) {
+  const owned = await createMcpServer({ home, extensionRoot: root }, dependencies);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'lazy-lifecycle', version: '1' });
+  await owned.server.connect(serverTransport);
+  await client.connect(clientTransport);
+  t.after(async () => { await client.close(); await owned.close(); });
+  return { ...owned, client };
+}
+
+test('simultaneous calls share one deferred startup; rejected startup can retry', async t => {
+  const b = await hub(t);
+  const editor = await socket(t, b.descriptor.endpoint);
+  let attempts = 0, release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const { client } = await embedded(t, b.descriptor.home, { ensureBridge: async () => {
+    attempts++;
+    if (attempts === 1) throw Error('startup unavailable');
+    await gate;
+    return b.descriptor;
+  } });
+  assert.equal(attempts, 0);
+  assert.equal((await client.callTool({ name: 'foreign' })).isError, true);
+  assert.equal(attempts, 0);
+  assert.match((await client.callTool({ name: 'view_sprite' })).content[0].text, /startup unavailable/);
+  const one = client.callTool({ name: 'view_sprite' });
+  const two = client.callTool({ name: 'view_sprite' });
+  await until(() => attempts === 2);
+  await pause(30);
+  assert.equal(attempts, 2);
+  release();
+  const call = await editor.next('call');
+  editor.send({ type: 'result', id: call.id, result: success('first') });
+  const results = await Promise.all([one, two]);
+  assert.equal(results.filter(result => !result.isError).length, 1);
+  assert.match(results.find(result => result.isError).content[0].text, /busy/i);
+  assert.equal(attempts, 2);
+});
+
+test('cancel or stdio close during startup never attaches or dispatches late work', async t => {
+  for (const action of ['cancel', 'close']) {
+    const b = await hub(t);
+    const editor = await socket(t, b.descriptor.endpoint);
+    let entered = false, release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const owned = await embedded(t, b.descriptor.home, { ensureBridge: async () => {
+      entered = true;
+      await gate;
+      return b.descriptor;
+    } });
+    const controller = new AbortController();
+    const request = owned.client.callTool({ name: 'execute_lua', arguments: {} }, undefined, { signal: controller.signal });
+    const rejected = assert.rejects(request, /abort|cancel|closed/i);
+    await until(() => entered);
+    if (action === 'cancel') controller.abort();
+    else await owned.close();
+    await rejected;
+    release();
+    await pause(80);
+    assert.equal(editor.messages.length, 0);
+    if (action === 'cancel') await owned.close();
+  }
+});
+
+test('hub retirement reconnects on a new call without replaying old operations', async t => {
+  const directory = await home(t);
+  const { createMcpBridge } = await library();
+  let current, editor, starts = 0;
+  const owned = await embedded(t, directory, { ensureBridge: async () => {
+    starts++;
+    current = await createMcpBridge({ home: directory, extensionRoot: root, idleTimeoutMs: 100 });
+    t.after(() => current.close());
+    editor = await socket(t, current.descriptor.endpoint);
+    return current.descriptor;
+  } });
+  const first = owned.client.callTool({ name: 'view_sprite' });
+  await until(() => editor !== undefined);
+  const a = await editor.next('call');
+  editor.send({ type: 'result', id: a.id, result: success('first scope') });
+  assert.equal((await first).content[0].text, 'first scope');
+  const old = editor;
+  await until(() => old.ws.readyState === WebSocket.CLOSED);
+  await pause(20);
+  assert.equal(starts, 1);
+  assert.equal((await owned.client.listTools()).tools.length, 7);
+  assert.equal(starts, 1);
+  const second = owned.client.callTool({ name: 'view_sprite' });
+  await until(() => starts === 2 && editor !== old);
+  const b = await editor.next('call');
+  assert.notEqual(b.clientId, a.clientId);
+  assert.notEqual(b.id, a.id);
+  assert.equal(editor.messages.length, 0);
+  editor.send({ type: 'result', id: b.id, result: success('fresh scope') });
+  assert.equal((await second).content[0].text, 'fresh scope');
 });

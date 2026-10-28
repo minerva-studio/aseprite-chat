@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { registerMcp } from '../scripts/register-mcp.mjs';
 import { startChat } from '../scripts/start-chat.mjs';
-import { createMcpBridge } from '../scripts/mcp-bridge.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const executable = process.env.ASEPRITE_CHAT_TEST_CODEX;
@@ -26,13 +25,12 @@ test('native Linux registration backs up the selected home and remains idempoten
   await mkdir(home, { recursive: true });
   const seed = '# keep this configuration\n[mcp_servers.unrelated]\ncommand = "keep-command"\n';
   await writeFile(path.join(home, 'config.toml'), seed);
-  const hub = await createMcpBridge({ home, extensionRoot: root });
-  t.after(() => hub.close());
   const options = { home, extensionRoot: root, resultPath: path.join(directory, 'result.json'), codexPath: executable };
-  const deps = { ensureBridge: async () => hub.descriptor };
+  const deps = {};
   const first = await registerMcp(options, deps);
   assert.equal(first.error, undefined);
   assert.equal(first.registered, true);
+  await assert.rejects(stat(path.join(home,'.aseprite-chat/mcp-bridge.json')), { code: 'ENOENT' });
   assert.equal(await readFile(first.backup, 'utf8'), seed);
   const config = await readFile(path.join(home, 'config.toml'), 'utf8');
   assert.match(config, /mcp_servers\.unrelated/);

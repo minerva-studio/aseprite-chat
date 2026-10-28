@@ -30,32 +30,33 @@ function toolResult(result) {
 }
 
 /**
- * Create an SDK MCP server and its authenticated hub client, without owning the daemon.
- * Returns {server, descriptor, close()}; close retires this client's native scope only.
+ * Create a dormant SDK server. Catalog requests never create a hub or touch home.
+ * The first valid tool call shares one startup; later calls may reconnect after
+ * hub retirement. Dispatched operations are never replayed. close() invalidates
+ * pending startup and retires only this client's native scope, not the daemon.
+ * @param {{home:string, extensionRoot?:string}} options Absolute native paths.
+ * @param {{ensureBridge?:Function}} dependencies Test seam for hub startup.
+ * @returns {Promise<{server:Server, close:Function}>}
  */
-export async function createMcpServer({ home, extensionRoot: root = extensionRoot }) {
-  const descriptor = await ensureBridge({ home, extensionRoot: root });
+export async function createMcpServer({ home, extensionRoot: root = extensionRoot }, dependencies = {}) {
+  if (!path.isAbsolute(home) || !path.isAbsolute(root)) throw Error('home and extensionRoot must be absolute paths');
   const definitions = JSON.parse(await readFile(path.join(root, 'tools.json'), 'utf8'));
   const tools = definitions.map(({ name, description, inputSchema }) => ({ name, description, inputSchema,
     annotations: { readOnlyHint: ['list_sprites', 'view_sprite', 'inspect_sprite', 'read_pixels'].includes(name),
       destructiveHint: name === 'execute_lua', openWorldHint: false } }));
   const names = new Set(tools.map(tool => tool.name));
   const pending = new Map();
-  const socket = new WebSocket(descriptor.clientEndpoint, { maxPayload: maxBytes, handshakeTimeout: 3000,
-    perMessageDeflate: false });
-  socket.on('error', () => {});
-  await new Promise((resolve, reject) => {
-    socket.once('open', resolve);
-    socket.once('error', reject);
-  });
+  let socket = null;
+  let starting = null;
   let closed = false;
   const server = new Server({ name: 'aseprite_chat', version: '1.0.0' }, {
     capabilities: { tools: {} },
-    instructions: 'Control the live Aseprite editor from any MCP client. Open Aseprite MCP and connect before calling tools. '
+    instructions: 'Control the live Aseprite editor from any MCP client. Enable MCP once in Aseprite; it connects automatically when tools are used. '
       + 'Use list_sprites for discovery, view_sprite for rendered images, and inspect_sprite for requested structural sections. '
       + 'No open sprite is a normal state: listing returns empty; document operations report NO_OPEN_SPRITE. '
       + 'Inspect the live target before editing; execute_lua requires its expectedRevision and native user approval. '
       + 'Each client has its own editing target and observations. A busy operation is never queued or replayed. '
+      + 'The hub sleeps after inactivity. A new call reconnects with a fresh scope; inspect again before editing. '
       + 'Export paths refer to temporary native files; copy them with your own authorized file tools.',
   });
   function settle(id, result) {
@@ -65,42 +66,83 @@ export async function createMcpServer({ home, extensionRoot: root = extensionRoo
     entry.signal.removeEventListener('abort', entry.abort);
     entry.resolve(result);
   }
-  socket.on('message', data => {
-    try {
-      const message = JSON.parse(data.toString());
-      if (message.type === 'result' && typeof message.id === 'string') settle(message.id, toolResult(message.result));
-    } catch { socket.terminate(); }
-  });
-  socket.on('close', () => {
-    for (const id of pending.keys()) settle(id, errorResult('MCP bridge disconnected; restart this MCP client'));
-  });
+  function connect() {
+    if (closed) return Promise.resolve(null);
+    if (socket?.readyState === WebSocket.OPEN) return Promise.resolve(socket);
+    if (starting) return starting;
+    starting = (async () => {
+      const descriptor = await (dependencies.ensureBridge ?? ensureBridge)({ home, extensionRoot: root });
+      // Startup can outlive cancellation or stdio shutdown. Never attach a late
+      // client once every interested request has retired.
+      if (closed || pending.size === 0) return null;
+      const current = new WebSocket(descriptor.clientEndpoint, { maxPayload: maxBytes, handshakeTimeout: 3000,
+        perMessageDeflate: false });
+      socket = current;
+      current.on('error', () => {});
+      current.on('message', data => {
+        try {
+          const message = JSON.parse(data.toString());
+          if (message.type === 'result' && typeof message.id === 'string'
+            && pending.get(message.id)?.socket === current) settle(message.id, toolResult(message.result));
+        } catch { current.terminate(); }
+      });
+      current.on('close', () => {
+        if (socket === current) socket = null;
+        for (const [id, entry] of pending) if (entry.socket === current) {
+          settle(id, errorResult('MCP bridge disconnected; operation was not replayed. Inspect again on the next call.'));
+        }
+      });
+      try {
+        await new Promise((resolve, reject) => {
+          const opened = () => { cleanup(); resolve(); };
+          const failed = error => { cleanup(); reject(error); };
+          const ended = () => failed(Error('MCP bridge closed during connection'));
+          const cleanup = () => {
+            current.off('open', opened); current.off('error', failed); current.off('close', ended);
+          };
+          current.once('open', opened); current.once('error', failed); current.once('close', ended);
+        });
+      } catch (error) { current.terminate(); throw error; }
+      if (closed || pending.size === 0) { current.terminate(); return null; }
+      return current;
+    })().finally(() => { starting = null; });
+    return starting;
+  }
   server.setRequestHandler(ListToolsRequestSchema, () => ({ tools }));
   server.setRequestHandler(CallToolRequestSchema, (request, { signal }) => {
     if (!names.has(request.params.name)) return errorResult('Unknown Aseprite tool');
-    if (closed || socket.readyState !== WebSocket.OPEN) return errorResult('MCP bridge disconnected; restart this MCP client');
+    if (closed) return errorResult('MCP client closed');
     if (signal.aborted) return errorResult('Operation cancelled');
     const id = randomUUID();
     const encoded = JSON.stringify({ type: 'call', id, tool: request.params.name, arguments: request.params.arguments ?? {} });
     if (Buffer.byteLength(encoded) > maxBytes) return errorResult('Tool call exceeds the 16 MiB message limit');
     return new Promise(resolve => {
-      const abort = () => {
-        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'cancel', id }));
+      const entry = { resolve, signal, socket: null, abort: () => {
+        if (entry.socket?.readyState === WebSocket.OPEN) entry.socket.send(JSON.stringify({ type: 'cancel', id }));
         settle(id, errorResult('Operation cancelled'));
-      };
-      pending.set(id, { resolve, signal, abort });
-      signal.addEventListener('abort', abort, { once: true });
-      socket.send(encoded, error => { if (error) settle(id, errorResult(error.message)); });
+      } };
+      pending.set(id, entry);
+      signal.addEventListener('abort', entry.abort, { once: true });
+      connect().then(current => {
+        if (!pending.has(id)) return;
+        if (closed || !current || current.readyState !== WebSocket.OPEN) {
+          settle(id, errorResult('MCP bridge unavailable; retry the operation.')); return;
+        }
+        entry.socket = current;
+        current.send(encoded, error => { if (error) settle(id, errorResult(error.message)); });
+      }).catch(error => settle(id, errorResult(error.message)));
     });
   });
   const close = async () => {
     if (closed) return;
     closed = true;
-    socket.terminate();
+    socket?.terminate();
+    socket = null;
     for (const id of pending.keys()) settle(id, errorResult('MCP client closed'));
     await server.close();
   };
   server.onclose = () => { void close(); };
-  return { server, descriptor, close };
+  return { server, close };
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

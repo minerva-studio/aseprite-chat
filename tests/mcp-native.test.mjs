@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm, access, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, access, readFile, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,6 @@ import { once } from 'node:events';
 import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { createMcpBridge } from '../scripts/mcp-bridge.mjs';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const aseprite=process.env.ASEPRITE_EXE ?? 'D:/SteamLibrary/steamapps/common/Aseprite/aseprite.exe';
@@ -23,17 +22,25 @@ async function until(predicate) {
 test('SDK stdio tools control a persistent native Aseprite document with PNG GIF sheet and Undo', {timeout:30000},async t=>{
   assert.equal((await readFile(path.join(root,'tests/mcp-native.lua'),'utf8')).length>0,true);
   const home=await mkdtemp(path.join(os.tmpdir(),'aseprite-mcp-native-'));
-  t.after(()=>rm(home,{recursive:true,force:true}));
-  const hub=await createMcpBridge({home,extensionRoot:root}); t.after(()=>hub.close());
-  const native=spawn(aseprite,['--batch','--script',path.join(root,'tests/mcp-native.lua')],
+  const canonicalHome=await realpath(home);
+  let descriptor;
+  t.after(async()=>{
+    if (descriptor?.home===canonicalHome && descriptor.pid!==process.pid) {
+      try {process.kill(descriptor.pid);} catch(error) {if(error.code!=='ESRCH') throw error;}
+      await until(()=>{try{process.kill(descriptor.pid,0);return false;}catch{return true;}});
+    }
+    await rm(home,{recursive:true,force:true});
+  });
+  const native=spawn(aseprite,['--batch','--script-param',`mcpHome=${home}`,'--script',path.join(root,'tests/mcp-native.lua')],
     {cwd:root,windowsHide:true,stdio:['pipe','pipe','pipe']});
-  let output='',ready=false;
+  let output='',ready=false,attached=false;
   const lines=createInterface({input:native.stdout});
   native.stderr.on('data',bytes=>{output+=bytes;});
   let editor;
   lines.on('line',line=>{
     output+=line+'\n';
     if(line==='NATIVE_MCP_READY') ready=true;
+    if(line==='NATIVE_MCP_ATTACHED') attached=true;
     if(line.startsWith('NATIVE_MCP_RESULT ')) editor.send(line.slice('NATIVE_MCP_RESULT '.length));
   });
   t.after(async()=>{
@@ -45,15 +52,24 @@ test('SDK stdio tools control a persistent native Aseprite document with PNG GIF
     lines.close(); editor?.terminate();
   });
   await until(()=>ready || (native.exitCode!==null && assert.fail(output)));
-  editor=new WebSocket(hub.descriptor.endpoint);
-  await once(editor,'open');
-  editor.on('message',data=>native.stdin.write(data.toString()+'\n'));
   const transport=new StdioClientTransport({command:process.execPath,
     args:[path.join(root,'scripts/mcp-server.mjs'),'--home',home],stderr:'pipe'});
   const client=new Client({name:'native-acceptance',version:'1.0.0'});
   t.after(()=>client.close()); await client.connect(transport);
   const catalog=await client.listTools(); assert.equal(catalog.tools.length,7);
-  const listed=await client.callTool({name:'list_sprites',arguments:{}});
+  const descriptorPath=path.join(home,'.aseprite-chat/mcp-bridge.json');
+  await assert.rejects(access(descriptorPath),{code:'ENOENT'});
+  const first=client.callTool({name:'list_sprites',arguments:{}});
+  first.catch(()=>{});
+  await until(async()=>{
+    try {descriptor=JSON.parse(await readFile(descriptorPath,'utf8'));return true;}catch{return false;}
+  });
+  native.stdin.write('{"type":"fixture_discover"}\n');
+  await until(()=>attached || (native.exitCode!==null && assert.fail(output)));
+  editor=new WebSocket(descriptor.endpoint);
+  await once(editor,'open');
+  editor.on('message',data=>native.stdin.write(data.toString()+'\n'));
+  const listed=await first;
   assert.equal(listed.isError,false);
   const sprites=JSON.parse(listed.content[0].text).sprites;
   assert.equal(sprites.items.length,1);

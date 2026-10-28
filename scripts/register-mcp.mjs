@@ -152,12 +152,11 @@ async function publish(resultPath, result) {
  * creating that directory before invoking the native CLI when it does not exist.
  * Publishes an atomic editor-only result, including safe Chinese errors. Existing
  * foreign entries are never replaced, and failed CLI changes are never rolled back
- * over concurrent writes. `registered` means registration was verified this run;
- * connect-only reports false because it deliberately does not inspect Codex config.
+ * over concurrent writes. Success never starts the hub; tool calls own startup.
  *
- * @param {{home:string, extensionRoot:string, resultPath:string, connectOnly?:boolean, codexPath?:string}} options
- * @param {{ensureBridge?:Function, runCodex?:Function}} dependencies Test seams for the hub and native CLI boundary.
- * @returns {Promise<{endpoint:string, registered:boolean, backup?:string}|{error:string}>}
+ * @param {{home:string, extensionRoot:string, resultPath:string, codexPath?:string}} options
+ * @param {{runCodex?:Function}} dependencies Test seam for the native CLI boundary.
+ * @returns {Promise<{registered:true, backup?:string}|{error:string}>}
  */
 export async function registerMcp(options, dependencies = {}) {
   let result;
@@ -174,48 +173,42 @@ export async function registerMcp(options, dependencies = {}) {
     if (typeof options.resultPath !== 'string' || !path.isAbsolute(options.resultPath)) throw new RegistrationError('结果文件必须使用绝对路径。');
 
     let backup;
-    if (!options.connectOnly) {
-      const executable = options.codexPath ?? await nativeCodex();
-      if (!path.isAbsolute(executable) || (process.platform === 'win32' && path.extname(executable).toLowerCase() !== '.exe') || !await isFile(executable)) {
-        throw new RegistrationError('未找到可用的原生 Codex 程序。');
-      }
-      stage = '无法创建所选 Codex 目录。请检查路径与目录权限后重试。';
-      await mkdir(home, { recursive: true });
-      stage = '无法读取所选 Codex 配置。请检查目录权限后重试。';
-      const configPath = path.join(home, 'config.toml');
-      const original = await configBytes(configPath);
-      const args = [path.join(extensionRoot, 'scripts/mcp-server.mjs'), '--home', home];
-      const run = dependencies.runCodex ?? runNative;
-      const childOptions = { env: { ...process.env, CODEX_HOME: home } };
-      stage = '无法读取 Codex MCP 列表。请检查 Codex CLI 和所选目录后重试。';
-      const entries = JSON.parse(await run(executable, ['mcp', 'list', '--json'], childOptions));
-      if (!Array.isArray(entries)) throw Error('Unexpected MCP list');
-      const existing = entries.filter(entry => entry.name === serverName);
-      if (existing.length > 1 || (existing.length === 1 && !exactRegistration(existing[0], process.execPath, args))) {
-        throw new RegistrationError('所选 Codex 目录已有同名 aseprite_chat 配置，存在冲突。请先手动检查，未覆盖现有配置。');
-      }
-      if (!existing.length) {
-        stage = '无法备份 Codex 配置。注册尚未执行，请检查目录权限。';
-        if (!sameBytes(original, await configBytes(configPath))) throw new RegistrationError('Codex 配置已被其他进程更改。请重试注册。');
-        if (original !== null) {
-          const backupDirectory = path.join(home, '.aseprite-chat');
-          await mkdir(backupDirectory, { recursive: true });
-          backup = path.join(backupDirectory, `config-backup-${randomUUID()}.toml`);
-          await writeFile(backup, original, { flag: 'wx', mode: 0o600 });
-        }
-        if (!sameBytes(original, await configBytes(configPath))) throw new RegistrationError('Codex 配置已被其他进程更改。请重试注册。');
-        stage = 'Codex MCP 注册失败。已有配置未回滚；若原配置存在，备份保存在所选目录的 .aseprite-chat 文件夹中。';
-        await run(executable, ['mcp', 'add', serverName, '--', process.execPath, ...args], childOptions);
-      }
-      stage = 'Codex MCP 注册验证失败。请检查所选目录中的 aseprite_chat 配置后重试。';
-      const verified = JSON.parse(await run(executable, ['mcp', 'get', serverName, '--json'], childOptions));
-      if (!exactRegistration(verified, process.execPath, args)) throw Error('Registration mismatch');
+    const executable = options.codexPath ?? await nativeCodex();
+    if (!path.isAbsolute(executable) || (process.platform === 'win32' && path.extname(executable).toLowerCase() !== '.exe') || !await isFile(executable)) {
+      throw new RegistrationError('未找到可用的原生 Codex 程序。');
     }
-    stage = '无法连接 Aseprite MCP 服务。请检查 Node.js 与扩展目录后重试。';
-    const ensure = dependencies.ensureBridge ?? (await import('./mcp-bridge.mjs')).ensureBridge;
-    const bridge = await ensure({ home, extensionRoot });
-    if (typeof bridge?.endpoint !== 'string' || !bridge.endpoint) throw Error('Missing editor endpoint');
-    result = { endpoint: bridge.endpoint, registered: !options.connectOnly, ...(backup ? { backup } : {}) };
+    stage = '无法创建所选 Codex 目录。请检查路径与目录权限后重试。';
+    await mkdir(home, { recursive: true });
+    stage = '无法读取所选 Codex 配置。请检查目录权限后重试。';
+    const configPath = path.join(home, 'config.toml');
+    const original = await configBytes(configPath);
+    const args = [path.join(extensionRoot, 'scripts/mcp-server.mjs'), '--home', home];
+    const run = dependencies.runCodex ?? runNative;
+    const childOptions = { env: { ...process.env, CODEX_HOME: home } };
+    stage = '无法读取 Codex MCP 列表。请检查 Codex CLI 和所选目录后重试。';
+    const entries = JSON.parse(await run(executable, ['mcp', 'list', '--json'], childOptions));
+    if (!Array.isArray(entries)) throw Error('Unexpected MCP list');
+    const existing = entries.filter(entry => entry.name === serverName);
+    if (existing.length > 1 || (existing.length === 1 && !exactRegistration(existing[0], process.execPath, args))) {
+      throw new RegistrationError('所选 Codex 目录已有同名 aseprite_chat 配置，存在冲突。请先手动检查，未覆盖现有配置。');
+    }
+    if (!existing.length) {
+      stage = '无法备份 Codex 配置。注册尚未执行，请检查目录权限。';
+      if (!sameBytes(original, await configBytes(configPath))) throw new RegistrationError('Codex 配置已被其他进程更改。请重试注册。');
+      if (original !== null) {
+        const backupDirectory = path.join(home, '.aseprite-chat');
+        await mkdir(backupDirectory, { recursive: true });
+        backup = path.join(backupDirectory, `config-backup-${randomUUID()}.toml`);
+        await writeFile(backup, original, { flag: 'wx', mode: 0o600 });
+      }
+      if (!sameBytes(original, await configBytes(configPath))) throw new RegistrationError('Codex 配置已被其他进程更改。请重试注册。');
+      stage = 'Codex MCP 注册失败。已有配置未回滚；若原配置存在，备份保存在所选目录的 .aseprite-chat 文件夹中。';
+      await run(executable, ['mcp', 'add', serverName, '--', process.execPath, ...args], childOptions);
+    }
+    stage = 'Codex MCP 注册验证失败。请检查所选目录中的 aseprite_chat 配置后重试。';
+    const verified = JSON.parse(await run(executable, ['mcp', 'get', serverName, '--json'], childOptions));
+    if (!exactRegistration(verified, process.execPath, args)) throw Error('Registration mismatch');
+    result = { registered: true, ...(backup ? { backup } : {}) };
   } catch (error) {
     result = { error: error instanceof RegistrationError ? error.message : stage };
   }
@@ -231,8 +224,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     let invalid = false;
     for (let index = 0; index < args.length; index++) {
       const argument = args[index];
-      if (argument === '--connect-only' && !options.connectOnly) options.connectOnly = true;
-      else if (names[argument] && options[names[argument]] === undefined && args[index + 1] && !args[index + 1].startsWith('--')) options[names[argument]] = args[++index];
+      if (names[argument] && options[names[argument]] === undefined && args[index + 1] && !args[index + 1].startsWith('--')) options[names[argument]] = args[++index];
       else invalid = true;
     }
     if (invalid) {

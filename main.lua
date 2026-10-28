@@ -642,6 +642,11 @@ local function mcp_shortcut_blocked()
   return mcp and (mcp.dialog or mcp.approval.approval)
 end
 function init(plugin)
+  if plugin.preferences.mcp_home and plugin.preferences.mcp_enabled~=false then
+    mcp=dofile(app.fs.joinPath(plugin.path,"mcp.lua")).new{path=plugin.path,preferences=plugin.preferences}
+    local ok,err=mcp:start(plugin.preferences.mcp_home,false)
+    if not ok then print("Aseprite MCP: "..tostring(err)) end
+  end
   plugin:newCommand {
     id="AsepriteMCP",title="Aseprite MCP",group="view_controls",
     onclick=function()

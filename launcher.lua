@@ -51,7 +51,8 @@ function Launcher.new(options)
 end
 
 -- Accept one attempt while idle; repeated calls while pending are ignored.
--- callback(endpoint, errorText) runs once, with exactly one non-nil argument,
+-- callback(result, errorText) runs once; result is a Chat endpoint or true for MCP
+-- registration. Exactly one argument is non-nil,
 -- unless canceled. Retiring the attempt precedes callback invocation, so a
 -- callback may immediately retry. Returns false only when already pending.
 function Instance:ensure(callback)
@@ -112,13 +113,15 @@ function Instance:ensure(callback)
       -- Incomplete JSON keeps polling, bounded by the same startup deadline.
       if ok then
         local container = type(result) == "table" or type(result) == "userdata"
+        if self._options.script=="mcp-launch.ps1" and container and result.registered==true then
+          finish(true,nil); return
+        end
         local endpoint = container and result.endpoint
-        local pattern = self._options.script=="mcp-launch.ps1"
-          and "^ws://127%.0%.0%.1:(%d+)/editor/[%w_-]+$" or "^ws://127%.0%.0%.1:(%d+)$"
+        local pattern = "^ws://127%.0%.0%.1:(%d+)$"
         local port = type(endpoint) == "string" and tonumber(endpoint:match(pattern))
         local pid=container and result.pid
         local identity=self._options.script or (type(pid)=="number" and pid>0 and pid%1==0 and pid<=4294967295)
-        if port and port >= 1 and port <= 65535 and identity then finish(endpoint, nil,pid)
+        if not self._options.script and port and port >= 1 and port <= 65535 and identity then finish(endpoint, nil,pid)
         elseif container and type(result.error) == "string" and result.error ~= "" then
           finish(nil, result.error)
         else finish(nil, "自动启动返回了无效结果。请重新打开聊天窗口后重试。") end
@@ -188,7 +191,6 @@ function Instance:ensure(callback)
     local job={extensionRoot=self._options.path,resultPath=attempt.result_path}
     if registration then
       job.home=self._options.parameters.CodexHome
-      job.connectOnly=self._options.parameters.ConnectOnly==true
     else
       job.accountFile=self._options.accountFile
     end

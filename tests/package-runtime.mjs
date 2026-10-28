@@ -1,7 +1,7 @@
 // Run the installed MCP entry from an extracted package outside the repository.
 // This detects dependencies accidentally resolved from the development checkout.
 import assert from 'node:assert/strict';
-import { readFile, realpath } from 'node:fs/promises';
+import { readFile, realpath, access } from 'node:fs/promises';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -14,14 +14,15 @@ const transport=new StdioClientTransport({command:process.execPath,
 let descriptor;
 try {
   await client.connect(transport);
+  const listed=await client.listTools();
+  assert.deepEqual(listed.tools.map(tool=>tool.name),['list_sprites','view_sprite','inspect_sprite','read_pixels','switch_sprite','execute_lua','export_sprite']);
+  await assert.rejects(access(path.join(home,'.aseprite-chat/mcp-bridge.json')), {code:'ENOENT'});
+  const offline=await client.callTool({name:'view_sprite',arguments:{}});
   descriptor=JSON.parse(await readFile(path.join(home,'.aseprite-chat/mcp-bridge.json'),'utf8'));
   assert.equal(descriptor.home,await realpath(home));
   assert.equal(descriptor.extensionRoot,await realpath(runtime));
-  const listed=await client.listTools();
-  assert.deepEqual(listed.tools.map(tool=>tool.name),['list_sprites','view_sprite','inspect_sprite','read_pixels','switch_sprite','execute_lua','export_sprite']);
-  const offline=await client.callTool({name:'view_sprite',arguments:{}});
   assert.equal(offline.isError,true);
-  assert.match(offline.content[0].text,/Open Aseprite MCP/);
+  assert.match(offline.content[0].text,/Aseprite MCP/);
   console.log('PASS isolated packaged MCP runtime initializes and lists all seven focused tools');
   const startup=await import(pathToFileURL(path.join(runtime,'scripts/start-chat.mjs')).href);
   assert.equal(typeof startup.startChat,'function');

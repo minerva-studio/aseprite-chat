@@ -4,7 +4,20 @@ local passed=0
 local function scenario(name,body)
   local h={sockets={},launchers={},dialogs={},timers={},owned={}}
   local real_dofile=dofile
+  local descriptorPath="C:\\selected-home\\.aseprite-chat\\mcp-bridge.json"
+  local native_io=io
   local env=setmetatable({
+    app=setmetatable({fs=setmetatable({isFile=function(path)
+      if path:gsub("/","\\")==descriptorPath then return h.descriptor~=nil end
+      return app.fs.isFile(path)
+    end},{__index=app.fs})},{__index=app}),
+    io=setmetatable({open=function(path,mode)
+      if path:gsub("/","\\")==descriptorPath then
+        if h.onread then h.onread() end
+        return {read=function() return h.descriptor end,close=function() return true end}
+      end
+      return native_io.open(path,mode)
+    end},{__index=io}),
     -- Registration scenarios retain the Windows contract; POSIX is tested in linux.lua.
     package={config="\\"},
     Timer=function(spec)
@@ -12,8 +25,9 @@ local function scenario(name,body)
       h.timers[#h.timers+1]=timer; return timer
     end,
     WebSocket=function(spec)
+      if h.onsocket then h.onsocket() end
       local socket={spec=spec,sent={}}
-      function socket:connect() end
+      function socket:connect() self.started=true end
       function socket:close() self.closed=true end
       function socket:sendText(text) self.sent[#self.sent+1]=json.decode(text); return true end
       h.sockets[#h.sockets+1]=socket; return socket
@@ -55,8 +69,13 @@ local function scenario(name,body)
   local m=Mcp.new{path=root,preferences={}}
   function h:connect(register)
     assert(m:start("C:\\selected-home",register==true))
-    local launcher=self.launchers[#self.launchers]
-    launcher.pending=nil; launcher.callback("ws://127.0.0.1:45123/editor/fixture-token")
+    if register then
+      local launcher=self.launchers[#self.launchers]
+      launcher.pending=nil; launcher.callback(true)
+    end
+    self.descriptor=json.encode{protocol="aseprite-chat-mcp/2",identity="fixture",home="C:\\selected-home",
+      extensionRoot=root,token=string.rep("a",64),endpoint="ws://127.0.0.1:45123/editor/"..string.rep("a",64)}
+    m.watch_timer.spec.ontick()
     self.socket=self.sockets[#self.sockets]
     self.socket.spec.onreceive(WebSocketMessageType.OPEN)
   end
@@ -78,21 +97,94 @@ local function scenario(name,body)
   assert(ok,name..": "..tostring(err)); passed=passed+1; print("PASS "..name)
 end
 
-scenario("panel uses the selected home and registration is explicit",function(m,h)
+scenario("panel enables discovery and registration never connects eagerly",function(m,h)
   m:show(); local dialog=h.dialogs[1]
   assert(dialog.data.home=="C:\\selected-home")
   assert(#h.launchers==0,"opening panel changed config")
   dialog.widgets.register.onclick()
   local options=h.launchers[1].options
   assert(options.script=="mcp-launch.ps1" and options.parameters.CodexHome=="C:\\selected-home")
-  assert(options.parameters.ConnectOnly==false)
+  assert(options.parameters.ConnectOnly==nil)
+  h.launchers[1].callback(true)
+  assert(m.watch_timer and #h.sockets==0)
   m:disconnect(); h:connect(false)
-  assert(h.launchers[#h.launchers].options.parameters.ConnectOnly)
+  assert(#h.launchers==1,"enabling discovery started a process")
 end)
 scenario("cancelled startup cannot attach a late socket",function(m,h)
   assert(m:start("C:\\selected-home",true)); local launcher=h.launchers[1]
-  m:disconnect(); launcher.callback("ws://127.0.0.1:45123/editor/late")
+  m:disconnect(); launcher.callback(true)
   assert(#h.sockets==0)
+end)
+scenario("closing the panel preserves discovery and explicit disable stops it",function(m,h)
+  assert(m:start("C:\\selected-home",false)); m:show()
+  local dialog=m.dialog; dialog:close()
+  assert(m.watch_timer and m.preferences.mcp_enabled)
+  local timer=m.watch_timer
+  m:disconnect()
+  assert(not timer.running and not m.preferences.mcp_enabled)
+  timer.spec.ontick(); assert(#h.sockets==0 and #h.launchers==0)
+end)
+scenario("discovery rejects foreign descriptors and guards permission reentry",function(m,h)
+  assert(m:start("C:\\selected-home",false))
+  local timer=m.watch_timer
+  h.descriptor=json.encode{protocol="foreign",endpoint="ws://example.com"}
+  timer.spec.ontick(); assert(#h.sockets==0)
+  h.onread=function() m:disconnect() end
+  timer.spec.ontick(); assert(not m.watch_timer and #h.sockets==0)
+end)
+scenario("canonical home descriptors are accepted through the selected alias",function(m,h)
+  assert(m:start("C:\\selected-home",false))
+  h.descriptor=json.encode{protocol="aseprite-chat-mcp/2",identity="fixture",home="C:\\canonical-home",
+    extensionRoot=root,token=string.rep("a",64),endpoint="ws://127.0.0.1:45123/editor/"..string.rep("a",64)}
+  m.watch_timer.spec.ontick()
+  assert(#h.sockets==1,"the selected home's capability was rejected by lexical path comparison")
+end)
+scenario("equivalent runtime paths connect while different tool versions are refused",function(m,h)
+  local directory=app.fs.joinPath(app.fs.tempPath,"aseprite-mcp-runtime-"..tostring(Uuid()))
+  app.fs.makeDirectory(directory)
+  local files={"package.json","tools.json","mcp.lua","executor.lua","export.lua","chat.lua","timeline.lua"}
+  local ok,err=xpcall(function()
+    for _,name in ipairs(files) do
+      local source=assert(io.open(app.fs.joinPath(root,name),"rb"))
+      local text=source:read("*a"); source:close()
+      local target=assert(io.open(app.fs.joinPath(directory,name),"wb")); target:write(text); target:close()
+    end
+    assert(m:start("C:\\selected-home",false))
+    h.descriptor=json.encode{protocol="aseprite-chat-mcp/2",identity="fixture",home="C:\\canonical-home",
+      extensionRoot=directory,token=string.rep("a",64),endpoint="ws://127.0.0.1:45123/editor/"..string.rep("a",64)}
+    m.watch_timer.spec.ontick(); assert(#h.sockets==1)
+    m:disconnect()
+    local changed=assert(io.open(app.fs.joinPath(directory,"executor.lua"),"ab")); changed:write("\n-- different runtime\n"); changed:close()
+    assert(m:start("C:\\selected-home",false))
+    m.watch_timer.spec.ontick()
+    assert(#h.sockets==1 and not m.watch_timer and m.state=="Error")
+  end,debug.traceback)
+  for _,name in ipairs(files) do os.remove(app.fs.joinPath(directory,name)) end
+  app.fs.removeDirectory(directory)
+  assert(ok,err)
+end)
+scenario("plugin shutdown preserves enablement but stops all discovery callbacks",function(m,h)
+  assert(m:start("C:\\selected-home",false)); local timer=m.watch_timer
+  m:close()
+  assert(not timer.running and not m.watch_timer and m.preferences.mcp_enabled)
+  timer.spec.ontick(); assert(#h.sockets==0)
+end)
+scenario("permission reentry disabling discovery cannot connect a late socket",function(m,h)
+  assert(m:start("C:\\selected-home",false))
+  h.descriptor=json.encode{protocol="aseprite-chat-mcp/2",identity="fixture",home="C:\\selected-home",
+    extensionRoot=root,token=string.rep("a",64),endpoint="ws://127.0.0.1:45123/editor/"..string.rep("a",64)}
+  h.onsocket=function() m:disconnect() end
+  m.watch_timer.spec.ontick()
+  assert(not h.sockets[1].started and h.sockets[1].closed,"late constructor connected after Disable")
+  assert(not m.watch_timer and not m.connection)
+end)
+scenario("result transport failure preserves automatic discovery without replay",function(m,h)
+  h:sprite(); h:connect()
+  function h.socket:sendText() return false end
+  local timer=m.watch_timer
+  h:call("lost-result","view_sprite")
+  assert(m.watch_timer==timer and m.preferences.mcp_enabled,"send failure disabled MCP permanently")
+  assert(not m.connection and not m.active and h.socket.closed)
 end)
 scenario("native reads return real previews and inspect the current context",function(m,h)
   local s=h:sprite(); h:connect()
